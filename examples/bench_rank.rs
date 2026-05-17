@@ -17,7 +17,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 use turbovec::rank_index::search_asymmetric_byte_lut;
-use turbovec::{RankIndex, RankQuantIndex, TurboQuantIndex};
+use turbovec::{BitmapIndex, RankIndex, RankQuantIndex, TurboQuantIndex};
 
 #[derive(Clone)]
 struct Config {
@@ -456,6 +456,95 @@ fn bench_rankquant_byte_lut(
     )
 }
 
+/// Bench the standalone top-bucket bitmap scan (no exact rerank).
+/// `n_top` is the bitmap's set-bit count per doc (e.g., dim/4 for the
+/// "top quarter" / b=2-equivalent operating point).
+fn bench_bitmap(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    n_top: usize,
+) -> Row {
+    let mut idx = BitmapIndex::new(cfg.dim, n_top);
+    let t0 = Instant::now();
+    idx.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = idx.bytes_per_vec();
+    let total_mib = idx.byte_size() as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = idx.search(q, cfg.k);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+        idx.search(q, cfg.k).indices
+    });
+    let recall = recall_at_k(&pred, truth, cfg.k);
+    finalise_row(
+        format!("Bitmap n_top={n_top}"),
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
+    )
+}
+
+/// Two-stage: bitmap candidate generator (top M by overlap) then
+/// exact RankQuant b=`bits` asymmetric rerank on the M candidates.
+/// One row per (bits, M) pair.
+fn bench_two_stage(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    bits: u8,
+    m: usize,
+    n_top: usize,
+) -> Row {
+    let mut bitmap = BitmapIndex::new(cfg.dim, n_top);
+    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let t0 = Instant::now();
+    bitmap.add(corpus);
+    rq.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = bitmap.bytes_per_vec() + rq.bytes_per_vec();
+    let total_mib = (bitmap.byte_size() + rq.byte_size()) as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+
+    let two_stage = |q: &[f32]| -> Vec<i64> {
+        // Stage 1: bitmap → top-M candidate indices.
+        let cands = bitmap.top_m_candidates(q, m);
+        // Stage 2: exact RankQuant scoring restricted to the candidate
+        // subset — no per-query index rebuild, the existing rq.packed
+        // buffer is reused; the helper gathers candidate bytes into a
+        // small contiguous scan buffer and runs the AVX-512 kernel.
+        let (_scores, global) = rq.search_asymmetric_subset(q, &cands, cfg.k);
+        global
+    };
+
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = two_stage(q);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| two_stage(q));
+    let recall = recall_at_k(&pred, truth, cfg.k);
+    finalise_row(
+        format!("TwoStage b={bits} M={m}"),
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
+    )
+}
+
 fn bench_rankquant(
     corpus: &[f32],
     queries: &[f32],
@@ -641,6 +730,14 @@ fn main() {
     all_rows.push(bench_rankquant_byte_lut(&corpus, &queries, &truth, &cfg, 4));
     eprintln!("benching RankQuant b=1 ...");
     all_rows.extend(bench_rankquant(&corpus, &queries, &truth, &cfg, 1));
+
+    let n_top = cfg.dim / 4;
+    eprintln!("benching Bitmap (n_top={n_top}, b=2-equivalent) ...");
+    all_rows.push(bench_bitmap(&corpus, &queries, &truth, &cfg, n_top));
+    for &m in &[100usize, 500, 1000, 5000] {
+        eprintln!("benching TwoStage b=2 M={m} ...");
+        all_rows.push(bench_two_stage(&corpus, &queries, &truth, &cfg, 2, m, n_top));
+    }
 
     println!();
     print_table(&all_rows);
