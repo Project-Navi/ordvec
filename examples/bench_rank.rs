@@ -16,6 +16,7 @@
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
+use turbovec::rank_index::search_asymmetric_byte_lut;
 use turbovec::{RankIndex, RankQuantIndex, TurboQuantIndex};
 
 #[derive(Clone)]
@@ -257,6 +258,8 @@ struct Row {
     gib_per_sec: f64,
     /// Per-coordinate p50 time in nanoseconds.
     ns_per_dim: f64,
+    /// Effective single-query throughput: n / p50.
+    docs_per_sec: f64,
 }
 
 fn finalise_row(
@@ -282,6 +285,11 @@ fn finalise_row(
     } else {
         f64::NAN
     };
+    let docs_per_sec = if p50_s > 0.0 {
+        (n as f64) / p50_s
+    } else {
+        f64::NAN
+    };
     Row {
         name,
         bytes_per_vec,
@@ -292,6 +300,7 @@ fn finalise_row(
         recall_at_10_vs_fp32: recall,
         gib_per_sec,
         ns_per_dim,
+        docs_per_sec,
     }
 }
 
@@ -409,6 +418,44 @@ fn bench_rank_full(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config)
     rows
 }
 
+/// Bench the byte-LUT alternative scoring path for the same
+/// RankQuantIndex (asymmetric only, bits in {2, 4}). Returns one
+/// row labelled `RankQuant b={bits} asym byte-LUT`.
+fn bench_rankquant_byte_lut(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    bits: u8,
+) -> Row {
+    let mut idx = RankQuantIndex::new(cfg.dim, bits);
+    let t0 = Instant::now();
+    idx.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = idx.bytes_per_vec();
+    let total_mib = idx.byte_size() as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = search_asymmetric_byte_lut(&idx, q, cfg.k);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+        search_asymmetric_byte_lut(&idx, q, cfg.k).indices
+    });
+    let recall = recall_at_k(&pred, truth, cfg.k);
+    finalise_row(
+        format!("RankQuant b={bits} asym byte-LUT"),
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
+    )
+}
+
 fn bench_rankquant(
     corpus: &[f32],
     queries: &[f32],
@@ -458,13 +505,13 @@ fn bench_rankquant(
 
 fn print_table(rows: &[Row]) {
     println!(
-        "{:<22} {:>10} {:>10} {:>13} {:>9} {:>9} {:>9} {:>9} {:>8}",
-        "mode", "bytes/vec", "total MiB", "encode v/s", "p50 ms", "p99 ms", "GiB/s", "ns/dim", "R@10",
+        "{:<26} {:>10} {:>10} {:>13} {:>9} {:>9} {:>8} {:>8} {:>14} {:>8}",
+        "mode", "bytes/vec", "total MiB", "encode v/s", "p50 ms", "p99 ms", "GiB/s", "ns/dim", "Mdocs/s scan", "R@10",
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", "-".repeat(126));
     for r in rows {
         println!(
-            "{:<22} {:>10} {:>10.1} {:>13.0} {:>9.3} {:>9.3} {:>9.2} {:>9.3} {:>8.4}",
+            "{:<26} {:>10} {:>10.1} {:>13.0} {:>9.3} {:>9.3} {:>8.2} {:>8.3} {:>14.2} {:>8.4}",
             r.name,
             r.bytes_per_vec,
             r.total_mib,
@@ -473,6 +520,7 @@ fn print_table(rows: &[Row]) {
             r.p99_ms,
             r.gib_per_sec,
             r.ns_per_dim,
+            r.docs_per_sec / 1_000_000.0,
             r.recall_at_10_vs_fp32,
         );
     }
@@ -490,8 +538,8 @@ fn print_json(rows: &[Row], cfg: &Config) {
             print!(",");
         }
         print!(
-            "{{\"name\":\"{}\",\"bytes_per_vec\":{},\"total_mib\":{:.3},\"encode_vps\":{:.1},\"p50_ms\":{:.4},\"p99_ms\":{:.4},\"gib_per_sec\":{:.3},\"ns_per_dim\":{:.4},\"recall_at_10_vs_fp32\":{:.4}}}",
-            r.name, r.bytes_per_vec, r.total_mib, r.encode_vecs_per_sec, r.p50_ms, r.p99_ms, r.gib_per_sec, r.ns_per_dim, r.recall_at_10_vs_fp32,
+            "{{\"name\":\"{}\",\"bytes_per_vec\":{},\"total_mib\":{:.3},\"encode_vps\":{:.1},\"p50_ms\":{:.4},\"p99_ms\":{:.4},\"gib_per_sec\":{:.3},\"ns_per_dim\":{:.4},\"docs_per_sec\":{:.1},\"recall_at_10_vs_fp32\":{:.4}}}",
+            r.name, r.bytes_per_vec, r.total_mib, r.encode_vecs_per_sec, r.p50_ms, r.p99_ms, r.gib_per_sec, r.ns_per_dim, r.docs_per_sec, r.recall_at_10_vs_fp32,
         );
     }
     println!("]}}");
@@ -563,8 +611,12 @@ fn main() {
 
     eprintln!("benching RankQuant b=2 ...");
     all_rows.extend(bench_rankquant(&corpus, &queries, &truth, &cfg, 2));
+    eprintln!("benching RankQuant b=2 byte-LUT ...");
+    all_rows.push(bench_rankquant_byte_lut(&corpus, &queries, &truth, &cfg, 2));
     eprintln!("benching RankQuant b=4 ...");
     all_rows.extend(bench_rankquant(&corpus, &queries, &truth, &cfg, 4));
+    eprintln!("benching RankQuant b=4 byte-LUT ...");
+    all_rows.push(bench_rankquant_byte_lut(&corpus, &queries, &truth, &cfg, 4));
     eprintln!("benching RankQuant b=1 ...");
     all_rows.extend(bench_rankquant(&corpus, &queries, &truth, &cfg, 1));
 
