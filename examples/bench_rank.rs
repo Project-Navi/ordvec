@@ -35,6 +35,13 @@ struct Config {
     /// Optional path to a NumPy .npy file holding queries as
     /// `(n_q, dim)` little-endian float32.
     queries_npy: Option<String>,
+    /// Optional path. When set, every bench function appends one JSONL
+    /// row per query with its top-K doc ids, so downstream tooling can
+    /// compute R@K for K' <= K without re-running the bench.
+    /// Schema: {"qid_idx": int, "mode": str, "k": int, "doc_ids": [int]}
+    /// where doc_ids of length k; -1 entries are sentinels for modes
+    /// that cannot return k candidates (e.g. two-stage with M < k).
+    dump_top_k_jsonl: Option<String>,
 }
 
 fn parse_args() -> Config {
@@ -48,6 +55,7 @@ fn parse_args() -> Config {
         encode_threads_note: true,
         corpus_npy: None,
         queries_npy: None,
+        dump_top_k_jsonl: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -60,10 +68,45 @@ fn parse_args() -> Config {
             "--latent" => cfg.latent_dim = args.next().unwrap().parse().unwrap(),
             "--corpus-npy" => cfg.corpus_npy = Some(args.next().unwrap()),
             "--queries-npy" => cfg.queries_npy = Some(args.next().unwrap()),
+            "--dump-top-k-jsonl" => cfg.dump_top_k_jsonl = Some(args.next().unwrap()),
             other => panic!("unknown arg {other}"),
         }
     }
     cfg
+}
+
+/// Append per-query top-K JSONL rows to `path`. Each line is one query's
+/// top-K for a single mode. `pred` must be a flat `n_queries * k` slice
+/// of doc indices; modes that cannot return k candidates should pad with
+/// -1 sentinels before calling.
+fn dump_pred_jsonl(path: &str, mode: &str, n_queries: usize, k: usize, pred: &[i64]) {
+    use std::fs::OpenOptions;
+    use std::io::{BufWriter, Write};
+    debug_assert_eq!(pred.len(), n_queries * k, "pred buffer length must equal n_queries * k");
+    let f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("dump_pred_jsonl: open");
+    let mut w = BufWriter::new(f);
+    for qi in 0..n_queries {
+        let row = &pred[qi * k..(qi + 1) * k];
+        write!(&mut w, r#"{{"qid_idx":{qi},"mode":"{mode}","k":{k},"doc_ids":["#).unwrap();
+        for (i, &di) in row.iter().enumerate() {
+            if i > 0 {
+                w.write_all(b",").unwrap();
+            }
+            write!(&mut w, "{di}").unwrap();
+        }
+        writeln!(&mut w, "]}}").unwrap();
+    }
+}
+
+/// Conditional wrapper: dumps pred only when `cfg.dump_top_k_jsonl` is set.
+fn maybe_dump_pred(cfg: &Config, mode: &str, pred: &[i64]) {
+    if let Some(ref path) = cfg.dump_top_k_jsonl {
+        dump_pred_jsonl(path, mode, cfg.n_queries, cfg.k, pred);
+    }
 }
 
 /// Minimal NumPy v1 .npy reader for 2-D little-endian float32 arrays.
@@ -364,8 +407,10 @@ fn bench_turboquant(
         idx.search(q, cfg.k).indices
     });
     let recall = recall_at_k(&pred, truth, cfg.k);
+    let name = format!("TurboQuant b={bits}");
+    maybe_dump_pred(cfg, &name, &pred);
     finalise_row(
-        format!("TurboQuant b={bits}"),
+        name,
         bytes_per_vec,
         total_mib,
         encode_vps,
@@ -403,6 +448,7 @@ fn bench_rank_full(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config)
             }
         });
         let recall = recall_at_k(&pred, truth, cfg.k);
+        maybe_dump_pred(cfg, label, &pred);
         rows.push(finalise_row(
             label.to_string(),
             bytes_per_vec,
@@ -443,8 +489,10 @@ fn bench_rankquant_byte_lut(
         search_asymmetric_byte_lut(&idx, q, cfg.k).indices
     });
     let recall = recall_at_k(&pred, truth, cfg.k);
+    let name = format!("RankQuant b={bits} asym byte-LUT");
+    maybe_dump_pred(cfg, &name, &pred);
     finalise_row(
-        format!("RankQuant b={bits} asym byte-LUT"),
+        name,
         bytes_per_vec,
         total_mib,
         encode_vps,
@@ -481,8 +529,10 @@ fn bench_bitmap(
         idx.search(q, cfg.k).indices
     });
     let recall = recall_at_k(&pred, truth, cfg.k);
+    let name = format!("Bitmap n_top={n_top}");
+    maybe_dump_pred(cfg, &name, &pred);
     finalise_row(
-        format!("Bitmap n_top={n_top}"),
+        name,
         bytes_per_vec,
         total_mib,
         encode_vps,
@@ -525,6 +575,13 @@ fn bench_two_stage(
     let total_mib = (bitmap.byte_size() + rq.byte_size()) as f64 / 1024.0 / 1024.0;
     let encode_vps = cfg.n as f64 / encode_secs;
 
+    // When the caller asks for more results than the bitmap stage can
+    // produce (cfg.k > m), the rerank only returns m results — pad the
+    // remainder with -1 sentinels so downstream R@K computation sees a
+    // uniform-length pred buffer. -1 never matches a real doc id, so
+    // recall_at_k is unaffected by the padding entries (they correctly
+    // surface the candidate-set ceiling at K > M).
+    let effective_k = cfg.k.min(m);
     let two_stage = |q: &[f32]| -> Vec<i64> {
         // Stage 1: bitmap → top-M candidate indices.
         let cands = bitmap.top_m_candidates(q, m);
@@ -532,7 +589,8 @@ fn bench_two_stage(
         // subset — no per-query index rebuild, the existing rq.packed
         // buffer is reused; the helper gathers candidate bytes into a
         // small contiguous scan buffer and runs the AVX-512 kernel.
-        let (_scores, global) = rq.search_asymmetric_subset(q, &cands, cfg.k);
+        let (_scores, mut global) = rq.search_asymmetric_subset(q, &cands, effective_k);
+        global.resize(cfg.k, -1);
         global
     };
 
@@ -566,6 +624,10 @@ fn bench_two_stage(
     } else {
         String::new()
     };
+    // Dump uses the prefix-stable name (no CR suffix) so downstream
+    // tooling can join across runs where CR varies by encoder/corpus.
+    let dump_name = format!("TwoStage b={bits} M={m}");
+    maybe_dump_pred(cfg, &dump_name, &pred);
     finalise_row(
         format!("TwoStage b={bits} M={m}{cand_recall_label}"),
         bytes_per_vec,
@@ -616,10 +678,13 @@ fn bench_multi_bucket_two_stage(
     }
     let w_ref = w.as_slice();
 
+    // Same K > M sentinel pattern as bench_two_stage.
+    let effective_k = cfg.k.min(m);
     let two_stage = |q: &[f32]| -> Vec<i64> {
         let q_bitmaps = mb.query_bitmaps_from_ranks(q);
         let cands = mb.top_m_bilinear(&q_bitmaps, w_ref, m);
-        let (_, global) = rq.search_asymmetric_subset(q, &cands, cfg.k);
+        let (_, mut global) = rq.search_asymmetric_subset(q, &cands, effective_k);
+        global.resize(cfg.k, -1);
         global
     };
 
@@ -651,6 +716,8 @@ fn bench_multi_bucket_two_stage(
     } else {
         String::new()
     };
+    let dump_name = format!("MB b={bits} {weight_label} M={m}");
+    maybe_dump_pred(cfg, &dump_name, &pred);
     finalise_row(
         format!("MB b={bits} {weight_label} M={m}{cand_recall_label}"),
         bytes_per_vec,
@@ -696,8 +763,10 @@ fn bench_rankquant(
             }
         });
         let recall = recall_at_k(&pred, truth, cfg.k);
+        let name = format!("RankQuant b={bits} {label_suffix}");
+        maybe_dump_pred(cfg, &name, &pred);
         rows.push(finalise_row(
-            format!("RankQuant b={bits} {label_suffix}"),
+            name,
             bytes_per_vec,
             total_mib,
             encode_vps,
