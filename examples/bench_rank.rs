@@ -17,7 +17,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 use turbovec::rank_index::search_asymmetric_byte_lut;
-use turbovec::{BitmapIndex, RankIndex, RankQuantIndex, TurboQuantIndex};
+use turbovec::{BitmapIndex, MultiBucketBitmapIndex, RankIndex, RankQuantIndex, TurboQuantIndex};
 
 #[derive(Clone)]
 struct Config {
@@ -579,6 +579,91 @@ fn bench_two_stage(
     )
 }
 
+/// Multi-bucket bitmap as a candidate generator: scores all docs by
+/// the bilinear bucket-overlap with `weights`, takes top-M, then
+/// reruns the exact RankQuant b=`bits` asymmetric kernel on those M.
+/// Reports candidate-recall against the exact RankQuant top-k baseline.
+fn bench_multi_bucket_two_stage(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    bits: u8,
+    m: usize,
+    weight_label: &str,
+    weight_filter: impl Fn(usize, usize, usize) -> bool + Sync + Send + Copy,
+    exact_rq_top: Option<&[i64]>,
+) -> Row {
+    let mut mb = MultiBucketBitmapIndex::new(cfg.dim, bits);
+    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let t0 = Instant::now();
+    mb.add(corpus);
+    rq.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = mb.bytes_per_vec() + rq.bytes_per_vec();
+    let total_mib = (mb.byte_size() + rq.byte_size()) as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+
+    let nb = mb.n_buckets();
+    let c = (nb as f32 - 1.0) / 2.0;
+    let mut w = vec![0.0f32; nb * nb];
+    for a in 0..nb {
+        for b in 0..nb {
+            if weight_filter(a, b, nb) {
+                w[a * nb + b] = (a as f32 - c) * (b as f32 - c);
+            }
+        }
+    }
+    let w_ref = w.as_slice();
+
+    let two_stage = |q: &[f32]| -> Vec<i64> {
+        let q_bitmaps = mb.query_bitmaps_from_ranks(q);
+        let cands = mb.top_m_bilinear(&q_bitmaps, w_ref, m);
+        let (_, global) = rq.search_asymmetric_subset(q, &cands, cfg.k);
+        global
+    };
+
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = two_stage(q);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| two_stage(q));
+    let recall = recall_at_k(&pred, truth, cfg.k);
+
+    let cand_recall_label = if let Some(exact) = exact_rq_top {
+        use std::collections::HashSet;
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for qi in 0..cfg.n_queries {
+            let q = &queries[qi * cfg.dim..(qi + 1) * cfg.dim];
+            let q_bitmaps = mb.query_bitmaps_from_ranks(q);
+            let cands = mb.top_m_bilinear(&q_bitmaps, w_ref, m);
+            let cand_set: HashSet<i64> = cands.iter().map(|&i| i as i64).collect();
+            let exact_top: &[i64] = &exact[qi * cfg.k..(qi + 1) * cfg.k];
+            for &di in exact_top {
+                if di >= 0 && cand_set.contains(&di) {
+                    hits += 1;
+                }
+                total += 1;
+            }
+        }
+        let cr = hits as f32 / total.max(1) as f32;
+        format!(" CR={cr:.3}")
+    } else {
+        String::new()
+    };
+    finalise_row(
+        format!("MB b={bits} {weight_label} M={m}{cand_recall_label}"),
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
+    )
+}
+
 fn bench_rankquant(
     corpus: &[f32],
     queries: &[f32],
@@ -791,6 +876,70 @@ fn main() {
             n_top,
             Some(&rq_top),
         ));
+    }
+
+    // Multi-bucket bitmap b=4 probe: tests the bilinear bucket-overlap
+    // decomposition empirically as a candidate generator. Outer-product
+    // weights make the score algebraically equal to symmetric RankQuant
+    // (verified by tests/rank_index.rs::multi_bucket_bilinear_*).
+    eprintln!("computing exact RankQuant b=4 top-k for candidate-recall metric ...");
+    let mut rq_b4_exact = RankQuantIndex::new(cfg.dim, 4);
+    rq_b4_exact.add(&corpus);
+    let rq_b4_top: Vec<i64> =
+        collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+            rq_b4_exact.search_asymmetric(q, cfg.k).indices
+        });
+
+    // Three weight schemes: full 16x16, diagonal-only, top-heavy
+    // (top 4 buckets only, 4x4 = 16 pair interactions).
+    let weight_filters: &[(&str, &(dyn Fn(usize, usize, usize) -> bool + Sync))] = &[
+        ("full16x16", &(|_a: usize, _b: usize, _nb: usize| true)),
+        ("diag", &(|a: usize, b: usize, _nb: usize| a == b)),
+        ("top4", &(|a: usize, b: usize, nb: usize| a + 4 >= nb && b + 4 >= nb)),
+    ];
+    for &m in &[100usize, 500, 1000] {
+        for &(label, _) in weight_filters {
+            eprintln!("benching MB b=4 {label} M={m} ...");
+            // Re-construct the closure inline because the trait-object
+            // form above is not Copy.
+            let row = match label {
+                "full16x16" => bench_multi_bucket_two_stage(
+                    &corpus,
+                    &queries,
+                    &truth,
+                    &cfg,
+                    4,
+                    m,
+                    label,
+                    |_a, _b, _nb| true,
+                    Some(&rq_b4_top),
+                ),
+                "diag" => bench_multi_bucket_two_stage(
+                    &corpus,
+                    &queries,
+                    &truth,
+                    &cfg,
+                    4,
+                    m,
+                    label,
+                    |a, b, _nb| a == b,
+                    Some(&rq_b4_top),
+                ),
+                "top4" => bench_multi_bucket_two_stage(
+                    &corpus,
+                    &queries,
+                    &truth,
+                    &cfg,
+                    4,
+                    m,
+                    label,
+                    |a, b, nb| a + 4 >= nb && b + 4 >= nb,
+                    Some(&rq_b4_top),
+                ),
+                _ => unreachable!(),
+            };
+            all_rows.push(row);
+        }
     }
 
     println!();
