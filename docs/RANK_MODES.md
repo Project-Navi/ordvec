@@ -1,23 +1,63 @@
 # Rank-cosine index modes for turbovec
 
 **Real-data headline (Harrier arXiv embeddings, 207k docs, paraphrase
-queries):** at matched 256 B/vec, RankQuant-2 asymmetric beats
-TurboQuant-2 by +3.3 R@10 (0.764 vs 0.731); at matched 512 B/vec,
-TurboQuant-4 beats RankQuant-4 asymmetric by +5.2 R@10 (0.895 vs
-0.843). Encode is 28-59× faster for RankQuant across both. With an
-AVX2 inline-expand kernel for the asymmetric scan, query latency is
-**within 2.8-3.4× of hand-tuned TurboQuant** (10.5 ms vs 3.1 ms at
-2-bit, 16.4 ms vs 5.8 ms at 4-bit on 207k docs).
+queries, Ryzen 9 9950X):**
 
-> Branch: `nelson/rank-modes`. Status: v1 prototype, scalar kernels.
-> Numbers below are head-to-head on the paper's exact arXiv corpus
-> (207,695 Harrier-OSS-v1-0.6B embeddings, 200 paraphrase queries)
-> plus a structured synthetic stress-test. The 2-bit point is the
-> operating regime where RankQuant is competitive on quality and
-> dominates on build cost; at 4-bit TurboQuant's cosine optimisation
-> wins on recall. Query latency follow-up (SIMD scan + 8-bit
-> calibrated LUT) is well-scoped against the existing TurboQuant
-> kernels.
+At matched 256 B/vec, RankQuant-2 asymmetric beats TurboQuant-2 by
+**+3.3 R@10** (0.764 vs 0.731). At matched 512 B/vec, TurboQuant-4
+beats RankQuant-4 asymmetric by **+5.2 R@10** (0.895 vs 0.843). Encode
+is **26-60× faster** for RankQuant across both.
+
+After AVX-512 lowering with centre-drop, query latency on the same
+corpus is **within 1.5× of hand-tuned TurboQuant at 4-bit** and
+**within 2.5× at 2-bit**:
+
+| bits | TurboQuant p50 | RankQuant AVX-512 p50 | gap  | Mdocs/s scan |
+|------|---------------:|----------------------:|-----:|-------------:|
+| 2    | 3.17 ms        | **7.99 ms**           | 2.5× | 26.0         |
+| 4    | 5.84 ms        | **9.01 ms**           | 1.5× | 23.1         |
+
+Optimisation chain (b=2 asym p50 on Harrier 207k):
+
+```
+scalar LUT                78.9 ms
++ AVX2 inline-expand      10.2 ms   (7.7× lift; replaces per-coord LUT with broadcast-shift-mask-cvt-FMA)
++ centre-drop              9.19 ms  (1.1× lift; raw codes in hot loop, constant added at finalize)
++ AVX-512                  7.99 ms  (1.15× lift; 16-wide FMA, single __m512 per chunk)
+```
+
+Centre-drop math: because centred bucket scores differ from raw-code
+scores only by a query-constant offset (under the
+`dim % (1 << bits) == 0` constraint that fixes every doc's bucket
+histogram), the asymmetric kernel can score raw bucket IDs directly
+for ranking. The offset is re-applied to the top-k scores at
+finalize so the displayed cosines stay exact.
+
+> Branch: `nelson/rank-modes`. Status: v1.1 prototype, AVX-512 scan
+> for the asymmetric path with a scalar LUT fallback. Numbers below
+> are head-to-head on the paper's exact arXiv corpus (207,695
+> Harrier-OSS-v1-0.6B embeddings, 200 paraphrase queries) plus a
+> structured synthetic stress-test. The 2-bit point is the operating
+> regime where RankQuant beats TurboQuant on recall and dominates on
+> build cost; at 4-bit TurboQuant's cosine optimisation wins on recall
+> but RankQuant's query latency is within 1.5×.
+
+## Bench environment
+
+| field | value |
+|---|---|
+| CPU | AMD Ryzen 9 9950X (Zen 5, 16C/32T, full 512-bit AVX-512 datapath) |
+| RAM | 128 GB Kingston Fury Beast DDR5-4000 CL29 × 4 DIMMs (capacity-optimised) |
+| OS | CachyOS Linux, kernel 7.0.6 |
+| Compiler | rustc 1.94.1 (LLVM 21.1.8) |
+| Build | `cargo build --release` with `lto = true, codegen-units = 1, opt-level = 3` |
+| Governor | `performance` |
+| THP | `always` |
+| Detected SIMD | sse4.2, avx2, fma, avx512f, avx512bw, avx512vl |
+| Latency mode | single-thread per query (rayon parallelises *across* queries; per-query rows measure scan only) |
+
+A two-DIMM DDR5-6000-class system may show shorter absolute latency;
+the relative gap to TurboQuant is the load-bearing comparison.
 
 This branch adds two new index types alongside `TurboQuantIndex`:
 
@@ -53,27 +93,26 @@ family). The same artefacts that produced the paper's main-corpus
 results. 200 queries × top-10. Ground truth: FP32 brute-force cosine.
 32-core Linux x86_64, release build.
 
-Results below are with AVX2+FMA asymmetric scan enabled (auto-detected
-at runtime on x86_64). Scalar-fallback numbers are in parentheses
-where they differ.
+Results below are with the AVX-512 asymmetric scan enabled (auto-detected
+at runtime; falls through to AVX2 then to a scalar LUT scan). Symmetric
+paths and the B=1 asymmetric path remain on the scalar LUT scan.
 
-| mode               | bytes/vec | total MiB | encode v/s  | p50 ms | p99 ms | GiB/s | ns/dim | R@10   |
-|--------------------|-----------|-----------|-------------|--------|--------|-------|--------|--------|
-| TurboQuant b=2     | 256       | 50.7      | 47,847      | 3.11   | 4.08   | 15.90 | 0.015  | **0.7305** |
-| TurboQuant b=4     | 512       | 101.4     | 20,510      | 5.78   | 6.17   | 17.12 | 0.027  | **0.8945** |
-| RankIndex sym      | 2048      | 405.7     | 1,059,828   | 105.5  | 110.8  | 3.76  | 0.496  | 0.8015 |
-| RankIndex asym     | 2048      | 405.7     | 1,059,828   | 112.3  | 114.7  | 3.53  | 0.528  | 0.8475 |
-| RankQuant b=2 sym  | 256       | 50.7      | 1,255,076   | 78.3   | 79.9   | 0.63  | 0.368  | 0.7130 |
-| **RankQuant b=2 asym (AVX2)** | **256** | **50.7** | **1,255,076** | **10.5** | **11.0** | **4.73** | **0.049** | **0.7635** |
-| RankQuant b=4 sym  | 512       | 101.4     | 1,163,698   | 80.3   | 81.8   | 1.23  | 0.377  | 0.7985 |
-| **RankQuant b=4 asym (AVX2)** | **512** | **101.4** | **1,163,698** | **16.4** | **17.0** | **6.05** | **0.077** | **0.8430** |
-| RankQuant b=1 asym | 128       | 25.4      | 1,245,716   | 75.9   | 77.6   | 0.33  | 0.357  | 0.6405 |
+| mode               | bytes/vec | total MiB | encode v/s  | p50 ms | p99 ms | GiB/s | ns/dim | Mdocs/s | R@10   |
+|--------------------|-----------|-----------|-------------|--------|--------|------:|-------:|--------:|--------|
+| TurboQuant b=2     | 256       | 50.7      | 47,117      | 3.17   | 3.52   | 15.64 | 0.015  |   65.6  | **0.7305** |
+| TurboQuant b=4     | 512       | 101.4     | 19,531      | 5.84   | 6.24   | 16.96 | 0.027  |   35.6  | **0.8945** |
+| RankIndex sym      | 2048      | 405.7     | 1,039,409   | 104.1  | 105.6  | 3.81  | 0.489  |    2.0  | 0.8015 |
+| RankIndex asym     | 2048      | 405.7     | 1,039,409   | 112.4  | 115.0  | 3.52  | 0.529  |    1.8  | 0.8475 |
+| RankQuant b=2 sym  | 256       | 50.7      | 1,225,501   | 78.8   | 79.9   | 0.63  | 0.370  |    2.6  | 0.7130 |
+| **RankQuant b=2 asym (AVX-512)** | **256** | **50.7** | **1,225,501** | **7.99** | **8.39** | **6.20** | **0.038** | **26.0** | **0.7635** |
+| RankQuant b=4 sym  | 512       | 101.4     | 1,183,268   | 77.2   | 78.3   | 1.28  | 0.363  |    2.7  | 0.7985 |
+| **RankQuant b=4 asym (AVX-512)** | **512** | **101.4** | **1,183,268** | **9.01** | **9.69** | **10.99** | **0.042** | **23.1** | **0.8430** |
+| RankQuant b=1 asym | 128       | 25.4      | 1,282,106   | 75.7   | 77.4   | 0.33  | 0.356  |    2.7  | 0.6405 |
 
-AVX2 lift, asymmetric path: **b=2 7.5× speedup** (78.9 → 10.5 ms),
-**b=4 4.7× speedup** (77.4 → 16.4 ms). The kernel does not use a
-per-coord LUT — `bucket_centre(b) = b - (2^B - 1) / 2` is one SIMD
-subtraction, so the inner loop is broadcast → variable-shift → mask →
-cvt → sub → FMA with no LUT memory traffic.
+The kernel does not use a per-coord LUT — `bucket_centre(b) = b - (2^B - 1) / 2`
+is one SIMD subtraction (folded out to the per-query offset via
+centre-drop), so the inner loop is broadcast → variable-shift → mask
+→ cvt → FMA with no LUT memory traffic.
 
 ### Reading the real-data table
 
@@ -215,59 +254,54 @@ synthetic artefact.
 
 ## Where TurboQuant still wins
 
-### Query latency: ~3× faster on real data (down from 13-24×)
+### Query latency: 1.5-2.5× faster after AVX-512 lowering
 
-After AVX2 lowering on the asymmetric path:
+| corpus  | bytes/vec | TurboQuant p50 | RankQuant AVX-512 p50 | gap  | TQ GiB/s | Rank GiB/s |
+|---------|-----------|----------------|------------------------|------|---------:|-----------:|
+| Harrier | 256       | 3.17 ms        | 7.99 ms                | 2.5× |    15.64 |       6.20 |
+| Harrier | 512       | 5.84 ms        | 9.01 ms                | 1.5× |    16.96 |      10.99 |
 
-| corpus  | bytes/vec | TurboQuant p50 | RankQuant asym p50 | gap   | TQ GiB/s | Rank GiB/s |
-|---------|-----------|----------------|---------------------|-------|---------:|-----------:|
-| Harrier | 256       | 3.11 ms        | 10.5 ms             | 3.4×  |    15.90 |       4.73 |
-| Harrier | 512       | 5.78 ms        | 16.4 ms             | 2.8×  |    17.12 |       6.05 |
+**The AVX-512 kernel is an exact packed scan, not an ANN
+approximation.** It returns identical top-k to the scalar RankQuant
+scorer and agrees within 1e-4 on scores (verified by
+`tests/rank_index.rs::rankquant_asymmetric_matches_reference_b{2,4}`).
+Exact scan within 1.5× of a tuned quantized baseline is the systems
+result this branch was aiming for.
 
-TurboQuant ships architecture-specific kernels (NEON for ARM,
-FAISS-style perm0-interleaved AVX2 for x86) with calibrated 8-bit
-LUTs and SIMD-blocked layout (32 docs at a time). The RankQuant
-AVX2 kernel processes one doc at a time and uses f32 accumulators
-directly — simpler, well within an order of magnitude of TurboQuant's
-hand-tuned path.
+Byte-LUT alternative (head-to-head on the same corpus):
 
-To close the remaining 3× to parity / dominance, three avenues
-remain (none of them research questions):
+| bytes/vec | inline-expand AVX-512 | scalar byte-LUT | ratio |
+|-----------|-----------------------:|----------------:|------:|
+| 256       | 7.99 ms                | 19.5 ms         | 2.4×  |
+| 512       | 9.01 ms                | 38.2 ms         | 4.2×  |
 
-1. **Byte-LUT scoring** — precompute `lut4[g][byte] = sum of 4
-   per-coord contributions` (256 KiB per query LUT for D=1024, B=2),
-   reduce inner loop to `sum_g lut4[g][doc[g]]`. May be
-   bandwidth-bound but trivially vectorisable.
-2. **AVX-512 path** — Zen 5 (Ryzen 9 9950X is the target box) has a
-   full 512-bit datapath; the kernel scales naturally to 16-wide
-   FMA. Gated on profiling actually showing the bottleneck is in
-   arithmetic, not memory.
-3. **SIMD-blocked layout** — process 8-32 docs in parallel per inner
-   iteration, mirroring `pack.rs::repack`. Improves memory access
-   pattern. Likely the highest single-step win.
+Same recall, much slower path. Streaming SIMD math beats query-LUT
+cache traffic on Zen 5. The byte-LUT scorer stays in the codebase as
+a labelled reference path (`turbovec::rank_index::search_asymmetric_byte_lut`)
+but is not the production scoring route.
+
+### Remaining headroom
+
+The b=2 path is still decode-bound (6.2 GiB/s effective vs 16+ GiB/s
+the platform demonstrably delivers via TurboQuant). Closing the rest
+of the gap is, in priority order:
+
+1. **Multi-accumulator b=2 kernel** — break the FMA dependency chain
+   by splitting into 2-4 independent accumulators per doc. Cheap to
+   implement, likely meaningful on the decode-bound path.
+2. **Unroll across docs** — process 2-4 docs per inner iteration so
+   the front-end can hide the broadcast/shift/mask latency.
+3. **SIMD-blocked layout** — repack into 32-doc tiles like
+   `pack.rs::repack`. Improves memory access pattern. Highest
+   single-step win but largest restructuring.
+
+None of these are research questions; all of them have a direct
+template in `search.rs` for TurboQuant or in the existing
+`rank_index.rs` AVX-512 kernel.
 
 The symmetric path is still scalar (lower-priority — asymmetric is
 the recommended mode in the paper and wins every recall comparison
 here). Symmetric SIMD is a natural follow-up.
-
-To close this gap to ≤2-3× requires:
-
-1. **Per-query 8-bit LUT calibration.** Compute `min`/`max` of the
-   per-coordinate LUT, scale to `u8`, scan with SIMD u8 lookups, then
-   undo the scale once at the end. This is exactly the TurboQuant
-   pattern in `pack.rs` + `search.rs`.
-2. **AVX2 / NEON scan kernels.** The 2-bit asymmetric scan maps to
-   `_mm256_permutevar8x32_epi32` (or NEON `vqtbl1q_u8`) over packed
-   nibbles, with running u16 accumulators and a periodic flush to
-   f32. The existing TurboQuant search kernels in `search.rs` are a
-   direct template.
-3. **SIMD-blocked layout.** Re-use `pack.rs::repack` (or a slimmer
-   rank-specific equivalent) so the scan reads contiguous lanes
-   across 32-document blocks.
-
-None of these are research questions; they are 1-2 weeks of
-implementation work modelled on `search.rs`. The v1 kernel correctness
-is verified by `tests/rank_index.rs` against a scalar reference.
 
 ## API parity with `TurboQuantIndex`
 
