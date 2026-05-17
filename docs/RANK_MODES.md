@@ -4,10 +4,10 @@
 queries):** at matched 256 B/vec, RankQuant-2 asymmetric beats
 TurboQuant-2 by +3.3 R@10 (0.764 vs 0.731); at matched 512 B/vec,
 TurboQuant-4 beats RankQuant-4 asymmetric by +5.2 R@10 (0.895 vs
-0.843). Encode is 28-59× faster for RankQuant across both. Query
-latency is 13-24× slower for RankQuant because the scan kernel is
-scalar Rust; the effective-bandwidth gap (15-17 GiB/s vs 0.63-1.28
-GiB/s) puts a SIMD lowering inside reach of parity.
+0.843). Encode is 28-59× faster for RankQuant across both. With an
+AVX2 inline-expand kernel for the asymmetric scan, query latency is
+**within 2.8-3.4× of hand-tuned TurboQuant** (10.5 ms vs 3.1 ms at
+2-bit, 16.4 ms vs 5.8 ms at 4-bit on 207k docs).
 
 > Branch: `nelson/rank-modes`. Status: v1 prototype, scalar kernels.
 > Numbers below are head-to-head on the paper's exact arXiv corpus
@@ -53,17 +53,27 @@ family). The same artefacts that produced the paper's main-corpus
 results. 200 queries × top-10. Ground truth: FP32 brute-force cosine.
 32-core Linux x86_64, release build.
 
+Results below are with AVX2+FMA asymmetric scan enabled (auto-detected
+at runtime on x86_64). Scalar-fallback numbers are in parentheses
+where they differ.
+
 | mode               | bytes/vec | total MiB | encode v/s  | p50 ms | p99 ms | GiB/s | ns/dim | R@10   |
 |--------------------|-----------|-----------|-------------|--------|--------|-------|--------|--------|
-| TurboQuant b=2     | 256       | 50.7      | 44,713      | 3.28   | 3.90   | 15.08 | 0.015  | **0.7305** |
-| TurboQuant b=4     | 512       | 101.4     | 19,721      | 5.98   | 7.09   | 16.57 | 0.028  | **0.8945** |
-| RankIndex sym      | 2048      | 405.7     | 1,031,411   | 108.3  | 110.6  | 3.66  | 0.509  | 0.8015 |
-| RankIndex asym     | 2048      | 405.7     | 1,031,411   | 108.5  | 114.7  | 3.65  | 0.510  | 0.8475 |
-| RankQuant b=2 sym  | 256       | 50.7      | 1,242,635   | 78.8   | 81.9   | 0.63  | 0.371  | 0.7130 |
-| **RankQuant b=2 asym** | **256** | **50.7** | **1,242,635** | 78.9 | 80.7  | 0.63  | 0.371  | **0.7635** |
-| RankQuant b=4 sym  | 512       | 101.4     | 1,163,978   | 80.9   | 82.5   | 1.22  | 0.380  | 0.7985 |
-| **RankQuant b=4 asym** | **512** | **101.4** | **1,163,978** | 77.4 | 78.8  | 1.28  | 0.364  | **0.8430** |
-| RankQuant b=1 asym | 128       | 25.4      | 1,279,379   | 74.1   | 77.6   | 0.33  | 0.348  | 0.6405 |
+| TurboQuant b=2     | 256       | 50.7      | 47,847      | 3.11   | 4.08   | 15.90 | 0.015  | **0.7305** |
+| TurboQuant b=4     | 512       | 101.4     | 20,510      | 5.78   | 6.17   | 17.12 | 0.027  | **0.8945** |
+| RankIndex sym      | 2048      | 405.7     | 1,059,828   | 105.5  | 110.8  | 3.76  | 0.496  | 0.8015 |
+| RankIndex asym     | 2048      | 405.7     | 1,059,828   | 112.3  | 114.7  | 3.53  | 0.528  | 0.8475 |
+| RankQuant b=2 sym  | 256       | 50.7      | 1,255,076   | 78.3   | 79.9   | 0.63  | 0.368  | 0.7130 |
+| **RankQuant b=2 asym (AVX2)** | **256** | **50.7** | **1,255,076** | **10.5** | **11.0** | **4.73** | **0.049** | **0.7635** |
+| RankQuant b=4 sym  | 512       | 101.4     | 1,163,698   | 80.3   | 81.8   | 1.23  | 0.377  | 0.7985 |
+| **RankQuant b=4 asym (AVX2)** | **512** | **101.4** | **1,163,698** | **16.4** | **17.0** | **6.05** | **0.077** | **0.8430** |
+| RankQuant b=1 asym | 128       | 25.4      | 1,245,716   | 75.9   | 77.6   | 0.33  | 0.357  | 0.6405 |
+
+AVX2 lift, asymmetric path: **b=2 7.5× speedup** (78.9 → 10.5 ms),
+**b=4 4.7× speedup** (77.4 → 16.4 ms). The kernel does not use a
+per-coord LUT — `bucket_centre(b) = b - (2^B - 1) / 2` is one SIMD
+subtraction, so the inner loop is broadcast → variable-shift → mask →
+cvt → sub → FMA with no LUT memory traffic.
 
 ### Reading the real-data table
 
@@ -205,24 +215,40 @@ synthetic artefact.
 
 ## Where TurboQuant still wins
 
-### Query latency: 13-24× faster on real data
+### Query latency: ~3× faster on real data (down from 13-24×)
+
+After AVX2 lowering on the asymmetric path:
 
 | corpus  | bytes/vec | TurboQuant p50 | RankQuant asym p50 | gap   | TQ GiB/s | Rank GiB/s |
 |---------|-----------|----------------|---------------------|-------|---------:|-----------:|
-| Harrier | 256       | 3.28 ms        | 78.9 ms             | 24×   |    15.08 |       0.63 |
-| Harrier | 512       | 5.98 ms        | 77.4 ms             | 13×   |    16.57 |       1.28 |
-| Synth   | 256       | 0.51 ms        | 18.9 ms             | 37×   |    23.49 |       0.63 |
-| Synth   | 512       | 1.17 ms        | 19.5 ms             | 17×   |    20.43 |       1.22 |
+| Harrier | 256       | 3.11 ms        | 10.5 ms             | 3.4×  |    15.90 |       4.73 |
+| Harrier | 512       | 5.78 ms        | 16.4 ms             | 2.8×  |    17.12 |       6.05 |
 
-This is **scalar autovectorisation vs hand-tuned NEON/AVX2**, not an
-algorithmic disadvantage of rank-cosine. TurboQuant ships
-architecture-specific kernels (NEON intrinsics for ARM,
+TurboQuant ships architecture-specific kernels (NEON for ARM,
 FAISS-style perm0-interleaved AVX2 for x86) with calibrated 8-bit
-LUTs. The scan kernels in `rank_index.rs` are portable Rust with
-inline byte unpack — the compiler autovectorises pieces but not the
-LUT lookup chain. The effective-bandwidth gap (Rank ~0.6-1.3 GiB/s
-vs TurboQuant ~15-17 GiB/s on real data) is 13-25×; closing it via
-SIMD lowers RankQuant latency to the same ballpark as TurboQuant.
+LUTs and SIMD-blocked layout (32 docs at a time). The RankQuant
+AVX2 kernel processes one doc at a time and uses f32 accumulators
+directly — simpler, well within an order of magnitude of TurboQuant's
+hand-tuned path.
+
+To close the remaining 3× to parity / dominance, three avenues
+remain (none of them research questions):
+
+1. **Byte-LUT scoring** — precompute `lut4[g][byte] = sum of 4
+   per-coord contributions` (256 KiB per query LUT for D=1024, B=2),
+   reduce inner loop to `sum_g lut4[g][doc[g]]`. May be
+   bandwidth-bound but trivially vectorisable.
+2. **AVX-512 path** — Zen 5 (Ryzen 9 9950X is the target box) has a
+   full 512-bit datapath; the kernel scales naturally to 16-wide
+   FMA. Gated on profiling actually showing the bottleneck is in
+   arithmetic, not memory.
+3. **SIMD-blocked layout** — process 8-32 docs in parallel per inner
+   iteration, mirroring `pack.rs::repack`. Improves memory access
+   pattern. Likely the highest single-step win.
+
+The symmetric path is still scalar (lower-priority — asymmetric is
+the recommended mode in the paper and wins every recall comparison
+here). Symmetric SIMD is a natural follow-up.
 
 To close this gap to ≤2-3× requires:
 
