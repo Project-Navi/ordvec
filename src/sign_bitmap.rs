@@ -41,7 +41,17 @@ pub struct SignBitmapIndex {
 
 impl SignBitmapIndex {
     /// Build an empty index for `dim`-dimensional embeddings.
+    ///
+    /// `dim` must be a strictly positive multiple of 64. `dim = 0`
+    /// is rejected at construction — accepting it would create an
+    /// index whose `qwords_per_vec = 0`, which then divides by zero
+    /// inside [`Self::add`] when computing `vectors.len() / dim`.
+    /// (The matching invariant in [`crate::BitmapIndex::new`] is
+    /// enforced transitively via `n_top > 0 && n_top < dim`;
+    /// SignBitmapIndex doesn't take `n_top`, so it needs the
+    /// explicit check.)
     pub fn new(dim: usize) -> Self {
+        assert!(dim > 0, "dim must be > 0");
         assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
         Self {
             dim,
@@ -390,6 +400,17 @@ mod tests {
             .zip(d.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum()
+    }
+
+    #[test]
+    #[should_panic(expected = "dim must be > 0")]
+    fn new_rejects_dim_zero() {
+        // Regression for the Codex stop-time finding: dim=0 used to
+        // pass the `dim % 64 == 0` check, then `add()` would divide
+        // by zero on `vectors.len() / self.dim`. The explicit
+        // `assert!(dim > 0)` in `new` rejects the bad input upfront
+        // with a clear message.
+        let _ = SignBitmapIndex::new(0);
     }
 
     #[test]
