@@ -1,0 +1,493 @@
+//! Sign-cosine bitmap retrieval substrate.
+//!
+//! 1-bit-per-coord quantization at the **data-independent threshold
+//! of zero**: bit j of doc d is set iff `d.embedding[j] > 0`. Storage
+//! is `dim/8` bytes per doc (128 B at D=1024).
+//!
+//! This is the **SimHash family** primitive (Charikar 2002) applied to
+//! native embedding coords rather than random projections. For
+//! contrastively-trained embeddings (BGE / Harrier / OpenAI ada
+//! family), the native coord axes already carry semantically-aligned
+//! signal — making direct sign quantization competitive with, and
+//! sometimes superior to, learned hash codes or rank-thresholded
+//! bitmaps at the same byte budget.
+//!
+//! Score: `agreement(q, d) = dim - popcount(q ^ d)`. The kernel
+//! computes the per-doc Hamming distance via popcount(XOR); the
+//! candidate selector takes top-M docs by **lowest** Hamming
+//! (= **highest** agreement).
+//!
+//! Kernel architecture mirrors [`crate::BitmapIndex`] (single-query
+//! and CHUNK=8 batched hot+tail paths under AVX-512 VPOPCNTDQ). The
+//! only material difference is `_mm512_xor_si512` in place of
+//! `_mm512_and_si512` and an ascending tie-broken composite-key
+//! selection on Hamming distance.
+
+use rayon::prelude::*;
+
+/// Index storing a 1-bit sign-cosine fingerprint per document.
+///
+/// Storage: `dim / 8` bytes per doc. Dim must be a multiple of 64
+/// (so the u64-packed layout has no straddling tail bits — same
+/// invariant as [`crate::BitmapIndex`]).
+pub struct SignBitmapIndex {
+    dim: usize,
+    qwords_per_vec: usize,
+    n_vectors: usize,
+    /// Row-major `n_vectors * qwords_per_vec` u64s. Bit j of doc di
+    /// is at `bitmaps[di*qpv + j/64] >> (j%64) & 1`.
+    bitmaps: Vec<u64>,
+}
+
+impl SignBitmapIndex {
+    /// Build an empty index for `dim`-dimensional embeddings.
+    pub fn new(dim: usize) -> Self {
+        assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
+        Self {
+            dim,
+            qwords_per_vec: dim / 64,
+            n_vectors: 0,
+            bitmaps: Vec::new(),
+        }
+    }
+
+    /// Add documents. Each doc is sign-quantized at threshold zero:
+    /// bit j is set iff `vectors[di*dim + j] > 0.0`. The sign of
+    /// exactly zero (rare in practice for trained embeddings) is
+    /// treated as negative (bit unset).
+    pub fn add(&mut self, vectors: &[f32]) {
+        let n = vectors.len() / self.dim;
+        assert_eq!(vectors.len(), n * self.dim);
+        let qpv = self.qwords_per_vec;
+        let dim = self.dim;
+        let start = self.bitmaps.len();
+        self.bitmaps.resize(start + n * qpv, 0u64);
+        self.bitmaps[start..]
+            .par_chunks_mut(qpv)
+            .zip(vectors.par_chunks(dim))
+            .for_each(|(out, v)| {
+                for j in 0..dim {
+                    if v[j] > 0.0 {
+                        out[j / 64] |= 1u64 << (j % 64);
+                    }
+                }
+            });
+        self.n_vectors += n;
+    }
+
+    /// Build the query-side sign bitmap. Same threshold semantics as
+    /// [`Self::add`]: bit j set iff `q[j] > 0.0`.
+    pub fn build_query_bitmap(&self, q: &[f32]) -> Vec<u64> {
+        assert_eq!(q.len(), self.dim);
+        let mut bm = vec![0u64; self.qwords_per_vec];
+        for j in 0..self.dim {
+            if q[j] > 0.0 {
+                bm[j / 64] |= 1u64 << (j % 64);
+            }
+        }
+        bm
+    }
+
+    /// Return the top-`m` candidate doc IDs ranked by **highest
+    /// sign agreement** (equivalently: lowest Hamming distance) with
+    /// `q`. Selection uses the composite key
+    /// `(hamming ascending, doc_id ascending)` so boundary ties at
+    /// `m_eff` produce a deterministic survivor set across runs and
+    /// SIMD dispatch paths — same audit discipline as
+    /// [`crate::BitmapIndex::top_m_candidates`].
+    pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
+        let m_eff = m.min(self.n_vectors);
+        if m_eff == 0 {
+            return Vec::new();
+        }
+        let qb = self.build_query_bitmap(q);
+        let mut scores = vec![0u32; self.n_vectors]; // Hamming distance per doc
+        sign_scan_collect(
+            &self.bitmaps,
+            self.n_vectors,
+            self.qwords_per_vec,
+            &qb,
+            &mut scores,
+        );
+        let mut idx: Vec<u32> = (0..self.n_vectors as u32).collect();
+        // Ascending Hamming = best candidates first. Composite key
+        // ensures deterministic partition at boundary ties.
+        let cmp = |a: &u32, b: &u32| {
+            scores[*a as usize]
+                .cmp(&scores[*b as usize])
+                .then_with(|| a.cmp(b))
+        };
+        idx.select_nth_unstable_by(m_eff - 1, cmp);
+        let mut head = idx[..m_eff].to_vec();
+        head.sort_unstable_by(cmp);
+        head
+    }
+
+    /// Batched variant: stream the sign bitmaps **once** and produce
+    /// top-`m` candidate sets for `batch` queries in parallel. Mirrors
+    /// [`crate::BitmapIndex::top_m_candidates_batched`] in kernel
+    /// shape (CHUNK=8 hot + tail) and tie-break semantics.
+    pub fn top_m_candidates_batched(&self, queries: &[f32], m: usize) -> Vec<Vec<u32>> {
+        let dim = self.dim;
+        let batch = queries.len() / dim;
+        assert_eq!(queries.len(), batch * dim);
+        let m_eff = m.min(self.n_vectors);
+        if batch == 0 || m_eff == 0 {
+            return vec![Vec::new(); batch];
+        }
+        let n = self.n_vectors;
+        let qpv = self.qwords_per_vec;
+
+        let mut q_batch = vec![0u64; batch * qpv];
+        for bi in 0..batch {
+            let qb = self.build_query_bitmap(&queries[bi * dim..(bi + 1) * dim]);
+            q_batch[bi * qpv..(bi + 1) * qpv].copy_from_slice(&qb);
+        }
+
+        let mut scores = vec![0u32; batch * n];
+        sign_scan_collect_batched(&self.bitmaps, n, qpv, &q_batch, batch, &mut scores);
+
+        let n_eff = n;
+        scores
+            .par_chunks(n_eff)
+            .map(|q_scores| {
+                let mut idx: Vec<u32> = (0..n_eff as u32).collect();
+                let cmp = |a: &u32, b: &u32| {
+                    q_scores[*a as usize]
+                        .cmp(&q_scores[*b as usize])
+                        .then_with(|| a.cmp(b))
+                };
+                idx.select_nth_unstable_by(m_eff - 1, cmp);
+                let mut head = idx[..m_eff].to_vec();
+                head.sort_unstable_by(cmp);
+                head
+            })
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.n_vectors
+    }
+    pub fn is_empty(&self) -> bool {
+        self.n_vectors == 0
+    }
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+    pub fn bytes_per_vec(&self) -> usize {
+        self.qwords_per_vec * 8
+    }
+    pub fn byte_size(&self) -> usize {
+        self.bitmaps.len() * std::mem::size_of::<u64>()
+    }
+}
+
+// -------------------------------------------------------------------
+// Scan kernels: XOR-popcount, write Hamming distance per doc.
+//
+// Identical shape to `bitmap_scan_collect{,_batched}` in rank_index.rs,
+// but with `_mm512_xor_si512` in place of `_mm512_and_si512`. The
+// kernel structure (lane preload, hot+tail CHUNK=8 in the batched
+// variant, const-bounded inner loop for accumulator register
+// promotion) is preserved exactly so the batched bandwidth-
+// amortisation property carries over.
+// -------------------------------------------------------------------
+
+fn sign_scan_collect(
+    bitmaps: &[u64],
+    n: usize,
+    qpv: usize,
+    q: &[u64],
+    scores: &mut [u32],
+) {
+    debug_assert_eq!(scores.len(), n);
+    debug_assert_eq!(q.len(), qpv);
+
+    #[cfg(target_arch = "x86_64")]
+    let use_avx512vpop = is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512vpopcntdq")
+        && qpv % 8 == 0;
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_avx512vpop = false;
+
+    if use_avx512vpop {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            sign_scan_collect_avx512vpop(bitmaps, n, qpv, q, scores);
+            return;
+        }
+    }
+    for di in 0..n {
+        let doc = &bitmaps[di * qpv..(di + 1) * qpv];
+        let mut acc: u32 = 0;
+        for w in 0..qpv {
+            acc += (doc[w] ^ q[w]).count_ones();
+        }
+        scores[di] = acc;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn sign_scan_collect_avx512vpop(
+    bitmaps: &[u64],
+    n: usize,
+    qpv: usize,
+    q: &[u64],
+    scores: &mut [u32],
+) {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(qpv % 8, 0);
+    let lanes = qpv / 8;
+    let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
+    for l in 0..lanes {
+        q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
+    }
+    for di in 0..n {
+        let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+        let mut acc_zmm = _mm512_setzero_si512();
+        for l in 0..lanes {
+            let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
+            let xor_zmm = _mm512_xor_si512(d_zmm, q_zmms[l]);
+            let pop_zmm = _mm512_popcnt_epi64(xor_zmm);
+            acc_zmm = _mm512_add_epi64(acc_zmm, pop_zmm);
+        }
+        let acc_sum: i64 = _mm512_reduce_add_epi64(acc_zmm);
+        scores[di] = acc_sum as u32;
+    }
+}
+
+// -------------------------------------------------------------------
+// Batched variant — CHUNK=8 hot + tail, same shape as
+// `bitmap_scan_collect_batched_avx512vpop` in rank_index.rs.
+// -------------------------------------------------------------------
+
+const BATCHED_AVX512_CHUNK: usize = 8;
+
+fn sign_scan_collect_batched(
+    bitmaps: &[u64],
+    n: usize,
+    qpv: usize,
+    q_batch: &[u64],
+    batch: usize,
+    scores: &mut [u32],
+) {
+    #[cfg(target_arch = "x86_64")]
+    let use_avx512vpop = is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512vpopcntdq")
+        && qpv % 8 == 0;
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_avx512vpop = false;
+
+    if use_avx512vpop {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            sign_scan_collect_batched_avx512vpop(bitmaps, n, qpv, q_batch, batch, scores);
+            return;
+        }
+    }
+    // Scalar fallback.
+    for di in 0..n {
+        let doc = &bitmaps[di * qpv..(di + 1) * qpv];
+        for bi in 0..batch {
+            let q = &q_batch[bi * qpv..(bi + 1) * qpv];
+            let mut acc: u32 = 0;
+            for w in 0..qpv {
+                acc += (doc[w] ^ q[w]).count_ones();
+            }
+            scores[bi * n + di] = acc;
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn sign_scan_collect_batched_avx512vpop(
+    bitmaps: &[u64],
+    n: usize,
+    qpv: usize,
+    q_batch: &[u64],
+    batch: usize,
+    scores: &mut [u32],
+) {
+    use std::arch::x86_64::*;
+    debug_assert_eq!(qpv % 8, 0);
+    debug_assert_eq!(q_batch.len(), batch * qpv);
+    debug_assert_eq!(scores.len(), batch * n);
+    let lanes = qpv / 8;
+    const CHUNK: usize = BATCHED_AVX512_CHUNK;
+
+    let mut q_zmms: Vec<__m512i> = Vec::with_capacity(batch * lanes);
+    for bi in 0..batch {
+        for l in 0..lanes {
+            q_zmms.push(_mm512_loadu_si512(
+                q_batch.as_ptr().add(bi * qpv + l * 8) as *const __m512i,
+            ));
+        }
+    }
+
+    // Hot path: CHUNK-sized groups; const-bounded inner bi loop so
+    // LLVM unrolls and promotes the accs array to ZMM registers.
+    let mut chunk_start = 0usize;
+    while chunk_start + CHUNK <= batch {
+        for di in 0..n {
+            let mut accs: [__m512i; CHUNK] = [_mm512_setzero_si512(); CHUNK];
+            let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+            for l in 0..lanes {
+                let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
+                for bi in 0..CHUNK {
+                    let q_zmm = q_zmms[(chunk_start + bi) * lanes + l];
+                    let xor_zmm = _mm512_xor_si512(d_zmm, q_zmm);
+                    let pop_zmm = _mm512_popcnt_epi64(xor_zmm);
+                    accs[bi] = _mm512_add_epi64(accs[bi], pop_zmm);
+                }
+            }
+            for bi in 0..CHUNK {
+                let acc_sum: i64 = _mm512_reduce_add_epi64(accs[bi]);
+                scores[(chunk_start + bi) * n + di] = acc_sum as u32;
+            }
+        }
+        chunk_start += CHUNK;
+    }
+    // Tail.
+    let tail = batch - chunk_start;
+    if tail > 0 {
+        for di in 0..n {
+            let mut accs: [__m512i; CHUNK] = [_mm512_setzero_si512(); CHUNK];
+            let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+            for l in 0..lanes {
+                let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
+                for bi in 0..tail {
+                    let q_zmm = q_zmms[(chunk_start + bi) * lanes + l];
+                    let xor_zmm = _mm512_xor_si512(d_zmm, q_zmm);
+                    let pop_zmm = _mm512_popcnt_epi64(xor_zmm);
+                    accs[bi] = _mm512_add_epi64(accs[bi], pop_zmm);
+                }
+            }
+            for bi in 0..tail {
+                let acc_sum: i64 = _mm512_reduce_add_epi64(accs[bi]);
+                scores[(chunk_start + bi) * n + di] = acc_sum as u32;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    const D: usize = 256;
+
+    fn make_corpus(seed: u64, n: usize) -> Vec<f32> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        (0..n * D).map(|_| rng.gen_range(-1.0..1.0)).collect()
+    }
+
+    fn scalar_hamming(q: &[u64], d: &[u64]) -> u32 {
+        q.iter()
+            .zip(d.iter())
+            .map(|(a, b)| (a ^ b).count_ones())
+            .sum()
+    }
+
+    #[test]
+    fn sign_encoding_threshold_at_zero() {
+        let mut idx = SignBitmapIndex::new(D);
+        // First doc: alternating signs (j even → positive, j odd → negative)
+        let mut v: Vec<f32> = (0..D)
+            .map(|j| if j % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        // Force one zero — sign(0) is treated as negative (bit unset).
+        v[0] = 0.0;
+        idx.add(&v);
+        let bm = idx.build_query_bitmap(&v);
+        // Bit 0 must be UNSET (we used 0.0 which is "not > 0").
+        assert_eq!(bm[0] & 1, 0, "zero must be encoded as bit-unset");
+        // Bit 2 must be SET (we used 1.0).
+        assert_eq!((bm[0] >> 2) & 1, 1, "positive must be encoded as bit-set");
+        // Bit 1 must be UNSET (we used -1.0).
+        assert_eq!((bm[0] >> 1) & 1, 0, "negative must be encoded as bit-unset");
+    }
+
+    #[test]
+    fn top_m_returns_ascending_hamming() {
+        let n = 100;
+        let corpus = make_corpus(7, n);
+        let mut idx = SignBitmapIndex::new(D);
+        idx.add(&corpus);
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let candidates = idx.top_m_candidates(&query, 10);
+        assert_eq!(candidates.len(), 10);
+        // Recompute Hamming distance for each returned candidate and
+        // verify they're in ascending order.
+        let qbm = idx.build_query_bitmap(&query);
+        let mut last_h: u32 = 0;
+        for &di in &candidates {
+            let off = (di as usize) * idx.qwords_per_vec;
+            let dbm = &idx.bitmaps[off..off + idx.qwords_per_vec];
+            let h = scalar_hamming(&qbm, dbm);
+            assert!(
+                h >= last_h,
+                "top_m_candidates must be sorted ascending by Hamming",
+            );
+            last_h = h;
+        }
+    }
+
+    #[test]
+    fn batched_matches_single_query() {
+        let n = 200;
+        let corpus = make_corpus(13, n);
+        let mut idx = SignBitmapIndex::new(D);
+        idx.add(&corpus);
+        let mut rng = ChaCha8Rng::seed_from_u64(99);
+        let batch: usize = 5;
+        let queries: Vec<f32> = (0..batch * D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        for m in [10usize, 30, 100] {
+            let single: Vec<Vec<u32>> = (0..batch)
+                .map(|bi| idx.top_m_candidates(&queries[bi * D..(bi + 1) * D], m))
+                .collect();
+            let batched = idx.top_m_candidates_batched(&queries, m);
+            assert_eq!(single.len(), batched.len());
+            for bi in 0..batch {
+                assert_eq!(
+                    single[bi], batched[bi],
+                    "batched diverged from single-query at batch idx {bi}, M={m}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn avx512_path_matches_scalar_at_production_dim() {
+        const PROD_D: usize = 1024;
+        let n = 256;
+        let mut rng = ChaCha8Rng::seed_from_u64(31);
+        let corpus: Vec<f32> = (0..n * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let mut idx = SignBitmapIndex::new(PROD_D);
+        idx.add(&corpus);
+        let queries: Vec<f32> = (0..3 * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        // Batched (AVX-512 dispatched at qpv=16) must agree with scalar
+        // reference computed via simple Hamming.
+        let batched = idx.top_m_candidates_batched(&queries, 32);
+        for bi in 0..3 {
+            let qbm = idx.build_query_bitmap(&queries[bi * PROD_D..(bi + 1) * PROD_D]);
+            let mut all: Vec<(u32, u32)> = (0..n as u32)
+                .map(|di| {
+                    let off = (di as usize) * idx.qwords_per_vec;
+                    let dbm = &idx.bitmaps[off..off + idx.qwords_per_vec];
+                    (scalar_hamming(&qbm, dbm), di)
+                })
+                .collect();
+            all.sort_by_key(|&(h, did)| (h, did));
+            let reference: Vec<u32> = all.iter().take(32).map(|&(_, did)| did).collect();
+            assert_eq!(
+                batched[bi], reference,
+                "AVX-512 batched diverged from scalar at batch idx {bi}",
+            );
+        }
+    }
+}

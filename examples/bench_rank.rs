@@ -17,7 +17,10 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 use turbovec::rank_index::search_asymmetric_byte_lut;
-use turbovec::{BitmapIndex, MultiBucketBitmapIndex, RankIndex, RankQuantIndex, TurboQuantIndex};
+use turbovec::{
+    BitmapIndex, MultiBucketBitmapIndex, RankIndex, RankQuantIndex, SignBitmapIndex,
+    TurboQuantIndex,
+};
 
 #[derive(Clone)]
 struct Config {
@@ -284,6 +287,38 @@ fn fp32_ground_truth(corpus: &[f32], queries: &[f32], dim: usize, k: usize) -> V
             }
         });
     out
+}
+
+/// "Candidate ceiling" recall: given a system that returns `k_out`
+/// candidates per query, what fraction of the FP32 top-`k_eval`
+/// ground truth is contained in those candidates? Equivalently: the
+/// upper bound on R@`k_eval` that a perfect reranker over the
+/// system's top-`k_out` could deliver.
+///
+/// `pred` is shape `n_queries × k_out` (the system's candidate set).
+/// `truth_topk_eval` is shape `n_queries × k_eval` (FP32 top-k_eval).
+fn ceiling_recall(
+    pred: &[i64],
+    k_out: usize,
+    truth_topk_eval: &[i64],
+    k_eval: usize,
+    n_queries: usize,
+) -> f32 {
+    use std::collections::HashSet;
+    let mut hits = 0usize;
+    let mut total = 0usize;
+    for qi in 0..n_queries {
+        let pred_set: HashSet<i64> =
+            pred[qi * k_out..(qi + 1) * k_out].iter().copied().collect();
+        let truth_row = &truth_topk_eval[qi * k_eval..(qi + 1) * k_eval];
+        for &di in truth_row {
+            if di >= 0 && pred_set.contains(&di) {
+                hits += 1;
+            }
+            total += 1;
+        }
+    }
+    hits as f32 / total.max(1) as f32
 }
 
 fn recall_at_k(pred: &[i64], truth: &[i64], k: usize) -> f32 {
@@ -778,6 +813,194 @@ fn bench_two_stage_batched(
     )
 }
 
+/// Sign-cosine bitmap probe only (data-independent threshold at zero).
+/// 128 B/vec storage at D=1024 — same byte budget as the rank-bitmap
+/// probe — but the threshold is `coord > 0` rather than `rank ≥ dim
+/// − n_top`. Score = `dim − popcount(q XOR d)` = sign-agreement count.
+fn bench_sign_bitmap(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config) -> Row {
+    let mut idx = SignBitmapIndex::new(cfg.dim);
+    let t0 = Instant::now();
+    idx.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = idx.bytes_per_vec();
+    let total_mib = idx.byte_size() as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+    let probe = |q: &[f32]| -> Vec<i64> {
+        let cands = idx.top_m_candidates(q, cfg.k);
+        let mut out = vec![-1i64; cfg.k];
+        for (i, &c) in cands.iter().take(cfg.k).enumerate() {
+            out[i] = c as i64;
+        }
+        out
+    };
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = probe(q);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| probe(q));
+    let recall = recall_at_k(&pred, truth, cfg.k);
+    let name = "SignBitmap probe".to_string();
+    maybe_dump_pred(cfg, &name, &pred);
+    finalise_row(
+        name, bytes_per_vec, total_mib, encode_vps, p50, p99, recall, cfg.n, cfg.dim,
+    )
+}
+
+/// Sign-cosine two-stage: SignBitmap candidate gen → exact RankQuant
+/// b=`bits` rerank. Direct head-to-head with the rank-bitmap
+/// two-stage at the same 384 B/vec storage (128 sign + 256 RQ b=2).
+fn bench_sign_two_stage(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    bits: u8,
+    m: usize,
+    exact_rq_top: Option<&[i64]>,
+) -> Row {
+    let mut sign = SignBitmapIndex::new(cfg.dim);
+    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let t0 = Instant::now();
+    sign.add(corpus);
+    rq.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = sign.bytes_per_vec() + rq.bytes_per_vec();
+    let total_mib = (sign.byte_size() + rq.byte_size()) as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+    let effective_k = cfg.k.min(m);
+    let two_stage = |q: &[f32]| -> Vec<i64> {
+        let cands = sign.top_m_candidates(q, m);
+        let (_, mut global) = rq.search_asymmetric_subset(q, &cands, effective_k);
+        global.resize(cfg.k, -1);
+        global
+    };
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = two_stage(q);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| two_stage(q));
+    let recall = recall_at_k(&pred, truth, cfg.k);
+    let cand_recall_label = if let Some(exact) = exact_rq_top {
+        use std::collections::HashSet;
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for qi in 0..cfg.n_queries {
+            let q = &queries[qi * cfg.dim..(qi + 1) * cfg.dim];
+            let cands = sign.top_m_candidates(q, m);
+            let cand_set: HashSet<i64> = cands.iter().map(|&i| i as i64).collect();
+            let exact_top: &[i64] = &exact[qi * cfg.k..(qi + 1) * cfg.k];
+            for &di in exact_top {
+                if di >= 0 && cand_set.contains(&di) {
+                    hits += 1;
+                }
+                total += 1;
+            }
+        }
+        let cr = hits as f32 / total.max(1) as f32;
+        format!(" CR={cr:.3}")
+    } else {
+        String::new()
+    };
+    let name = format!("SignTwoStage b={bits} M={m}{cand_recall_label}");
+    let dump_name = format!("SignTwoStage b={bits} M={m}");
+    maybe_dump_pred(cfg, &dump_name, &pred);
+    finalise_row(
+        name, bytes_per_vec, total_mib, encode_vps, p50, p99, recall, cfg.n, cfg.dim,
+    )
+}
+
+/// Batched sign-cosine two-stage. Mirrors `bench_two_stage_batched`:
+/// chunks queries into CHUNK=8 groups, streams the sign bitmaps once
+/// per chunk through the AVX-512 XOR-popcount kernel, then runs the
+/// existing RankQuant subset rerank per query. Per-query effective
+/// latency = batch wall time / batch_size.
+fn bench_sign_two_stage_batched(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    bits: u8,
+    m: usize,
+    batch_size: usize,
+    exact_rq_top: Option<&[i64]>,
+) -> Row {
+    let mut sign = SignBitmapIndex::new(cfg.dim);
+    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let t0 = Instant::now();
+    sign.add(corpus);
+    rq.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = sign.bytes_per_vec() + rq.bytes_per_vec();
+    let total_mib = (sign.byte_size() + rq.byte_size()) as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+    let effective_k = cfg.k.min(m);
+
+    let warm_n = batch_size.min(cfg.n_queries);
+    if warm_n > 0 {
+        let _ = sign.top_m_candidates_batched(&queries[..warm_n * cfg.dim], m);
+    }
+
+    let mut samples: Vec<u128> = Vec::with_capacity(cfg.n_queries);
+    let mut pred: Vec<i64> = Vec::with_capacity(cfg.n_queries * cfg.k);
+    let mut batch_start = 0usize;
+    while batch_start < cfg.n_queries {
+        let batch_end = (batch_start + batch_size).min(cfg.n_queries);
+        let b = batch_end - batch_start;
+        let batch_q = &queries[batch_start * cfg.dim..batch_end * cfg.dim];
+        let t0 = Instant::now();
+        let cands = sign.top_m_candidates_batched(batch_q, m);
+        let mut batch_pred = Vec::with_capacity(b * cfg.k);
+        for (i, cand_set) in cands.iter().enumerate() {
+            let q = &batch_q[i * cfg.dim..(i + 1) * cfg.dim];
+            let (_, mut global) = rq.search_asymmetric_subset(q, cand_set, effective_k);
+            global.resize(cfg.k, -1);
+            batch_pred.extend(global);
+        }
+        let elapsed_ns = t0.elapsed().as_nanos();
+        let per_query_ns = elapsed_ns / b as u128;
+        for _ in 0..b {
+            samples.push(per_query_ns);
+        }
+        pred.extend(batch_pred);
+        batch_start = batch_end;
+    }
+    let p50 = percentile_us(&mut samples.clone(), 0.50) / 1_000.0;
+    let p99 = percentile_us(&mut samples, 0.99) / 1_000.0;
+    let recall = recall_at_k(&pred, truth, cfg.k);
+
+    let cand_recall_label = if let Some(exact) = exact_rq_top {
+        use std::collections::HashSet;
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        let mut bs = 0usize;
+        while bs < cfg.n_queries {
+            let be = (bs + batch_size).min(cfg.n_queries);
+            let bq = &queries[bs * cfg.dim..be * cfg.dim];
+            let cands = sign.top_m_candidates_batched(bq, m);
+            for (i, c) in cands.iter().enumerate() {
+                let qi = bs + i;
+                let cand_set: HashSet<i64> = c.iter().map(|&x| x as i64).collect();
+                let exact_top: &[i64] = &exact[qi * cfg.k..(qi + 1) * cfg.k];
+                for &di in exact_top {
+                    if di >= 0 && cand_set.contains(&di) {
+                        hits += 1;
+                    }
+                    total += 1;
+                }
+            }
+            bs = be;
+        }
+        let cr = hits as f32 / total.max(1) as f32;
+        format!(" CR={cr:.3}")
+    } else {
+        String::new()
+    };
+    let name = format!("SignTwoStage b={bits} M={m} B={batch_size}{cand_recall_label}");
+    let dump_name = format!("SignTwoStage b={bits} M={m} B={batch_size}");
+    maybe_dump_pred(cfg, &dump_name, &pred);
+    finalise_row(
+        name, bytes_per_vec, total_mib, encode_vps, p50, p99, recall, cfg.n, cfg.dim,
+    )
+}
+
 /// Multi-bucket bitmap as a candidate generator: scores all docs by
 /// the bilinear bucket-overlap with `weights`, takes top-M, then
 /// reruns the exact RankQuant b=`bits` asymmetric kernel on those M.
@@ -1101,6 +1324,80 @@ fn main() {
                     ));
                 }
             }
+            "sign-headline" => {
+                // Sign-cosine vs rank-bitmap, head-to-head at matched
+                // storage. The substrate test prompted by Todd's
+                // schema.org-typed result, validated at the Harrier
+                // scale and recall regime.
+                eprintln!("benching TurboQuant b=2 (reference @ 256 B/vec) ...");
+                all_rows.push(bench_turboquant(&corpus, &queries, &truth, &cfg, 2));
+
+                eprintln!("benching SignBitmap probe (128 B/vec, sign-cos) ...");
+                all_rows.push(bench_sign_bitmap(&corpus, &queries, &truth, &cfg));
+
+                let bitmap_n_top = cfg.dim / 4;
+                eprintln!("benching rank-Bitmap probe (n_top={bitmap_n_top}, 128 B/vec) ...");
+                all_rows.push(bench_bitmap(&corpus, &queries, &truth, &cfg, bitmap_n_top));
+
+                eprintln!("computing exact RankQuant b=2 top-k for CR ...");
+                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                rq_exact.add(&corpus);
+                let rq_top: Vec<i64> = collect_preds(
+                    &queries,
+                    cfg.dim,
+                    cfg.n_queries,
+                    cfg.k,
+                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
+                );
+
+                // SignTwoStage (sign + RQ rerank) batched B=8 at the
+                // same M sweep as the rank two-stage baseline.
+                for &m in &[100usize, 500, 1000, 5000] {
+                    eprintln!("benching SignTwoStage b=2 M={m} B={} ...", cfg.batch);
+                    all_rows.push(bench_sign_two_stage_batched(
+                        &corpus, &queries, &truth, &cfg, 2, m, cfg.batch, Some(&rq_top),
+                    ));
+                    eprintln!("benching rank TwoStage b=2 M={m} B={} ...", cfg.batch);
+                    all_rows.push(bench_two_stage_batched(
+                        &corpus, &queries, &truth, &cfg, 2, m, bitmap_n_top, cfg.batch, Some(&rq_top),
+                    ));
+                }
+            }
+            "storage-matched" => {
+                // Storage-matched head-to-head: TurboQuant b=2 at
+                // 256 B/vec vs TwoStage with b=1 RankQuant rerank
+                // (128 B bitmap + 128 B RankQuant b=1 = 256 B exact
+                // match). Also runs the 384 B/vec b=2 rerank rows
+                // for the existing +50% storage Pareto.
+                eprintln!("benching TurboQuant b=2 (reference @ 256 B/vec) ...");
+                all_rows.push(bench_turboquant(&corpus, &queries, &truth, &cfg, 2));
+                eprintln!("computing exact RankQuant b=2 top-k for CR ...");
+                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                rq_exact.add(&corpus);
+                let rq_top: Vec<i64> = collect_preds(
+                    &queries,
+                    cfg.dim,
+                    cfg.n_queries,
+                    cfg.k,
+                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
+                );
+                for &m in &[100usize, 500, 1000, 5000] {
+                    eprintln!(
+                        "benching TwoStage b=1 batched (256 B/vec, MATCHED) M={m} ...",
+                    );
+                    all_rows.push(bench_two_stage_batched(
+                        &corpus, &queries, &truth, &cfg, 1, m, n_top, cfg.batch, Some(&rq_top),
+                    ));
+                }
+                for &m in &[500usize, 5000] {
+                    eprintln!(
+                        "benching TwoStage b=2 batched (384 B/vec, +50%) M={m} ...",
+                    );
+                    all_rows.push(bench_two_stage_batched(
+                        &corpus, &queries, &truth, &cfg, 2, m, n_top, cfg.batch, Some(&rq_top),
+                    ));
+                }
+            }
             "batch-sweep" => {
                 // Vary batch ∈ {1, 2, 4, 8, 16} at fixed M=500 to map
                 // the bandwidth-amortisation curve. B=1 cross-checks
@@ -1138,7 +1435,8 @@ fn main() {
             }
             other => panic!(
                 "unknown --mode '{other}' (expected: bitmap, bitmap-pulp, \
-                 batched-two-stage, batch-sweep)",
+                 batched-two-stage, batch-sweep, \
+                 storage-matched, sign-headline)",
             ),
         }
         println!();
