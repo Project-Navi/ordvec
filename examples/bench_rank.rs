@@ -45,9 +45,17 @@ struct Config {
     /// Optional mode filter. When set, only rows whose row.name
     /// matches one of these tags are included. Supported tags:
     /// "bitmap" (default hand-rolled bitmap scan), "bitmap-pulp"
-    /// (feature-gated pulp prototype, only with --features pulp-kernel).
+    /// (feature-gated pulp prototype, only with --features pulp-kernel),
+    /// "batched-two-stage" (multi-query batched candidate gen + rerank
+    /// at the default M sweep), "batch-sweep" (varies --batch across
+    /// {1,2,4,8,16} at M=500).
     /// Unset = run the full bench suite.
     mode: Option<String>,
+    /// Batch size for batched scan modes. The batched kernel streams
+    /// the doc bitmaps once and computes overlap scores against
+    /// `batch` queries in parallel, amortising L3→core bandwidth.
+    /// Default = 8.
+    batch: usize,
 }
 
 fn parse_args() -> Config {
@@ -63,6 +71,7 @@ fn parse_args() -> Config {
         queries_npy: None,
         dump_top_k_jsonl: None,
         mode: None,
+        batch: 8,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -77,9 +86,11 @@ fn parse_args() -> Config {
             "--queries-npy" => cfg.queries_npy = Some(args.next().unwrap()),
             "--dump-top-k-jsonl" => cfg.dump_top_k_jsonl = Some(args.next().unwrap()),
             "--mode" => cfg.mode = Some(args.next().unwrap()),
+            "--batch" => cfg.batch = args.next().unwrap().parse().unwrap(),
             other => panic!("unknown arg {other}"),
         }
     }
+    assert!(cfg.batch >= 1, "--batch must be >= 1");
     cfg
 }
 
@@ -649,6 +660,124 @@ fn bench_two_stage(
     )
 }
 
+/// Batched two-stage: streams the bitmap corpus once for groups of
+/// `batch_size` queries, then runs the existing exact RankQuant
+/// `search_asymmetric_subset` per-query rerank. Per-query effective
+/// latency = batch wall time / batch_size.
+///
+/// Reported p50 / p99 are over **per-query effective samples** — each
+/// query in a given batch shares that batch's wall time / batch_size,
+/// so within-batch variance is zero and across-batch variance is
+/// captured directly. This makes the row directly comparable to the
+/// existing single-query TwoStage rows.
+fn bench_two_stage_batched(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+    bits: u8,
+    m: usize,
+    n_top: usize,
+    batch_size: usize,
+    exact_rq_top: Option<&[i64]>,
+) -> Row {
+    let mut bitmap = BitmapIndex::new(cfg.dim, n_top);
+    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let t0 = Instant::now();
+    bitmap.add(corpus);
+    rq.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let bytes_per_vec = bitmap.bytes_per_vec() + rq.bytes_per_vec();
+    let total_mib = (bitmap.byte_size() + rq.byte_size()) as f64 / 1024.0 / 1024.0;
+    let encode_vps = cfg.n as f64 / encode_secs;
+    let effective_k = cfg.k.min(m);
+
+    // Warmup: one full batch so the kernel allocations + first-touch
+    // page faults don't pollute the first measured batch.
+    let warm_n = batch_size.min(cfg.n_queries);
+    if warm_n > 0 {
+        let _ = bitmap.top_m_candidates_batched(&queries[..warm_n * cfg.dim], m);
+    }
+
+    let mut samples: Vec<u128> = Vec::with_capacity(cfg.n_queries);
+    let mut pred: Vec<i64> = Vec::with_capacity(cfg.n_queries * cfg.k);
+
+    let mut batch_start = 0usize;
+    while batch_start < cfg.n_queries {
+        let batch_end = (batch_start + batch_size).min(cfg.n_queries);
+        let b = batch_end - batch_start;
+        let batch_q = &queries[batch_start * cfg.dim..batch_end * cfg.dim];
+
+        let t0 = Instant::now();
+        let cands = bitmap.top_m_candidates_batched(batch_q, m);
+        let mut batch_pred = Vec::with_capacity(b * cfg.k);
+        for (i, cand_set) in cands.iter().enumerate() {
+            let q = &batch_q[i * cfg.dim..(i + 1) * cfg.dim];
+            let (_, mut global) = rq.search_asymmetric_subset(q, cand_set, effective_k);
+            global.resize(cfg.k, -1);
+            batch_pred.extend(global);
+        }
+        let elapsed_ns = t0.elapsed().as_nanos();
+        let per_query_ns = elapsed_ns / b as u128;
+        for _ in 0..b {
+            samples.push(per_query_ns);
+        }
+        pred.extend(batch_pred);
+        batch_start = batch_end;
+    }
+
+    let p50 = percentile_us(&mut samples.clone(), 0.50) / 1_000.0;
+    let p99 = percentile_us(&mut samples, 0.99) / 1_000.0;
+    let recall = recall_at_k(&pred, truth, cfg.k);
+
+    // Candidate-recall vs the exact RankQuant top-k baseline. Mirrors
+    // the single-query bench_two_stage path. Computed in a second
+    // pass over the batched candidate generator so the timing loop
+    // above isn't perturbed by the HashSet construction.
+    let cand_recall_label = if let Some(exact) = exact_rq_top {
+        use std::collections::HashSet;
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        let mut bs = 0usize;
+        while bs < cfg.n_queries {
+            let be = (bs + batch_size).min(cfg.n_queries);
+            let bq = &queries[bs * cfg.dim..be * cfg.dim];
+            let cands = bitmap.top_m_candidates_batched(bq, m);
+            for (i, c) in cands.iter().enumerate() {
+                let qi = bs + i;
+                let cand_set: HashSet<i64> = c.iter().map(|&x| x as i64).collect();
+                let exact_top: &[i64] = &exact[qi * cfg.k..(qi + 1) * cfg.k];
+                for &di in exact_top {
+                    if di >= 0 && cand_set.contains(&di) {
+                        hits += 1;
+                    }
+                    total += 1;
+                }
+            }
+            bs = be;
+        }
+        let cr = hits as f32 / total.max(1) as f32;
+        format!(" CR={cr:.3}")
+    } else {
+        String::new()
+    };
+
+    let name = format!("TwoStage b={bits} M={m} B={batch_size}{cand_recall_label}");
+    let dump_name = format!("TwoStage b={bits} M={m} B={batch_size}");
+    maybe_dump_pred(cfg, &dump_name, &pred);
+    finalise_row(
+        name,
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
+    )
+}
+
 /// Multi-bucket bitmap as a candidate generator: scores all docs by
 /// the bilinear bucket-overlap with `weights`, takes top-M, then
 /// reruns the exact RankQuant b=`bits` asymmetric kernel on those M.
@@ -935,7 +1064,82 @@ fn main() {
                 row.name = format!("Bitmap-pulp n_top={n_top}");
                 all_rows.push(row);
             }
-            other => panic!("unknown --mode '{other}' (expected: bitmap, bitmap-pulp)"),
+            "batched-two-stage" => {
+                // Multi-query batched candidate gen → exact RQ rerank.
+                // Sweeps M ∈ {100, 500, 1000, 5000} at the configured
+                // --batch size, plus the single-query M=500 row as a
+                // direct head-to-head sanity-check.
+                eprintln!("computing exact RankQuant b=2 top-k for CR metric ...");
+                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                rq_exact.add(&corpus);
+                let rq_top: Vec<i64> = collect_preds(
+                    &queries,
+                    cfg.dim,
+                    cfg.n_queries,
+                    cfg.k,
+                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
+                );
+                eprintln!("benching single-query TwoStage b=2 M=500 (baseline) ...");
+                all_rows.push(bench_two_stage(
+                    &corpus, &queries, &truth, &cfg, 2, 500, n_top, Some(&rq_top),
+                ));
+                for &m in &[100usize, 500, 1000, 5000] {
+                    eprintln!(
+                        "benching TwoStage b=2 M={m} B={} (batched) ...",
+                        cfg.batch,
+                    );
+                    all_rows.push(bench_two_stage_batched(
+                        &corpus,
+                        &queries,
+                        &truth,
+                        &cfg,
+                        2,
+                        m,
+                        n_top,
+                        cfg.batch,
+                        Some(&rq_top),
+                    ));
+                }
+            }
+            "batch-sweep" => {
+                // Vary batch ∈ {1, 2, 4, 8, 16} at fixed M=500 to map
+                // the bandwidth-amortisation curve. B=1 cross-checks
+                // against the single-query path (should be within
+                // noise; small overhead expected from the extra
+                // copy in top_m_candidates_batched).
+                eprintln!("computing exact RankQuant b=2 top-k for CR metric ...");
+                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                rq_exact.add(&corpus);
+                let rq_top: Vec<i64> = collect_preds(
+                    &queries,
+                    cfg.dim,
+                    cfg.n_queries,
+                    cfg.k,
+                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
+                );
+                eprintln!("benching single-query TwoStage b=2 M=500 (baseline) ...");
+                all_rows.push(bench_two_stage(
+                    &corpus, &queries, &truth, &cfg, 2, 500, n_top, Some(&rq_top),
+                ));
+                for &b in &[1usize, 2, 4, 8, 16] {
+                    eprintln!("benching TwoStage b=2 M=500 B={b} ...");
+                    all_rows.push(bench_two_stage_batched(
+                        &corpus,
+                        &queries,
+                        &truth,
+                        &cfg,
+                        2,
+                        500,
+                        n_top,
+                        b,
+                        Some(&rq_top),
+                    ));
+                }
+            }
+            other => panic!(
+                "unknown --mode '{other}' (expected: bitmap, bitmap-pulp, \
+                 batched-two-stage, batch-sweep)",
+            ),
         }
         println!();
         print_table(&all_rows);
