@@ -13,6 +13,15 @@
 //! Output is two human-readable tables followed by a JSON line for
 //! downstream tooling.
 
+// Required by the `blas-src` pattern: the link directives that
+// `openblas-src` (Linux) and `accelerate` (macOS) emit via their build
+// scripts only reach the final binary if the binary itself references
+// the `blas-src` crate, even when the actual BLAS calls happen inside
+// ndarray. Without this, rust-lld with `--as-needed` (the default) sees
+// no direct reference to `-lopenblas` in earlier objects and drops the
+// library from the link line, leaving `cblas_sgemm` undefined.
+extern crate blas_src;
+
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
