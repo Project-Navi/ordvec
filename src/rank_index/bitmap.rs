@@ -123,18 +123,7 @@ impl BitmapIndex {
             .for_each(|((q, out_scores), out_indices)| {
                 let qb = self.build_query_bitmap_fp32(q);
                 let mut top = TopK::new(k_eff);
-                // pulp-kernel feature reroutes the dispatch from the
-                // hand-rolled std::arch path to the portable pulp
-                // prototype. Hand-rolled kernels are untouched so the
-                // default build is bit-identical to current main.
-                #[cfg(feature = "pulp-kernel")]
-                {
-                    bitmap_scan_pulp(bitmaps, n, qpv, &qb, &mut top);
-                }
-                #[cfg(not(feature = "pulp-kernel"))]
-                {
-                    bitmap_scan(bitmaps, n, qpv, &qb, &mut top);
-                }
+                bitmap_scan(bitmaps, n, qpv, &qb, &mut top);
                 top.finalize_into(out_scores, out_indices);
             });
 
@@ -386,7 +375,6 @@ impl BitmapIndex {
 /// query bitmap. Uses runtime feature detection for AVX-512 VPOPCNTDQ
 /// (one VPOPCNTQ over 8 u64 lanes), otherwise falls back to scalar
 /// `u64::count_ones()` which Zen 5 retires at 1/cycle.
-#[cfg_attr(feature = "pulp-kernel", allow(dead_code))]
 fn bitmap_scan(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     debug_assert_eq!(q.len(), qpv);
 
@@ -407,7 +395,6 @@ fn bitmap_scan(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK)
     bitmap_scan_scalar(bitmaps, n, qpv, q, top);
 }
 
-#[cfg_attr(feature = "pulp-kernel", allow(dead_code))]
 fn bitmap_scan_scalar(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
@@ -420,7 +407,6 @@ fn bitmap_scan_scalar(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mu
 }
 
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(feature = "pulp-kernel", allow(dead_code))]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn bitmap_scan_avx512vpop(
     bitmaps: &[u64],
@@ -447,69 +433,6 @@ unsafe fn bitmap_scan_avx512vpop(
         }
         let acc_sum: i64 = _mm512_reduce_add_epi64(acc_zmm);
         top.maybe_insert(acc_sum as f32, di);
-    }
-}
-
-// -------------------------------------------------------------------
-// pulp-based bitmap scan (feature-gated prototype).
-//
-// pulp::Arch::dispatch resolves the best Simd impl at runtime. The
-// Simd trait exposes `and_u64s` for the AND step but does NOT expose a
-// portable popcount. We bytemuck::cast the u64s vector to a `[u64; N]`
-// array and fold `count_ones()` per lane; LLVM is reliable about
-// recognising `u64::count_ones()` and lowering it to VPOPCNTQ on hosts
-// that have the AVX-512 VPOPCNTDQ feature (the same condition the
-// hand-rolled `bitmap_scan_avx512vpop` checks). On hosts without
-// VPOPCNTDQ, LLVM falls back to the VPSHUFB byte-LUT popcount sequence
-// or scalar POPCNT, mirroring sse-popcount/Mula strategies.
-//
-// Compared to the hand-rolled AVX-512 kernel this is one path instead
-// of three (AVX-512 + AVX-2 + scalar fallback) — at the cost of relying
-// on LLVM to recognise popcount and on pulp's portable AND lowering.
-// -------------------------------------------------------------------
-#[cfg(feature = "pulp-kernel")]
-fn bitmap_scan_pulp(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
-    use pulp::Arch;
-
-    struct ScoreDoc<'a> {
-        doc: &'a [u64],
-        q: &'a [u64],
-    }
-
-    impl<'a> pulp::WithSimd for ScoreDoc<'a> {
-        type Output = u64;
-
-        #[inline(always)]
-        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
-            let (doc_simd, doc_tail) = S::as_simd_u64s(self.doc);
-            let (q_simd, q_tail) = S::as_simd_u64s(self.q);
-            debug_assert_eq!(doc_simd.len(), q_simd.len());
-            debug_assert_eq!(doc_tail.len(), q_tail.len());
-
-            let mut acc: u64 = 0;
-            // SIMD chunks: AND, then bytemuck::cast to [u64; N] and
-            // popcount per lane. LLVM lowers the popcount fold to
-            // VPOPCNTQ on hosts with avx512vpopcntdq.
-            for (d, qw) in doc_simd.iter().zip(q_simd.iter()) {
-                let and = simd.and_u64s(*d, *qw);
-                let lanes: &[u64] = bytemuck::cast_slice(std::slice::from_ref(&and));
-                for &w in lanes {
-                    acc += w.count_ones() as u64;
-                }
-            }
-            // Scalar tail.
-            for (d, qw) in doc_tail.iter().zip(q_tail.iter()) {
-                acc += (d & qw).count_ones() as u64;
-            }
-            acc
-        }
-    }
-
-    let arch = Arch::new();
-    for di in 0..n {
-        let doc = &bitmaps[di * qpv..(di + 1) * qpv];
-        let score = arch.dispatch(ScoreDoc { doc, q });
-        top.maybe_insert(score as f32, di);
     }
 }
 
