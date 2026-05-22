@@ -79,9 +79,11 @@ jobs:
         run: cargo build --release --example bench_rank
 
   # ----------------------------------------------------------------------
-  # Prove the declared MSRV (1.89.0) actually builds and tests. CI overrides
-  # any contributor-facing rust-toolchain.toml, so this is the source of
-  # truth for the floor.
+  # Prove the declared MSRV (1.89.0) actually builds and tests. There is
+  # intentionally NO rust-toolchain.toml in the repo: dtolnay/rust-toolchain
+  # neither removes nor overrides one, so a committed toolchain file would take
+  # rustup directory-override precedence and silently change this floor. The
+  # MSRV is therefore pinned here, in the workflow, as the source of truth.
   # ----------------------------------------------------------------------
   msrv:
     name: msrv (1.89.0)
