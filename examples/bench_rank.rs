@@ -40,6 +40,10 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 use ordvec::rank_index::search_asymmetric_byte_lut;
+// `RankQuantFastscanIndex` is `#[doc(hidden)]` (optional b=2 scan path);
+// the bench imports it to compare its throughput/recall against the
+// production RankQuant b=2 asym kernel on identical data.
+use ordvec::RankQuantFastscanIndex;
 use ordvec::{BitmapIndex, RankIndex, RankQuantIndex, SignBitmapIndex};
 
 /// Fixed RNG seed for the synthetic corpus + queries. Pinning this is
@@ -996,6 +1000,56 @@ fn bench_sign_two_stage_batched(
     )
 }
 
+/// Bench the FastScan b=2 path against the same corpus/queries the
+/// regular RankQuant b=2 asym bench uses. Returns one row labelled
+/// `RankQuant b=2 fastscan`. The companion `RankQuant b=2 asym` row
+/// from `bench_rankquant` is the apples-to-apples baseline (same
+/// recall; FastScan trades 2× storage for lower scan latency).
+fn bench_rankquant_fastscan_b2(
+    corpus: &[f32],
+    queries: &[f32],
+    truth: &[i64],
+    cfg: &Config,
+) -> Row {
+    let dim = cfg.dim;
+    let n = cfg.n;
+
+    // Build the FastScan layout once via the type wrapper. The type's
+    // add() encapsulates rank-transform + bucket + pack_fastscan_b2;
+    // time the whole encode for the encode-throughput column.
+    let t0 = Instant::now();
+    let mut fs_idx = RankQuantFastscanIndex::new(dim);
+    fs_idx.add(corpus);
+    let encode_secs = t0.elapsed().as_secs_f64();
+    let encode_vps = n as f64 / encode_secs;
+
+    // bytes/vec reports the FastScan-layout storage: the block-32
+    // re-blocking gives dim/2 bytes per doc — 2× the standard b=2
+    // packing (dim/4). This is the well-known FastScan space cost.
+    let bytes_per_vec = fs_idx.byte_size() / n.max(1);
+    let total_mib = fs_idx.byte_size() as f64 / 1024.0 / 1024.0;
+
+    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
+        let _ = fs_idx.search(q, cfg.k);
+    });
+    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+        fs_idx.search(q, cfg.k).indices
+    });
+    let recall = recall_at_k(&pred, truth, cfg.k);
+    maybe_dump_pred(cfg, "RankQuant b=2 fastscan", &pred);
+    finalise_row(
+        "RankQuant b=2 fastscan".to_string(),
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
+    )
+}
+
 fn bench_rankquant(
     corpus: &[f32],
     queries: &[f32],
@@ -1333,6 +1387,8 @@ fn main() {
     all_rows.extend(bench_rankquant(&corpus, &queries, &truth, &cfg, 2));
     eprintln!("benching RankQuant b=2 byte-LUT ...");
     all_rows.push(bench_rankquant_byte_lut(&corpus, &queries, &truth, &cfg, 2));
+    eprintln!("benching RankQuant b=2 FastScan (optional path) ...");
+    all_rows.push(bench_rankquant_fastscan_b2(&corpus, &queries, &truth, &cfg));
     eprintln!("benching RankQuant b=4 ...");
     all_rows.extend(bench_rankquant(&corpus, &queries, &truth, &cfg, 4));
     eprintln!("benching RankQuant b=4 byte-LUT ...");

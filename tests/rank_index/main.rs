@@ -24,6 +24,7 @@ use ordvec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankq
 use ordvec::{BitmapIndex, RankIndex, RankQuantIndex};
 
 mod bitmap;
+mod fastscan;
 mod index;
 // `MultiBucketBitmapIndex` is gated behind the `experimental` feature.
 #[cfg(feature = "experimental")]

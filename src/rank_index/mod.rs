@@ -54,6 +54,7 @@
 //! `MultiBucketBitmapIndex` is gated behind the `experimental` feature.
 
 mod bitmap;
+mod fastscan;
 mod index;
 #[cfg(feature = "experimental")]
 mod multi_bucket;
@@ -68,3 +69,11 @@ pub use index::RankIndex;
 #[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmapIndex;
 pub use quant::{search_asymmetric_byte_lut, RankQuantIndex};
+// `RankQuantFastscanIndex` is an *optional* b=2 scan path, not the
+// headline API. It is re-exported `#[doc(hidden)]` so it stays
+// reachable (`use ordvec::rank_index::RankQuantFastscanIndex`) for
+// callers who have measured it to win, without being advertised as a
+// default-API type. The free `search_asymmetric_fastscan_b2` entry
+// point stays `pub(crate)` inside `fastscan`.
+#[doc(hidden)]
+pub use fastscan::RankQuantFastscanIndex;

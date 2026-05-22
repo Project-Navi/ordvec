@@ -44,6 +44,13 @@ pub use sign_bitmap::SignBitmapIndex;
 #[cfg(feature = "experimental")]
 pub use rank_index::MultiBucketBitmapIndex;
 
+// `RankQuantFastscanIndex` is an optional FastScan b=2 scan path. It is
+// re-exported `#[doc(hidden)]` at the crate root — reachable as
+// `ordvec::RankQuantFastscanIndex` for callers who opt in, but not
+// advertised alongside the headline index types above.
+#[doc(hidden)]
+pub use rank_index::RankQuantFastscanIndex;
+
 /// Top-k search results, laid out as `nq` contiguous blocks of `k`.
 ///
 /// `scores` and `indices` are flat row-major buffers of length `nq * k`;
