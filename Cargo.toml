@@ -2,12 +2,11 @@
 name = "ordvec"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; verified builds + 80 tests pass
 description = "Training-free ordinal & sign quantization for vector retrieval"
 license = "MIT"
-# TODO: set these once the standalone repo is published.
-repository = "TODO"
-homepage = "TODO"
+repository = "https://github.com/Fieldnote-Echo/ordvec"
+homepage = "https://github.com/Fieldnote-Echo/ordvec"
 readme = "README.md"
 keywords = ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"]
 categories = ["algorithms", "science", "compression"]
@@ -15,7 +14,6 @@ categories = ["algorithms", "science", "compression"]
 [dependencies]
 rayon = "1.10"
 ordered-float = "4"
-serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 # Test/bench corpora are seeded with these; not needed by the library.
@@ -23,9 +21,9 @@ rand = "0.8"
 rand_chacha = "0.3"
 
 [features]
-default = ["simd"]
-simd = []
-serde = ["dep:serde"]
+# SIMD is always compiled and dispatched at runtime via is_x86_feature_detected!
+# with a scalar fallback — no feature flag gates it. `experimental` exposes
+# MultiBucketBitmapIndex (research scaffold), kept off the stable surface.
 experimental = []
 
 [profile.release]
