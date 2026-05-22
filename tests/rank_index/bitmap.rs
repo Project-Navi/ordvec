@@ -2,10 +2,10 @@
 //! generation, two-stage rerank wiring, and the AVX-512 VPOPCNTDQ
 //! batched-kernel parity proofs.
 
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use ordvec::rank::rank_transform;
 use ordvec::{BitmapIndex, RankQuantIndex};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
 
@@ -43,9 +43,8 @@ fn bitmap_index_constant_composition_invariant() {
     for di in 0..N {
         let v = &corpus[di * D..(di + 1) * D];
         let r = rank_transform(v);
-        let expected_top: std::collections::HashSet<usize> = (0..D)
-            .filter(|&j| (r[j] as usize) >= D - n_top)
-            .collect();
+        let expected_top: std::collections::HashSet<usize> =
+            (0..D).filter(|&j| (r[j] as usize) >= D - n_top).collect();
         assert_eq!(expected_top.len(), n_top, "doc {di} top-set size");
     }
 }
@@ -71,8 +70,7 @@ fn bitmap_then_subset_recovers_exact_when_m_eq_n() {
     let (_, two_stage_top) = rq.search_asymmetric_subset(&query, &cands, 10);
     let exact = rq.search_asymmetric(&query, 10);
 
-    let two_stage_set: std::collections::HashSet<i64> =
-        two_stage_top.iter().copied().collect();
+    let two_stage_set: std::collections::HashSet<i64> = two_stage_top.iter().copied().collect();
     let exact_set: std::collections::HashSet<i64> =
         exact.indices_for_query(0).iter().copied().collect();
     assert_eq!(two_stage_set, exact_set, "M=N two-stage must equal exact");
@@ -131,15 +129,20 @@ fn bitmap_top_m_candidates_deterministic_at_ties() {
     let m = 100;
     let c1 = bitmap.top_m_candidates(&query, m);
     let c2 = bitmap.top_m_candidates(&query, m);
-    assert_eq!(c1, c2, "single-query candidates must be deterministic at ties");
+    assert_eq!(
+        c1, c2,
+        "single-query candidates must be deterministic at ties"
+    );
 
     // Batched path agrees with single-query (the batched-equivalence
     // guarantee from `bitmap_batched_matches_single_query` extended
     // to the high-tie regime).
-    let queries: Vec<f32> = (0..3 * TIE_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
-        .collect();
-    for q in [&queries[..TIE_D], &queries[TIE_D..2 * TIE_D], &queries[2 * TIE_D..]] {
+    let queries: Vec<f32> = (0..3 * TIE_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    for q in [
+        &queries[..TIE_D],
+        &queries[TIE_D..2 * TIE_D],
+        &queries[2 * TIE_D..],
+    ] {
         let single = bitmap.top_m_candidates(q, m);
         let batched = bitmap.top_m_candidates_batched(q, m);
         assert_eq!(batched.len(), 1);
@@ -164,8 +167,12 @@ fn bitmap_batched_avx512_production_dim() {
     const N_DOCS: usize = 256;
     const BATCH: usize = 5;
     let mut rng = ChaCha8Rng::seed_from_u64(7);
-    let corpus: Vec<f32> = (0..N_DOCS * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
-    let queries: Vec<f32> = (0..BATCH * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let corpus: Vec<f32> = (0..N_DOCS * PROD_D)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
+    let queries: Vec<f32> = (0..BATCH * PROD_D)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
     let n_top = PROD_D / 4;
     let mut bitmap = BitmapIndex::new(PROD_D, n_top);
     bitmap.add(&corpus);
@@ -196,8 +203,12 @@ fn bitmap_batched_hot_plus_tail_split() {
     const N_DOCS: usize = 256;
     const BATCH: usize = 11;
     let mut rng = ChaCha8Rng::seed_from_u64(101);
-    let corpus: Vec<f32> = (0..N_DOCS * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
-    let queries: Vec<f32> = (0..BATCH * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let corpus: Vec<f32> = (0..N_DOCS * PROD_D)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
+    let queries: Vec<f32> = (0..BATCH * PROD_D)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
     let n_top = PROD_D / 4;
     let mut bitmap = BitmapIndex::new(PROD_D, n_top);
     bitmap.add(&corpus);
@@ -240,7 +251,9 @@ fn bitmap_batched_edge_cases() {
     }
     // Single-query path agrees.
     for bi in 0..3 {
-        assert!(bitmap.top_m_candidates(&queries[bi * D..(bi + 1) * D], 0).is_empty());
+        assert!(bitmap
+            .top_m_candidates(&queries[bi * D..(bi + 1) * D], 0)
+            .is_empty());
     }
 
     // m > n_vectors: clamps to n_vectors candidates per query.
@@ -256,7 +269,9 @@ fn bitmap_batched_edge_cases() {
     }
 
     // Chunked wrapper: empty input → empty result.
-    assert!(bitmap.top_m_candidates_batched_chunked(&empty, 10, 4).is_empty());
+    assert!(bitmap
+        .top_m_candidates_batched_chunked(&empty, 10, 4)
+        .is_empty());
 }
 
 #[test]
@@ -274,8 +289,12 @@ fn bitmap_batched_avx512_high_qpv_no_panic() {
     const N_DOCS: usize = 64;
     const BATCH: usize = 3;
     let mut rng = ChaCha8Rng::seed_from_u64(123);
-    let corpus: Vec<f32> = (0..N_DOCS * HIGH_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
-    let queries: Vec<f32> = (0..BATCH * HIGH_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let corpus: Vec<f32> = (0..N_DOCS * HIGH_D)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
+    let queries: Vec<f32> = (0..BATCH * HIGH_D)
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
     let n_top = HIGH_D / 4;
     let mut bitmap = BitmapIndex::new(HIGH_D, n_top);
     bitmap.add(&corpus);
@@ -305,9 +324,7 @@ fn bitmap_batched_matches_single_query() {
     bitmap.add(&corpus);
     let mut rng = ChaCha8Rng::seed_from_u64(99);
     let batch: usize = 7; // intentionally non-power-of-2
-    let queries: Vec<f32> = (0..batch * D)
-        .map(|_| rng.gen_range(-1.0..1.0))
-        .collect();
+    let queries: Vec<f32> = (0..batch * D).map(|_| rng.gen_range(-1.0..1.0)).collect();
     for m in [10usize, 50, 100] {
         let single: Vec<Vec<u32>> = (0..batch)
             .map(|bi| bitmap.top_m_candidates(&queries[bi * D..(bi + 1) * D], m))

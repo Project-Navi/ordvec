@@ -237,6 +237,10 @@ impl RankIndex {
                 "TVR1 payload length does not match dim * n_vectors",
             ));
         }
-        Ok(Self { dim, n_vectors, ranks })
+        Ok(Self {
+            dim,
+            n_vectors,
+            ranks,
+        })
     }
 }

@@ -36,10 +36,10 @@
 //! Output is a human-readable table followed by a JSON line for
 //! downstream tooling.
 
+use ordvec::rank_index::search_asymmetric_byte_lut;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
-use ordvec::rank_index::search_asymmetric_byte_lut;
 // `RankQuantFastscanIndex` is `#[doc(hidden)]` (optional b=2 scan path);
 // the bench imports it to compare its throughput/recall against the
 // production RankQuant b=2 asym kernel on identical data.
@@ -140,7 +140,11 @@ fn parse_args() -> Config {
 fn dump_pred_jsonl(path: &str, mode: &str, n_queries: usize, k: usize, pred: &[i64]) {
     use std::fs::OpenOptions;
     use std::io::{BufWriter, Write};
-    debug_assert_eq!(pred.len(), n_queries * k, "pred buffer length must equal n_queries * k");
+    debug_assert_eq!(
+        pred.len(),
+        n_queries * k,
+        "pred buffer length must equal n_queries * k"
+    );
     let f = OpenOptions::new()
         .create(true)
         .append(true)
@@ -149,7 +153,11 @@ fn dump_pred_jsonl(path: &str, mode: &str, n_queries: usize, k: usize, pred: &[i
     let mut w = BufWriter::new(f);
     for qi in 0..n_queries {
         let row = &pred[qi * k..(qi + 1) * k];
-        write!(&mut w, r#"{{"qid_idx":{qi},"mode":"{mode}","k":{k},"doc_ids":["#).unwrap();
+        write!(
+            &mut w,
+            r#"{{"qid_idx":{qi},"mode":"{mode}","k":{k},"doc_ids":["#
+        )
+        .unwrap();
         for (i, &di) in row.iter().enumerate() {
             if i > 0 {
                 w.write_all(b",").unwrap();
@@ -345,8 +353,7 @@ fn ceiling_recall(
     let mut hits = 0usize;
     let mut total = 0usize;
     for qi in 0..n_queries {
-        let pred_set: HashSet<i64> =
-            pred[qi * k_out..(qi + 1) * k_out].iter().copied().collect();
+        let pred_set: HashSet<i64> = pred[qi * k_out..(qi + 1) * k_out].iter().copied().collect();
         let truth_row = &truth_topk_eval[qi * k_eval..(qi + 1) * k_eval];
         for &di in truth_row {
             if di >= 0 && pred_set.contains(&di) {
@@ -396,6 +403,7 @@ struct Row {
     docs_per_sec: f64,
 }
 
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 fn finalise_row(
     name: String,
     bytes_per_vec: usize,
@@ -461,7 +469,13 @@ where
 }
 
 /// Run the search closure once per query, collecting results.
-fn collect_preds<F>(queries: &[f32], dim: usize, n_queries: usize, k: usize, mut search_one: F) -> Vec<i64>
+fn collect_preds<F>(
+    queries: &[f32],
+    dim: usize,
+    n_queries: usize,
+    k: usize,
+    mut search_one: F,
+) -> Vec<i64>
 where
     F: FnMut(&[f32]) -> Vec<i64>,
 {
@@ -560,13 +574,7 @@ fn bench_rankquant_byte_lut(
 /// Bench the standalone top-bucket bitmap scan (no exact rerank).
 /// `n_top` is the bitmap's set-bit count per doc (e.g., dim/4 for the
 /// "top quarter" / b=2-equivalent operating point).
-fn bench_bitmap(
-    corpus: &[f32],
-    queries: &[f32],
-    truth: &[i64],
-    cfg: &Config,
-    n_top: usize,
-) -> Row {
+fn bench_bitmap(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config, n_top: usize) -> Row {
     let mut idx = BitmapIndex::new(cfg.dim, n_top);
     let t0 = Instant::now();
     idx.add(corpus);
@@ -608,6 +616,7 @@ fn bench_bitmap(
 /// over queries. This is the *ANN probe quality* metric, distinct
 /// from the task R@10 (which compares against FP32 brute-force
 /// ground truth).
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 fn bench_two_stage(
     corpus: &[f32],
     queries: &[f32],
@@ -704,6 +713,7 @@ fn bench_two_stage(
 /// so within-batch variance is zero and across-batch variance is
 /// captured directly. This makes the row directly comparable to the
 /// existing single-query TwoStage rows.
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 fn bench_two_stage_batched(
     corpus: &[f32],
     queries: &[f32],
@@ -840,7 +850,15 @@ fn bench_sign_bitmap(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Confi
     let name = "SignBitmap probe".to_string();
     maybe_dump_pred(cfg, &name, &pred);
     finalise_row(
-        name, bytes_per_vec, total_mib, encode_vps, p50, p99, recall, cfg.n, cfg.dim,
+        name,
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
     )
 }
 
@@ -902,7 +920,15 @@ fn bench_sign_two_stage(
     let dump_name = format!("SignTwoStage b={bits} M={m}");
     maybe_dump_pred(cfg, &dump_name, &pred);
     finalise_row(
-        name, bytes_per_vec, total_mib, encode_vps, p50, p99, recall, cfg.n, cfg.dim,
+        name,
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
     )
 }
 
@@ -911,6 +937,7 @@ fn bench_sign_two_stage(
 /// per chunk through the AVX-512 XOR-popcount kernel, then runs the
 /// existing RankQuant subset rerank per query. Per-query effective
 /// latency = batch wall time / batch_size.
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 fn bench_sign_two_stage_batched(
     corpus: &[f32],
     queries: &[f32],
@@ -996,7 +1023,15 @@ fn bench_sign_two_stage_batched(
     let dump_name = format!("SignTwoStage b={bits} M={m} B={batch_size}");
     maybe_dump_pred(cfg, &dump_name, &pred);
     finalise_row(
-        name, bytes_per_vec, total_mib, encode_vps, p50, p99, recall, cfg.n, cfg.dim,
+        name,
+        bytes_per_vec,
+        total_mib,
+        encode_vps,
+        p50,
+        p99,
+        recall,
+        cfg.n,
+        cfg.dim,
     )
 }
 
@@ -1102,7 +1137,16 @@ fn bench_rankquant(
 fn print_table(rows: &[Row]) {
     println!(
         "{:<32} {:>10} {:>10} {:>13} {:>9} {:>9} {:>8} {:>8} {:>14} {:>8}",
-        "mode", "bytes/vec", "total MiB", "encode v/s", "p50 ms", "p99 ms", "GiB/s", "ns/dim", "Mdocs/s scan", "R@10",
+        "mode",
+        "bytes/vec",
+        "total MiB",
+        "encode v/s",
+        "p50 ms",
+        "p99 ms",
+        "GiB/s",
+        "ns/dim",
+        "Mdocs/s scan",
+        "R@10",
     );
     println!("{}", "-".repeat(132));
     for r in rows {
@@ -1178,7 +1222,12 @@ fn main() {
         eprintln!("loading corpus {} ...", corpus_path);
         let t0 = Instant::now();
         let (corpus, n, dim) = load_npy_f32(&corpus_path);
-        eprintln!("  loaded n={} dim={} in {:.2}s", n, dim, t0.elapsed().as_secs_f64());
+        eprintln!(
+            "  loaded n={} dim={} in {:.2}s",
+            n,
+            dim,
+            t0.elapsed().as_secs_f64()
+        );
         eprintln!("loading queries {} ...", queries_path);
         let t0 = Instant::now();
         let (queries, n_q, q_dim) = load_npy_f32(&queries_path);
@@ -1203,7 +1252,10 @@ fn main() {
             cfg.n_clusters, cfg.latent_dim,
         );
         let (corpus, queries, _q_clusters) = make_clustered_corpus(&cfg, CORPUS_SEED);
-        eprintln!("  done in {:.2}s (seed={CORPUS_SEED}, self-contained)", t0.elapsed().as_secs_f64());
+        eprintln!(
+            "  done in {:.2}s (seed={CORPUS_SEED}, self-contained)",
+            t0.elapsed().as_secs_f64()
+        );
         (corpus, queries)
     };
 
@@ -1236,22 +1288,23 @@ fn main() {
                 eprintln!("computing exact RankQuant b=2 top-k for CR metric ...");
                 let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
-                let rq_top: Vec<i64> = collect_preds(
-                    &queries,
-                    cfg.dim,
-                    cfg.n_queries,
-                    cfg.k,
-                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
-                );
+                let rq_top: Vec<i64> =
+                    collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+                        rq_exact.search_asymmetric(q, cfg.k).indices
+                    });
                 eprintln!("benching single-query TwoStage b=2 M=500 (baseline) ...");
                 all_rows.push(bench_two_stage(
-                    &corpus, &queries, &truth, &cfg, 2, 500, n_top, Some(&rq_top),
+                    &corpus,
+                    &queries,
+                    &truth,
+                    &cfg,
+                    2,
+                    500,
+                    n_top,
+                    Some(&rq_top),
                 ));
                 for &m in &[100usize, 500, 1000, 5000] {
-                    eprintln!(
-                        "benching TwoStage b=2 M={m} B={} (batched) ...",
-                        cfg.batch,
-                    );
+                    eprintln!("benching TwoStage b=2 M={m} B={} (batched) ...", cfg.batch,);
                     all_rows.push(bench_two_stage_batched(
                         &corpus,
                         &queries,
@@ -1280,24 +1333,36 @@ fn main() {
                 eprintln!("computing exact RankQuant b=2 top-k for CR ...");
                 let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
-                let rq_top: Vec<i64> = collect_preds(
-                    &queries,
-                    cfg.dim,
-                    cfg.n_queries,
-                    cfg.k,
-                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
-                );
+                let rq_top: Vec<i64> =
+                    collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+                        rq_exact.search_asymmetric(q, cfg.k).indices
+                    });
 
                 // SignTwoStage (sign + RQ rerank) batched B=8 at the
                 // same M sweep as the rank two-stage baseline.
                 for &m in &[100usize, 500, 1000, 5000] {
                     eprintln!("benching SignTwoStage b=2 M={m} B={} ...", cfg.batch);
                     all_rows.push(bench_sign_two_stage_batched(
-                        &corpus, &queries, &truth, &cfg, 2, m, cfg.batch, Some(&rq_top),
+                        &corpus,
+                        &queries,
+                        &truth,
+                        &cfg,
+                        2,
+                        m,
+                        cfg.batch,
+                        Some(&rq_top),
                     ));
                     eprintln!("benching rank TwoStage b=2 M={m} B={} ...", cfg.batch);
                     all_rows.push(bench_two_stage_batched(
-                        &corpus, &queries, &truth, &cfg, 2, m, bitmap_n_top, cfg.batch, Some(&rq_top),
+                        &corpus,
+                        &queries,
+                        &truth,
+                        &cfg,
+                        2,
+                        m,
+                        bitmap_n_top,
+                        cfg.batch,
+                        Some(&rq_top),
                     ));
                 }
             }
@@ -1309,27 +1374,36 @@ fn main() {
                 eprintln!("computing exact RankQuant b=2 top-k for CR ...");
                 let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
-                let rq_top: Vec<i64> = collect_preds(
-                    &queries,
-                    cfg.dim,
-                    cfg.n_queries,
-                    cfg.k,
-                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
-                );
+                let rq_top: Vec<i64> =
+                    collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+                        rq_exact.search_asymmetric(q, cfg.k).indices
+                    });
                 for &m in &[100usize, 500, 1000, 5000] {
-                    eprintln!(
-                        "benching TwoStage b=1 batched (256 B/vec, MATCHED) M={m} ...",
-                    );
+                    eprintln!("benching TwoStage b=1 batched (256 B/vec, MATCHED) M={m} ...",);
                     all_rows.push(bench_two_stage_batched(
-                        &corpus, &queries, &truth, &cfg, 1, m, n_top, cfg.batch, Some(&rq_top),
+                        &corpus,
+                        &queries,
+                        &truth,
+                        &cfg,
+                        1,
+                        m,
+                        n_top,
+                        cfg.batch,
+                        Some(&rq_top),
                     ));
                 }
                 for &m in &[500usize, 5000] {
-                    eprintln!(
-                        "benching TwoStage b=2 batched (384 B/vec, +50%) M={m} ...",
-                    );
+                    eprintln!("benching TwoStage b=2 batched (384 B/vec, +50%) M={m} ...",);
                     all_rows.push(bench_two_stage_batched(
-                        &corpus, &queries, &truth, &cfg, 2, m, n_top, cfg.batch, Some(&rq_top),
+                        &corpus,
+                        &queries,
+                        &truth,
+                        &cfg,
+                        2,
+                        m,
+                        n_top,
+                        cfg.batch,
+                        Some(&rq_top),
                     ));
                 }
             }
@@ -1342,16 +1416,20 @@ fn main() {
                 eprintln!("computing exact RankQuant b=2 top-k for CR metric ...");
                 let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
-                let rq_top: Vec<i64> = collect_preds(
-                    &queries,
-                    cfg.dim,
-                    cfg.n_queries,
-                    cfg.k,
-                    |q| rq_exact.search_asymmetric(q, cfg.k).indices,
-                );
+                let rq_top: Vec<i64> =
+                    collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
+                        rq_exact.search_asymmetric(q, cfg.k).indices
+                    });
                 eprintln!("benching single-query TwoStage b=2 M=500 (baseline) ...");
                 all_rows.push(bench_two_stage(
-                    &corpus, &queries, &truth, &cfg, 2, 500, n_top, Some(&rq_top),
+                    &corpus,
+                    &queries,
+                    &truth,
+                    &cfg,
+                    2,
+                    500,
+                    n_top,
+                    Some(&rq_top),
                 ));
                 for &b in &[1usize, 2, 4, 8, 16] {
                     eprintln!("benching TwoStage b=2 M=500 B={b} ...");

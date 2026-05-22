@@ -122,10 +122,8 @@ fn check_payload_fits_file<R: Seek>(
 }
 
 fn check_dim(dim: usize) -> io::Result<()> {
-    if dim < 2 || dim > MAX_DIM {
-        return Err(invalid(format!(
-            "dim {dim} out of range [2, {MAX_DIM}]"
-        )));
+    if !(2..=MAX_DIM).contains(&dim) {
+        return Err(invalid(format!("dim {dim} out of range [2, {MAX_DIM}]")));
     }
     Ok(())
 }
@@ -139,15 +137,13 @@ fn check_dim(dim: usize) -> io::Result<()> {
 /// `SignBitmapIndex::new(d)` with `d > u16::MAX` could be written but
 /// would fail on load, breaking roundtrip persistence.
 fn check_sign_bitmap_dim(dim: usize) -> io::Result<()> {
-    if dim < 64 || dim > MAX_SIGN_BITMAP_DIM {
+    if !(64..=MAX_SIGN_BITMAP_DIM).contains(&dim) {
         return Err(invalid(format!(
             "TVSB dim {dim} out of range [64, {MAX_SIGN_BITMAP_DIM}]"
         )));
     }
-    if dim % 64 != 0 {
-        return Err(invalid(format!(
-            "TVSB dim {dim} is not a multiple of 64"
-        )));
+    if !dim.is_multiple_of(64) {
+        return Err(invalid(format!("TVSB dim {dim} is not a multiple of 64")));
     }
     Ok(())
 }
@@ -305,14 +301,14 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
     // bucket-rank decoder cannot interpret. `bits ∈ {1,2,4}` is already
     // validated above, so neither divisor is zero.
     let n_buckets = 1usize << bits;
-    if dim % n_buckets != 0 {
+    if !dim.is_multiple_of(n_buckets) {
         return Err(invalid(format!(
             "TVRQ dim {dim} is not a multiple of 2^bits = {n_buckets}; \
              constant-composition invariant violated"
         )));
     }
     let codes_per_byte = (8 / bits) as usize;
-    if dim % codes_per_byte != 0 {
+    if !dim.is_multiple_of(codes_per_byte) {
         return Err(invalid(format!(
             "TVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}"
         )));
@@ -361,9 +357,7 @@ pub fn write_bitmap(
     Ok(())
 }
 
-pub fn load_bitmap(
-    path: impl AsRef<Path>,
-) -> io::Result<(usize, usize, usize, Vec<u64>)> {
+pub fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, Vec<u64>)> {
     let file = File::open(path)?;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut f = BufReader::new(file);
@@ -381,10 +375,8 @@ pub fn load_bitmap(
     f.read_exact(&mut dim_buf)?;
     let dim = u32::from_le_bytes(dim_buf) as usize;
     check_dim(dim)?;
-    if dim % 64 != 0 {
-        return Err(invalid(format!(
-            "TVBM dim {dim} is not a multiple of 64"
-        )));
+    if !dim.is_multiple_of(64) {
+        return Err(invalid(format!("TVBM dim {dim} is not a multiple of 64")));
     }
     let mut top_buf = [0u8; 4];
     f.read_exact(&mut top_buf)?;
@@ -460,9 +452,7 @@ pub fn write_sign_bitmap(
 /// invariant, which sign bitmaps do not share. Sharing it would reject
 /// valid `SignBitmapIndex::new(d)` instances for any `d > 65535`,
 /// breaking the constructor↔loader roundtrip.
-pub fn load_sign_bitmap(
-    path: impl AsRef<Path>,
-) -> io::Result<(usize, usize, Vec<u64>)> {
+pub fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u64>)> {
     let file = File::open(path)?;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let mut f = BufReader::new(file);

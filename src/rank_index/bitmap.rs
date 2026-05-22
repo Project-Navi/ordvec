@@ -280,12 +280,7 @@ impl BitmapIndex {
     ///
     /// Public surface to support staged-pipeline callers that need to
     /// rescore a small survivor set under the exact body overlap.
-    pub fn body_overlap_scores_subset(
-        &self,
-        q_bitmap: &[u64],
-        doc_ids: &[u32],
-        out: &mut [u32],
-    ) {
+    pub fn body_overlap_scores_subset(&self, q_bitmap: &[u64], doc_ids: &[u32], out: &mut [u32]) {
         let qpv = self.qwords_per_vec;
         assert_eq!(q_bitmap.len(), qpv);
         assert_eq!(out.len(), doc_ids.len());
@@ -310,20 +305,14 @@ impl BitmapIndex {
         #[cfg(target_arch = "x86_64")]
         let use_avx512vpop = is_x86_feature_detected!("avx512f")
             && is_x86_feature_detected!("avx512vpopcntdq")
-            && qpv % 8 == 0;
+            && qpv.is_multiple_of(8);
         #[cfg(not(target_arch = "x86_64"))]
         let use_avx512vpop = false;
 
         if use_avx512vpop {
             #[cfg(target_arch = "x86_64")]
             unsafe {
-                body_overlap_scores_subset_avx512vpop(
-                    &self.bitmaps,
-                    qpv,
-                    q_bitmap,
-                    doc_ids,
-                    out,
-                );
+                body_overlap_scores_subset_avx512vpop(&self.bitmaps, qpv, q_bitmap, doc_ids, out);
                 return;
             }
         }
@@ -359,9 +348,7 @@ impl BitmapIndex {
 
     /// Persist to a `.tvbm` file. Format: 17-byte header + u64 bitmaps LE.
     pub fn write(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-        crate::rank_io::write_bitmap(
-            path, self.dim, self.n_top, self.n_vectors, &self.bitmaps,
-        )
+        crate::rank_io::write_bitmap(path, self.dim, self.n_top, self.n_vectors, &self.bitmaps)
     }
 
     /// Load from a `.tvbm` file produced by [`Self::write`].
@@ -403,7 +390,7 @@ fn bitmap_scan(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK)
     #[cfg(target_arch = "x86_64")]
     let use_avx512vpop = is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv % 8 == 0;
+        && qpv.is_multiple_of(8);
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx512vpop = false;
 
@@ -430,23 +417,20 @@ fn bitmap_scan_scalar(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
-unsafe fn bitmap_scan_avx512vpop(
-    bitmaps: &[u64],
-    n: usize,
-    qpv: usize,
-    q: &[u64],
-    top: &mut TopK,
-) {
+unsafe fn bitmap_scan_avx512vpop(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     use std::arch::x86_64::*;
     debug_assert_eq!(qpv % 8, 0, "AVX-512 bitmap scan needs qpv % 8 == 0");
     let lanes = qpv / 8;
     let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for l in 0..lanes {
         q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
     }
     for di in 0..n {
         let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
         let mut acc_zmm = _mm512_setzero_si512();
+        #[allow(clippy::needless_range_loop)]
+        // indexed access is clearer / matches the kernel layout
         for l in 0..lanes {
             let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
             let and_zmm = _mm512_and_si512(d_zmm, q_zmms[l]);
@@ -469,7 +453,7 @@ fn bitmap_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores:
     #[cfg(target_arch = "x86_64")]
     let use_avx512vpop = is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv % 8 == 0;
+        && qpv.is_multiple_of(8);
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx512vpop = false;
 
@@ -480,6 +464,7 @@ fn bitmap_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores:
             return;
         }
     }
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
         let mut acc: u32 = 0;
@@ -503,9 +488,11 @@ unsafe fn bitmap_scan_collect_avx512vpop(
     debug_assert_eq!(qpv % 8, 0);
     let lanes = qpv / 8;
     let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for l in 0..lanes {
         q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
     }
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for di in 0..n {
         let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
         let mut acc_zmm = _mm512_setzero_si512();
@@ -597,7 +584,7 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
     for bi in 0..batch {
         for l in 0..lanes {
             q_zmms.push(_mm512_loadu_si512(
-                q_batch.as_ptr().add(bi * qpv + l * 8) as *const __m512i,
+                q_batch.as_ptr().add(bi * qpv + l * 8) as *const __m512i
             ));
         }
     }
@@ -673,7 +660,7 @@ fn bitmap_scan_collect_batched(
     #[cfg(target_arch = "x86_64")]
     let use_avx512vpop = is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv % 8 == 0;
+        && qpv.is_multiple_of(8);
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx512vpop = false;
 
@@ -700,14 +687,17 @@ unsafe fn body_overlap_scores_subset_avx512vpop(
     debug_assert_eq!(qpv % 8, 0);
     let lanes = qpv / 8;
     let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for l in 0..lanes {
         q_zmms.push(_mm512_loadu_si512(
-            q_bitmap.as_ptr().add(l * 8) as *const __m512i,
+            q_bitmap.as_ptr().add(l * 8) as *const __m512i
         ));
     }
     for (i, &di) in doc_ids.iter().enumerate() {
         let doc_ptr = bitmaps.as_ptr().add((di as usize) * qpv) as *const __m512i;
         let mut acc_zmm = _mm512_setzero_si512();
+        #[allow(clippy::needless_range_loop)]
+        // indexed access is clearer / matches the kernel layout
         for l in 0..lanes {
             let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
             let and_zmm = _mm512_and_si512(d_zmm, q_zmms[l]);

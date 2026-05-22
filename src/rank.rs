@@ -111,6 +111,7 @@ pub fn unpack_buckets(packed: &[u8], d: usize, bits: u8) -> Vec<u8> {
     let mask = (1u8 << bits) - 1;
     let bits_u = bits as usize;
     let mut out = vec![0u8; d];
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for i in 0..d {
         let byte_idx = i / codes_per_byte;
         let pos = i % codes_per_byte;
@@ -257,14 +258,18 @@ mod tests {
         let analytical = rank_norm(d);
         let direct: f32 = {
             let mean = (d as f32 - 1.0) / 2.0;
-            let ss: f32 = (0..d).map(|i| {
-                let c = i as f32 - mean;
-                c * c
-            }).sum();
+            let ss: f32 = (0..d)
+                .map(|i| {
+                    let c = i as f32 - mean;
+                    c * c
+                })
+                .sum();
             ss.sqrt()
         };
-        assert!((analytical - direct).abs() / direct < 1e-5,
-            "analytical {analytical}, direct {direct}");
+        assert!(
+            (analytical - direct).abs() / direct < 1e-5,
+            "analytical {analytical}, direct {direct}"
+        );
     }
 
     #[test]
@@ -278,7 +283,9 @@ mod tests {
         let buckets = bucket_ranks(&ranks, bits);
         let centred: Vec<f32> = buckets.iter().map(|&b| bucket_centre(b, bits)).collect();
         let direct: f32 = centred.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((analytical - direct).abs() / direct < 1e-5,
-            "analytical {analytical}, direct {direct}");
+        assert!(
+            (analytical - direct).abs() / direct < 1e-5,
+            "analytical {analytical}, direct {direct}"
+        );
     }
 }

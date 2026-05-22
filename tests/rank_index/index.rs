@@ -1,8 +1,8 @@
 //! RankIndex (full-precision u16 ranks) integration tests.
 
+use ordvec::RankIndex;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use ordvec::RankIndex;
 
 use crate::{make_corpus, ref_asymmetric, ref_rank_cosine, D, N};
 
@@ -36,6 +36,7 @@ fn rank_index_symmetric_matches_reference() {
         .collect();
     assert_eq!(top_idx, top_ref, "top-10 indices must match reference");
 
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for slot in 0..10 {
         let s_idx = res.scores_for_query(0)[slot];
         let s_ref = ref_scores[slot].1;
@@ -73,6 +74,7 @@ fn rank_index_asymmetric_matches_reference() {
         .collect();
     assert_eq!(top_idx, top_ref);
 
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for slot in 0..10 {
         let s_idx = res.scores_for_query(0)[slot];
         let s_ref = ref_scores[slot].1;

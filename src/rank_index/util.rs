@@ -99,8 +99,7 @@ impl TopK {
             // scan, so this is a total order — the greedy eviction
             // keeps exactly the top-k set under the composite key.
             let id = idx as i64;
-            let better = score > self.worst_val
-                || (score == self.worst_val && id < self.worst_idx);
+            let better = score > self.worst_val || (score == self.worst_val && id < self.worst_idx);
             if better {
                 self.scores[self.worst_pos] = score;
                 self.indices[self.worst_pos] = id;
@@ -134,11 +133,7 @@ impl TopK {
     /// key `(score desc, doc_id asc)`. `out_scores.len()` is the
     /// user-requested `k`; positions beyond `self.filled` are left as
     /// sentinels.
-    pub(super) fn finalize_into(
-        &self,
-        out_scores: &mut [f32],
-        out_indices: &mut [i64],
-    ) {
+    pub(super) fn finalize_into(&self, out_scores: &mut [f32], out_indices: &mut [i64]) {
         debug_assert_eq!(out_scores.len(), out_indices.len());
         for s in out_scores.iter_mut() {
             *s = f32::NEG_INFINITY;

@@ -44,7 +44,10 @@ fn ref_doc_bitmap(doc: &[f32], dim: usize, n_top: usize) -> Vec<u64> {
 }
 
 fn ref_overlap(a: &[u64], b: &[u64]) -> u32 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| (x & y).count_ones()).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x & y).count_ones())
+        .sum()
 }
 
 // --- RT-1 (CRITICAL: heap OOB read in the AVX-512 subset kernel) -----
@@ -60,7 +63,9 @@ fn rt1_subset_rejects_oob_doc_id_at_simd_dim() {
     const DIM: usize = 1024;
     const N_TOP: usize = 256;
     let mut idx = BitmapIndex::new(DIM, N_TOP);
-    let corpus: Vec<f32> = (0..4 * DIM).map(|i| ((i * 7) % 101) as f32 - 50.0).collect();
+    let corpus: Vec<f32> = (0..4 * DIM)
+        .map(|i| ((i * 7) % 101) as f32 - 50.0)
+        .collect();
     idx.add(&corpus);
     let q: Vec<f32> = (0..DIM).map(|i| ((i * 13) % 97) as f32 - 48.0).collect();
     let qb = idx.build_query_bitmap_fp32(&q);
@@ -110,7 +115,9 @@ fn pf_bilinear_score_rejects_oob_doc_idx() {
     const DIM: usize = 128;
     let n_docs = 4usize;
     let mut mb = MultiBucketBitmapIndex::new(DIM, 2);
-    let corpus: Vec<f32> = (0..n_docs * DIM).map(|i| ((i * 5) % 71) as f32 - 35.0).collect();
+    let corpus: Vec<f32> = (0..n_docs * DIM)
+        .map(|i| ((i * 5) % 71) as f32 - 35.0)
+        .collect();
     mb.add(&corpus);
     let q: Vec<f32> = (0..DIM).map(|i| ((i * 9) % 67) as f32 - 33.0).collect();
     let qb = mb.query_bitmaps_from_ranks(&q);
@@ -141,7 +148,9 @@ fn ph_bitmap_search_clamps_huge_k() {
     const DIM: usize = 128;
     let n_docs = 16usize;
     let mut idx = BitmapIndex::new(DIM, DIM / 4);
-    let corpus: Vec<f32> = (0..n_docs * DIM).map(|i| ((i * 3) % 53) as f32 - 26.0).collect();
+    let corpus: Vec<f32> = (0..n_docs * DIM)
+        .map(|i| ((i * 3) % 53) as f32 - 26.0)
+        .collect();
     idx.add(&corpus);
     let q: Vec<f32> = (0..DIM).map(|i| ((i * 11) % 59) as f32 - 29.0).collect();
 
@@ -166,7 +175,9 @@ fn ph_multi_bucket_top_m_bilinear_clamps_huge_m() {
     const DIM: usize = 128;
     let n_docs = 16usize;
     let mut mb = MultiBucketBitmapIndex::new(DIM, 2);
-    let corpus: Vec<f32> = (0..n_docs * DIM).map(|i| ((i * 7) % 61) as f32 - 30.0).collect();
+    let corpus: Vec<f32> = (0..n_docs * DIM)
+        .map(|i| ((i * 7) % 61) as f32 - 30.0)
+        .collect();
     mb.add(&corpus);
     let q: Vec<f32> = (0..DIM).map(|i| ((i * 13) % 73) as f32 - 36.0).collect();
     let qb = mb.query_bitmaps_from_ranks(&q);
@@ -239,5 +250,9 @@ fn r2_topk_breaks_ties_by_lower_doc_id() {
 
     // Determinism across repeated calls.
     let res2 = idx.search(&dup, 4);
-    assert_eq!(res2.indices_for_query(0), top, "tie-break must be deterministic");
+    assert_eq!(
+        res2.indices_for_query(0),
+        top,
+        "tie-break must be deterministic"
+    );
 }

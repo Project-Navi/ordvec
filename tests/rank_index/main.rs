@@ -18,10 +18,10 @@
 
 use std::io::Write;
 
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankquant_norm};
 use ordvec::{BitmapIndex, RankIndex, RankQuantIndex};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 mod bitmap;
 mod fastscan;
@@ -101,10 +101,7 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
             suffix,
             std::process::id()
         ));
-        std::fs::File::create(&p)
-            .unwrap()
-            .write_all(bytes)
-            .unwrap();
+        std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
         p
     };
 
@@ -114,7 +111,10 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
         ("garbage_16", vec![0xAB; 16]),
         ("garbage_4k", vec![0xCC; 4096]),
         // Wrong magic for every type.
-        ("wrong_magic", b"XXXX\x01".iter().chain([0u8; 8].iter()).copied().collect()),
+        (
+            "wrong_magic",
+            b"XXXX\x01".iter().chain([0u8; 8].iter()).copied().collect(),
+        ),
         // TVR1 with overflowing dim/n_vectors.
         ("tvr_oversize", {
             let mut v = Vec::new();
@@ -193,9 +193,9 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
             v.push(1);
             v.extend_from_slice(&64u32.to_le_bytes()); // dim
             v.extend_from_slice(&100u32.to_le_bytes()); // n_vectors
-            // Header says 100 * 64 * 2 = 12800 payload bytes; provide
-            // only 100.
-            v.extend(std::iter::repeat(0u8).take(100));
+                                                        // Header says 100 * 64 * 2 = 12800 payload bytes; provide
+                                                        // only 100.
+            v.extend(std::iter::repeat_n(0u8, 100));
             v
         }),
     ];
@@ -214,7 +214,10 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
         let p2 = p.clone();
         let r2 = std::panic::catch_unwind(|| RankQuantIndex::load(&p2));
         assert!(r2.is_ok(), "RankQuantIndex::load panicked on {label}");
-        assert!(r2.unwrap().is_err(), "RankQuantIndex::load accepted {label}");
+        assert!(
+            r2.unwrap().is_err(),
+            "RankQuantIndex::load accepted {label}"
+        );
 
         let p3 = p.clone();
         let r3 = std::panic::catch_unwind(|| BitmapIndex::load(&p3));

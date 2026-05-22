@@ -1,10 +1,10 @@
 //! MultiBucketBitmapIndex integration tests — the bilinear bucket-overlap
 //! identity that underwrites the bucket decomposition.
 
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_transform};
 use ordvec::MultiBucketBitmapIndex;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
 

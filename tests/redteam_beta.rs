@@ -207,11 +207,7 @@ fn rankquant_search_huge_k_clamps() {
     let query = make_corpus(302, 1, dim);
 
     let res = idx.search(&query, usize::MAX);
-    let returned: usize = res
-        .indices_for_query(0)
-        .iter()
-        .filter(|&&i| i >= 0)
-        .count();
+    let returned: usize = res.indices_for_query(0).iter().filter(|&&i| i >= 0).count();
     assert!(returned <= n, "search returned more than n_vectors results");
     assert_eq!(returned, n, "all n docs should be returned for huge k");
 }
@@ -226,11 +222,7 @@ fn rankquant_search_asymmetric_huge_k_clamps() {
     let query = make_corpus(304, 1, dim);
 
     let res = idx.search_asymmetric(&query, usize::MAX);
-    let returned: usize = res
-        .indices_for_query(0)
-        .iter()
-        .filter(|&&i| i >= 0)
-        .count();
+    let returned: usize = res.indices_for_query(0).iter().filter(|&&i| i >= 0).count();
     assert!(returned <= n);
     assert_eq!(returned, n);
 }
@@ -245,11 +237,7 @@ fn rank_index_search_huge_k_clamps() {
     let query = make_corpus(306, 1, dim);
 
     let res = idx.search(&query, usize::MAX);
-    let returned: usize = res
-        .indices_for_query(0)
-        .iter()
-        .filter(|&&i| i >= 0)
-        .count();
+    let returned: usize = res.indices_for_query(0).iter().filter(|&&i| i >= 0).count();
     assert!(returned <= n);
     assert_eq!(returned, n);
 }
@@ -264,11 +252,7 @@ fn rank_index_search_asymmetric_huge_k_clamps() {
     let query = make_corpus(308, 1, dim);
 
     let res = idx.search_asymmetric(&query, usize::MAX);
-    let returned: usize = res
-        .indices_for_query(0)
-        .iter()
-        .filter(|&&i| i >= 0)
-        .count();
+    let returned: usize = res.indices_for_query(0).iter().filter(|&&i| i >= 0).count();
     assert!(returned <= n);
     assert_eq!(returned, n);
 }
@@ -318,11 +302,7 @@ fn byte_lut_huge_k_clamps_no_overflow() {
     // The reported k must be clamped to n_vectors so the buffer and the
     // accessor stride agree.
     assert_eq!(res.k, n, "byte-LUT k must clamp to n_vectors");
-    let returned: usize = res
-        .indices_for_query(0)
-        .iter()
-        .filter(|&&i| i >= 0)
-        .count();
+    let returned: usize = res.indices_for_query(0).iter().filter(|&&i| i >= 0).count();
     assert!(
         returned <= n,
         "byte-LUT search returned more than n_vectors results",
@@ -382,11 +362,13 @@ fn rankquant_b1_asymmetric_works_and_matches_reference() {
         .collect();
 
     // Top-k set parity against the scalar reference.
-    let mut ref_sorted: Vec<(usize, f32)> =
-        ref_scores.iter().enumerate().map(|(i, &s)| (i, s)).collect();
+    let mut ref_sorted: Vec<(usize, f32)> = ref_scores
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| (i, s))
+        .collect();
     ref_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let top_ref: std::collections::HashSet<usize> =
-        ref_sorted[..k].iter().map(|x| x.0).collect();
+    let top_ref: std::collections::HashSet<usize> = ref_sorted[..k].iter().map(|x| x.0).collect();
     let top_idx: std::collections::HashSet<usize> = res
         .indices_for_query(0)
         .iter()

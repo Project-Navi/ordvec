@@ -13,9 +13,9 @@
 use std::sync::Arc;
 use std::thread;
 
+use ordvec::{RankQuantFastscanIndex, RankQuantIndex};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use ordvec::{RankQuantFastscanIndex, RankQuantIndex};
 
 use crate::{make_corpus, D, N};
 
@@ -48,10 +48,14 @@ fn fastscan_b2_top10_matches_avx512_kernel() {
     // intersection should be >= 9 (allow one boundary flip from
     // quantization).
     for q in 0..3 {
-        let r_set: std::collections::HashSet<i64> =
-            ref_res.indices[q * 10..(q + 1) * 10].iter().copied().collect();
-        let f_set: std::collections::HashSet<i64> =
-            fs_res.indices[q * 10..(q + 1) * 10].iter().copied().collect();
+        let r_set: std::collections::HashSet<i64> = ref_res.indices[q * 10..(q + 1) * 10]
+            .iter()
+            .copied()
+            .collect();
+        let f_set: std::collections::HashSet<i64> = fs_res.indices[q * 10..(q + 1) * 10]
+            .iter()
+            .copied()
+            .collect();
         let inter = r_set.intersection(&f_set).count();
         assert!(
             inter >= 9,
@@ -111,7 +115,9 @@ fn fastscan_search_on_empty_query_returns_empty_results() {
 fn fastscan_handles_k_greater_than_n_vectors() {
     const N_SMALL: usize = 5;
     let mut rng = ChaCha8Rng::seed_from_u64(261);
-    let corpus: Vec<f32> = (0..(N_SMALL * D)).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let corpus: Vec<f32> = (0..(N_SMALL * D))
+        .map(|_| rng.gen_range(-1.0..1.0))
+        .collect();
     let mut fs = RankQuantFastscanIndex::new(D);
     fs.add(&corpus);
     let query: Vec<f32> = corpus[0..D].to_vec();
@@ -167,7 +173,9 @@ fn fastscan_dim_boundary_matrix() {
     for &dim in &[64usize, 1024] {
         const N_SMALL: usize = 16;
         let mut rng = ChaCha8Rng::seed_from_u64(270 + dim as u64);
-        let corpus: Vec<f32> = (0..(N_SMALL * dim)).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let corpus: Vec<f32> = (0..(N_SMALL * dim))
+            .map(|_| rng.gen_range(-1.0..1.0))
+            .collect();
         let mut fs = RankQuantFastscanIndex::new(dim);
         fs.add(&corpus);
         let q: Vec<f32> = corpus[0..dim].to_vec();

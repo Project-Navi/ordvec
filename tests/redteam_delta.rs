@@ -34,11 +34,13 @@ fn forge(suffix: &str, bytes: &[u8]) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    p.push(format!("redteam_delta_{}_{}_{}", std::process::id(), nonce, suffix));
-    std::fs::File::create(&p)
-        .unwrap()
-        .write_all(bytes)
-        .unwrap();
+    p.push(format!(
+        "redteam_delta_{}_{}_{}",
+        std::process::id(),
+        nonce,
+        suffix
+    ));
+    std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
     p
 }
 

@@ -170,12 +170,9 @@ impl MultiBucketBitmapIndex {
         }
         let n = self.n_vectors;
         let mut scores = vec![0.0f32; n];
-        scores
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(di, s)| {
-                *s = self.bilinear_score(q_bitmaps, w, di);
-            });
+        scores.par_iter_mut().enumerate().for_each(|(di, s)| {
+            *s = self.bilinear_score(q_bitmaps, w, di);
+        });
         let mut idx: Vec<u32> = (0..n as u32).collect();
         idx.select_nth_unstable_by(m_eff - 1, |&a, &b| {
             scores[b as usize]

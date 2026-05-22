@@ -243,20 +243,14 @@ impl SignBitmapIndex {
 // amortisation property carries over.
 // -------------------------------------------------------------------
 
-fn sign_scan_collect(
-    bitmaps: &[u64],
-    n: usize,
-    qpv: usize,
-    q: &[u64],
-    scores: &mut [u32],
-) {
+fn sign_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores: &mut [u32]) {
     debug_assert_eq!(scores.len(), n);
     debug_assert_eq!(q.len(), qpv);
 
     #[cfg(target_arch = "x86_64")]
     let use_avx512vpop = is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv % 8 == 0;
+        && qpv.is_multiple_of(8);
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx512vpop = false;
 
@@ -267,6 +261,7 @@ fn sign_scan_collect(
             return;
         }
     }
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
         let mut acc: u32 = 0;
@@ -290,9 +285,11 @@ unsafe fn sign_scan_collect_avx512vpop(
     debug_assert_eq!(qpv % 8, 0);
     let lanes = qpv / 8;
     let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for l in 0..lanes {
         q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
     }
+    #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for di in 0..n {
         let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
         let mut acc_zmm = _mm512_setzero_si512();
@@ -325,7 +322,7 @@ fn sign_scan_collect_batched(
     #[cfg(target_arch = "x86_64")]
     let use_avx512vpop = is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv % 8 == 0;
+        && qpv.is_multiple_of(8);
     #[cfg(not(target_arch = "x86_64"))]
     let use_avx512vpop = false;
 
@@ -371,7 +368,7 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
     for bi in 0..batch {
         for l in 0..lanes {
             q_zmms.push(_mm512_loadu_si512(
-                q_batch.as_ptr().add(bi * qpv + l * 8) as *const __m512i,
+                q_batch.as_ptr().add(bi * qpv + l * 8) as *const __m512i
             ));
         }
     }
@@ -538,7 +535,9 @@ mod tests {
         original.add(&corpus);
 
         let tmp = std::env::temp_dir().join("turbovec_sign_bitmap_large_dim.tvsb");
-        original.write(&tmp).expect("write must accept dim > u16::MAX");
+        original
+            .write(&tmp)
+            .expect("write must accept dim > u16::MAX");
         let loaded = SignBitmapIndex::load(&tmp).expect("load must accept dim > u16::MAX");
         std::fs::remove_file(&tmp).ok();
 

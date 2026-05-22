@@ -167,6 +167,7 @@ fn build_fastscan_b2_query(q: &[f32], dim: usize) -> (Vec<u8>, f32, f32) {
 /// multiplier on the raw float score (matching the asym kernels).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512dq")]
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 unsafe fn scan_b2_fastscan_avx512(
     packed_fs: &[u8],
     n: usize,
@@ -210,11 +211,10 @@ unsafe fn scan_b2_fastscan_avx512(
             for _ in 0..inner_chunks_4 {
                 macro_rules! step {
                     ($off:expr) => {{
-                        let codes256 = _mm256_loadu_si256(
-                            block_ptr.add((pp + $off) * 32) as *const __m256i,
-                        );
+                        let codes256 =
+                            _mm256_loadu_si256(block_ptr.add((pp + $off) * 32) as *const __m256i);
                         let lut128 = _mm_loadu_si128(
-                            lut_u8.as_ptr().add((pp + $off) * 16) as *const __m128i,
+                            lut_u8.as_ptr().add((pp + $off) * 16) as *const __m128i
                         );
                         let lut256 = _mm256_broadcastsi128_si256(lut128);
                         let contrib = _mm256_shuffle_epi8(lut256, codes256);
@@ -222,14 +222,8 @@ unsafe fn scan_b2_fastscan_avx512(
                         let hi128 = _mm256_extracti128_si256(contrib, 1);
                         let lo256 = _mm256_cvtepu8_epi16(lo128);
                         let hi256 = _mm256_cvtepu8_epi16(hi128);
-                        acc16_lo = _mm512_add_epi16(
-                            acc16_lo,
-                            _mm512_castsi256_si512(lo256),
-                        );
-                        acc16_hi = _mm512_add_epi16(
-                            acc16_hi,
-                            _mm512_castsi256_si512(hi256),
-                        );
+                        acc16_lo = _mm512_add_epi16(acc16_lo, _mm512_castsi256_si512(lo256));
+                        acc16_hi = _mm512_add_epi16(acc16_hi, _mm512_castsi256_si512(hi256));
                     }};
                 }
                 step!(0);
@@ -285,6 +279,7 @@ unsafe fn scan_b2_fastscan_avx512(
 
 /// Scalar reference for [`scan_b2_fastscan_avx512`]. Used for
 /// correctness validation and on non-x86 / older x86 targets.
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 fn scan_b2_fastscan_scalar(
     packed_fs: &[u8],
     n: usize,
@@ -309,6 +304,8 @@ fn scan_b2_fastscan_scalar(
                 accs[lane] += lut_u8[p * 16 + nibble] as u32;
             }
         }
+        #[allow(clippy::needless_range_loop)]
+        // indexed access is clearer / matches the kernel layout
         for lane in 0..docs_in_block {
             let raw = bias_sum + (accs[lane] as f32) * inv_q;
             top.maybe_insert(raw * scale, doc_base + lane);
@@ -556,13 +553,7 @@ impl RankQuantFastscanIndex {
     /// at b=2, within 8-bit LUT quantization noise.
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
         // (dim, n_vectors, packed_fs.len()) consistent by construction.
-        search_asymmetric_fastscan_b2(
-            &self.packed_fs,
-            self.n_vectors,
-            self.dim,
-            queries,
-            k,
-        )
+        search_asymmetric_fastscan_b2(&self.packed_fs, self.n_vectors, self.dim, queries, k)
     }
 
     pub fn len(&self) -> usize {

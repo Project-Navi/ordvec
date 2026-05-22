@@ -19,6 +19,7 @@ use crate::rank::bucket_centre;
 
 /// Build the per-coord, per-bucket LUT for this query and dispatch
 /// the matching `scan_b{N}_to_topk` for the configured `bits`.
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
 pub(super) fn scan_via_lut_scalar(
     packed: &[u8],
     n: usize,
@@ -304,11 +305,13 @@ pub(super) unsafe fn scan_b2_asym_avx512(
 
     // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
     // loudly in release, not silently drop the trailing 64-code block.
-    assert_eq!(dim % 64, 0, "b=2 AVX-512 path needs dim % 64 == 0 for 4-way unroll");
-    let bytes_per_vec = dim / 4;
-    let shifts = _mm512_setr_epi32(
-        30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0,
+    assert_eq!(
+        dim % 64,
+        0,
+        "b=2 AVX-512 path needs dim % 64 == 0 for 4-way unroll"
     );
+    let bytes_per_vec = dim / 4;
+    let shifts = _mm512_setr_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
     let mask3 = _mm512_set1_epi32(3);
 
     let bytes_per_chunk = 4usize;
@@ -377,11 +380,13 @@ pub(super) unsafe fn scan_b4_asym_avx512(
 
     // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
     // loudly in release, not silently drop the trailing 64-code block.
-    assert_eq!(dim % 64, 0, "b=4 AVX-512 path needs dim % 64 == 0 for 4-way unroll");
-    let bytes_per_vec = dim / 2;
-    let shifts = _mm512_setr_epi32(
-        28, 24, 20, 16, 12, 8, 4, 0, 28, 24, 20, 16, 12, 8, 4, 0,
+    assert_eq!(
+        dim % 64,
+        0,
+        "b=4 AVX-512 path needs dim % 64 == 0 for 4-way unroll"
     );
+    let bytes_per_vec = dim / 2;
+    let shifts = _mm512_setr_epi32(28, 24, 20, 16, 12, 8, 4, 0, 28, 24, 20, 16, 12, 8, 4, 0);
     let mask_f = _mm512_set1_epi32(0xF);
 
     let bytes_per_chunk = 8usize;

@@ -1,8 +1,8 @@
 //! RankQuantIndex (B-bit bucket-packed) integration tests.
 
+use ordvec::RankQuantIndex;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use ordvec::RankQuantIndex;
 
 use crate::{make_corpus, ref_rankquant_asymmetric, D, N};
 
@@ -52,20 +52,19 @@ fn rankquant_asymmetric_matches_reference(bits: u8) {
 
     // And the top-10 set must match (we allow tied scores to permute
     // within ties — same set, possibly different order).
-    let mut ref_sorted: Vec<(usize, f32)> =
-        ref_scores.iter().enumerate().map(|(i, &s)| (i, s)).collect();
+    let mut ref_sorted: Vec<(usize, f32)> = ref_scores
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| (i, s))
+        .collect();
     ref_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let top_ref: std::collections::HashSet<usize> =
-        ref_sorted[..10].iter().map(|x| x.0).collect();
+    let top_ref: std::collections::HashSet<usize> = ref_sorted[..10].iter().map(|x| x.0).collect();
     let top_idx: std::collections::HashSet<usize> = res
         .indices_for_query(0)
         .iter()
         .map(|&i| i as usize)
         .collect();
-    assert_eq!(
-        top_idx, top_ref,
-        "B={bits} top-10 set mismatch",
-    );
+    assert_eq!(top_idx, top_ref, "B={bits} top-10 set mismatch",);
 }
 
 #[test]
@@ -86,8 +85,8 @@ fn rankquant_b2_recovers_planted_neighbour_in_top_10() {
         let target = rng.gen_range(0..N);
         planted.push(target);
         let src = &corpus[target * D..(target + 1) * D];
-        for i in 0..D {
-            queries.push(src[i] + rng.gen_range(-0.05..0.05));
+        for &v in src.iter() {
+            queries.push(v + rng.gen_range(-0.05..0.05));
         }
     }
     // Re-encode the corpus *after* sampling targets so the targets are
@@ -98,9 +97,13 @@ fn rankquant_b2_recovers_planted_neighbour_in_top_10() {
     let res = idx.search_asymmetric(&queries, 10);
 
     let mut hits = 0;
-    for qi in 0..n_q {
-        let top: Vec<usize> = res.indices_for_query(qi).iter().map(|&i| i as usize).collect();
-        if top.contains(&planted[qi]) {
+    for (qi, &target) in planted.iter().enumerate() {
+        let top: Vec<usize> = res
+            .indices_for_query(qi)
+            .iter()
+            .map(|&i| i as usize)
+            .collect();
+        if top.contains(&target) {
             hits += 1;
         }
     }

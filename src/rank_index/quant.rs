@@ -88,16 +88,15 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let avx512 =
-            is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512dq");
+        let avx512 = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512dq");
         let avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
         // AVX-512 first: both supported widths pack 64 codes/outer-iter,
         // so the single invariant is `dim % 64 == 0`.
-        if avx512 && dim % 64 == 0 {
+        if avx512 && dim.is_multiple_of(64) {
             return SimdTier::Avx512;
         }
         // AVX2: per-width lane invariant.
-        if avx2 && ((bits == 2 && dim % 16 == 0) || (bits == 4 && dim % 8 == 0)) {
+        if avx2 && ((bits == 2 && dim.is_multiple_of(16)) || (bits == 4 && dim.is_multiple_of(8))) {
             return SimdTier::Avx2;
         }
         SimdTier::None
@@ -319,13 +318,27 @@ impl RankQuantIndex {
                             centre_drop_used = true;
                         }
                         _ => scan_via_lut_scalar(
-                            &self.packed, n, dim, bits, n_buckets, &q_unit, inv_norm, &mut top,
+                            &self.packed,
+                            n,
+                            dim,
+                            bits,
+                            n_buckets,
+                            &q_unit,
+                            inv_norm,
+                            &mut top,
                         ),
                     }
                 }
                 #[cfg(not(target_arch = "x86_64"))]
                 scan_via_lut_scalar(
-                    &self.packed, n, dim, bits, n_buckets, &q_unit, inv_norm, &mut top,
+                    &self.packed,
+                    n,
+                    dim,
+                    bits,
+                    n_buckets,
+                    &q_unit,
+                    inv_norm,
+                    &mut top,
                 );
 
                 top.finalize_into(out_scores, out_indices);
@@ -397,9 +410,7 @@ impl RankQuantIndex {
     /// documents. Allocates nothing per-doc.
     /// Persist to a `.tvrq` file. Format: 14-byte header + packed bytes.
     pub fn write(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-        crate::rank_io::write_rankquant(
-            path, self.bits, self.dim, self.n_vectors, &self.packed,
-        )
+        crate::rank_io::write_rankquant(path, self.bits, self.dim, self.n_vectors, &self.packed)
     }
 
     /// Load from a `.tvrq` file produced by [`Self::write`].
@@ -426,9 +437,7 @@ impl RankQuantIndex {
         if dim % codes_per_byte != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!(
-                    "TVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}",
-                ),
+                format!("TVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}",),
             ));
         }
         let expected_bytes = n_vectors.saturating_mul(dim).saturating_mul(bits as usize) / 8;
@@ -488,8 +497,7 @@ impl RankQuantIndex {
         let mut sub_packed = vec![0u8; m * bpv];
         for (i, &di) in candidates.iter().enumerate() {
             let src = (di as usize) * bpv;
-            sub_packed[i * bpv..(i + 1) * bpv]
-                .copy_from_slice(&self.packed[src..src + bpv]);
+            sub_packed[i * bpv..(i + 1) * bpv].copy_from_slice(&self.packed[src..src + bpv]);
         }
 
         // Dispatch: prefer AVX-512 → AVX2 → scalar LUT. Tier selection
@@ -533,7 +541,14 @@ impl RankQuantIndex {
         }
         #[cfg(not(target_arch = "x86_64"))]
         scan_via_lut_scalar(
-            &sub_packed, m, dim, bits, n_buckets, &q_unit, inv_norm, &mut top,
+            &sub_packed,
+            m,
+            dim,
+            bits,
+            n_buckets,
+            &q_unit,
+            inv_norm,
+            &mut top,
         );
 
         let mut scores = vec![f32::NEG_INFINITY; k_eff];
