@@ -3,8 +3,8 @@
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use turbovec::rank::{bucket_centre, bucket_ranks, rank_transform};
-use turbovec::MultiBucketBitmapIndex;
+use ordvec::rank::{bucket_centre, bucket_ranks, rank_transform};
+use ordvec::MultiBucketBitmapIndex;
 
 use crate::{make_corpus, D, N};
 

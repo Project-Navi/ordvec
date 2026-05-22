@@ -2,7 +2,7 @@
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use turbovec::RankQuantIndex;
+use ordvec::RankQuantIndex;
 
 use crate::{make_corpus, ref_rankquant_asymmetric, D, N};
 

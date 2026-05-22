@@ -33,7 +33,7 @@
 //! qwords per doc at `D=1024`.
 //!
 //! ```no_run
-//! use turbovec::{RankIndex, RankQuantIndex};
+//! use ordvec::{RankIndex, RankQuantIndex};
 //!
 //! let mut idx = RankQuantIndex::new(1024, 2);
 //! let docs: Vec<f32> = vec![0.0; 1024 * 10_000];
@@ -49,12 +49,13 @@
 //! The implementation is split across sibling modules for compile-unit
 //! locality and to keep individual files under the project's 800-line
 //! guideline. The split is internal — all `pub` items are re-exported
-//! here so `use turbovec::rank_index::{RankIndex, RankQuantIndex,
-//! BitmapIndex, MultiBucketBitmapIndex, search_asymmetric_byte_lut}`
-//! continues to resolve unchanged.
+//! here so `use ordvec::rank_index::{RankIndex, RankQuantIndex,
+//! BitmapIndex, search_asymmetric_byte_lut}` resolves directly.
+//! `MultiBucketBitmapIndex` is gated behind the `experimental` feature.
 
 mod bitmap;
 mod index;
+#[cfg(feature = "experimental")]
 mod multi_bucket;
 mod quant;
 mod quant_kernels;
@@ -62,5 +63,8 @@ mod util;
 
 pub use bitmap::BitmapIndex;
 pub use index::RankIndex;
+// `MultiBucketBitmapIndex` is not stable public API — reachable only
+// with the `experimental` feature.
+#[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmapIndex;
 pub use quant::{search_asymmetric_byte_lut, RankQuantIndex};

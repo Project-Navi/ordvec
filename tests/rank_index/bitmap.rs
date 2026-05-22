@@ -4,8 +4,8 @@
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use turbovec::rank::rank_transform;
-use turbovec::{BitmapIndex, RankQuantIndex};
+use ordvec::rank::rank_transform;
+use ordvec::{BitmapIndex, RankQuantIndex};
 
 use crate::{make_corpus, D, N};
 

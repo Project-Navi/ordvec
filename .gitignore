@@ -1,0 +1,9 @@
+/target
+*.swp
+
+# Local index/serialisation artifacts produced by tests/benches.
+*.tvr
+*.tvrq
+*.tvbm
+*.tvsb
+*.npy

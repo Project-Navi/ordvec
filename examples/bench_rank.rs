@@ -1,7 +1,6 @@
 //! Head-to-head benchmark for the rank-mode index family:
 //! RankIndex, RankQuantIndex (b=1/2/4), BitmapIndex (single-stage and
-//! two-stage candidate-gen + exact rerank), and SignBitmapIndex — with
-//! TurboQuantIndex b=2/4 as the magnitude-quantiser reference.
+//! two-stage candidate-gen + exact rerank), and SignBitmapIndex.
 //!
 //! SELF-CONTAINED BY DEFAULT. The default run needs NO external corpus
 //! file: it generates a seeded (seed = `CORPUS_SEED`) low-rank clustered
@@ -10,8 +9,7 @@
 //!
 //!     cargo run --release --example bench_rank
 //!
-//! (If the OpenBLAS link fails on Linux, prefix with
-//!  `RUSTFLAGS="-L /usr/lib -l openblas"`.)
+//! No system dependencies are required — ordvec links no BLAS.
 //!
 //! Measures, per index type:
 //! - bytes per document and total index size
@@ -25,7 +23,7 @@
 //! bit-identical across runs on the same machine. Only the wall-clock
 //! THROUGHPUT/LATENCY columns (encode v/s, p50/p99 ms, GiB/s, Mdocs/s)
 //! vary run-to-run as expected. A committed capture of one run lives at
-//! `turbovec/benchmarks/rank_modes_results.txt`.
+//! `benchmarks/rank_modes_results.txt`.
 //!
 //! Larger sweeps / real public corpora:
 //!     cargo run --release --example bench_rank -- --dim 1024 --n 100000 --queries 200
@@ -38,23 +36,11 @@
 //! Output is a human-readable table followed by a JSON line for
 //! downstream tooling.
 
-// Required by the `blas-src` pattern: the link directives that
-// `openblas-src` (Linux) and `accelerate` (macOS) emit via their build
-// scripts only reach the final binary if the binary itself references
-// the `blas-src` crate, even when the actual BLAS calls happen inside
-// ndarray. Without this, rust-lld with `--as-needed` (the default) sees
-// no direct reference to `-lopenblas` in earlier objects and drops the
-// library from the link line, leaving `cblas_sgemm` undefined.
-extern crate blas_src;
-
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
-use turbovec::rank_index::search_asymmetric_byte_lut;
-use turbovec::{
-    BitmapIndex, RankIndex, RankQuantIndex,
-    SignBitmapIndex, TurboQuantIndex,
-};
+use ordvec::rank_index::search_asymmetric_byte_lut;
+use ordvec::{BitmapIndex, RankIndex, RankQuantIndex, SignBitmapIndex};
 
 /// Fixed RNG seed for the synthetic corpus + queries. Pinning this is
 /// what makes the recall/CR columns reproducible run-to-run. Change it
@@ -90,8 +76,8 @@ struct Config {
     /// (multi-query batched candidate gen + rerank at the default M
     /// sweep), "batch-sweep" (varies --batch across {1,2,4,8,16} at
     /// M=500), "sign-headline" (sign-cosine vs rank-bitmap at matched
-    /// storage), "storage-matched" (TurboQuant b=2 vs TwoStage b=1
-    /// rerank at 256 B/vec). Unset = run the full bench suite.
+    /// storage), "storage-matched" (TwoStage b=1 rerank at 256 B/vec).
+    /// Unset = run the full bench suite.
     mode: Option<String>,
     /// Batch size for batched scan modes. The batched kernel streams
     /// the doc bitmaps once and computes overlap scores against
@@ -483,44 +469,6 @@ where
         out.extend_from_slice(&idx);
     }
     out
-}
-
-fn bench_turboquant(
-    corpus: &[f32],
-    queries: &[f32],
-    truth: &[i64],
-    cfg: &Config,
-    bits: usize,
-) -> Row {
-    let mut idx = TurboQuantIndex::new(cfg.dim, bits);
-    let t0 = Instant::now();
-    idx.add(corpus);
-    idx.prepare();
-    let encode_secs = t0.elapsed().as_secs_f64();
-    let bytes_per_vec = cfg.dim * bits / 8;
-    let total_mib = (bytes_per_vec * cfg.n) as f64 / 1024.0 / 1024.0;
-    let encode_vps = cfg.n as f64 / encode_secs;
-
-    let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
-        let _ = idx.search(q, cfg.k);
-    });
-    let pred = collect_preds(queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
-        idx.search(q, cfg.k).indices
-    });
-    let recall = recall_at_k(&pred, truth, cfg.k);
-    let name = format!("TurboQuant b={bits}");
-    maybe_dump_pred(cfg, &name, &pred);
-    finalise_row(
-        name,
-        bytes_per_vec,
-        total_mib,
-        encode_vps,
-        p50,
-        p99,
-        recall,
-        cfg.n,
-        cfg.dim,
-    )
 }
 
 fn bench_rank_full(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config) -> Vec<Row> {
@@ -1268,9 +1216,6 @@ fn main() {
                 // storage. The substrate test prompted by Todd's
                 // schema.org-typed result, validated at the Harrier
                 // scale and recall regime.
-                eprintln!("benching TurboQuant b=2 (reference @ 256 B/vec) ...");
-                all_rows.push(bench_turboquant(&corpus, &queries, &truth, &cfg, 2));
-
                 eprintln!("benching SignBitmap probe (128 B/vec, sign-cos) ...");
                 all_rows.push(bench_sign_bitmap(&corpus, &queries, &truth, &cfg));
 
@@ -1303,13 +1248,10 @@ fn main() {
                 }
             }
             "storage-matched" => {
-                // Storage-matched head-to-head: TurboQuant b=2 at
-                // 256 B/vec vs TwoStage with b=1 RankQuant rerank
-                // (128 B bitmap + 128 B RankQuant b=1 = 256 B exact
-                // match). Also runs the 384 B/vec b=2 rerank rows
+                // Storage-matched head-to-head: TwoStage with b=1
+                // RankQuant rerank (128 B bitmap + 128 B RankQuant b=1 =
+                // 256 B/vec). Also runs the 384 B/vec b=2 rerank rows
                 // for the existing +50% storage Pareto.
-                eprintln!("benching TurboQuant b=2 (reference @ 256 B/vec) ...");
-                all_rows.push(bench_turboquant(&corpus, &queries, &truth, &cfg, 2));
                 eprintln!("computing exact RankQuant b=2 top-k for CR ...");
                 let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
@@ -1383,11 +1325,6 @@ fn main() {
         print_json(&all_rows, &cfg);
         return;
     }
-
-    eprintln!("benching TurboQuant b=2 ...");
-    all_rows.push(bench_turboquant(&corpus, &queries, &truth, &cfg, 2));
-    eprintln!("benching TurboQuant b=4 ...");
-    all_rows.push(bench_turboquant(&corpus, &queries, &truth, &cfg, 4));
 
     eprintln!("benching RankIndex (full u16) ...");
     all_rows.extend(bench_rank_full(&corpus, &queries, &truth, &cfg));

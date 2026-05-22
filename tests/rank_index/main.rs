@@ -11,7 +11,7 @@
 //! 3. Loader robustness — malformed serialisation files surface as
 //!    `Err`, never panic.
 //!
-//! The file split mirrors `turbovec::rank_index` (`index.rs`,
+//! The file split mirrors `ordvec::rank_index` (`index.rs`,
 //! `quant.rs`, `bitmap.rs`, `multi_bucket.rs`). Shared corpus +
 //! reference helpers live here; loader fuzz lives here because it
 //! crosses all three types in a single hermetic test.
@@ -20,11 +20,13 @@ use std::io::Write;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use turbovec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankquant_norm};
-use turbovec::{BitmapIndex, RankIndex, RankQuantIndex};
+use ordvec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankquant_norm};
+use ordvec::{BitmapIndex, RankIndex, RankQuantIndex};
 
 mod bitmap;
 mod index;
+// `MultiBucketBitmapIndex` is gated behind the `experimental` feature.
+#[cfg(feature = "experimental")]
 mod multi_bucket;
 mod quant;
 

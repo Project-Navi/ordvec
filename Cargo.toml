@@ -1,0 +1,34 @@
+[package]
+name = "ordvec"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Training-free ordinal & sign quantization for vector retrieval"
+license = "MIT"
+# TODO: set these once the standalone repo is published.
+repository = "TODO"
+homepage = "TODO"
+readme = "README.md"
+keywords = ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"]
+categories = ["algorithms", "science", "compression"]
+
+[dependencies]
+rayon = "1.10"
+ordered-float = "4"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+# Test/bench corpora are seeded with these; not needed by the library.
+rand = "0.8"
+rand_chacha = "0.3"
+
+[features]
+default = ["simd"]
+simd = []
+serde = ["dep:serde"]
+experimental = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
