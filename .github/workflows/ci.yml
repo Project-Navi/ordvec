@@ -116,7 +116,10 @@ jobs:
           # dev-dependencies, so nothing slips in behind a flag.
           tree="$(cargo tree --all-features --edges normal,build,dev)"
           echo "$tree"
-          if echo "$tree" | grep -Eiq '(^|[^[:alnum:]_-])(blas|openblas|faer|ndarray|statrs)([^[:alnum:]_-]|$)'; then
+          # Boundaries exclude only alphanumerics, so hyphen/underscore variants
+          # (blas-src, openblas-src, ndarray-linalg, faer-core, blas_sys) are
+          # caught, while substrings (e.g. "myblaster") are not.
+          if echo "$tree" | grep -Eiq '(^|[^[:alnum:]])(blas|openblas|faer|ndarray|statrs)([^[:alnum:]]|$)'; then
             echo "::error::forbidden system/numerical dependency found in the tree (blas|openblas|faer|ndarray|statrs)"
             exit 1
           fi
@@ -133,9 +136,10 @@ jobs:
   # kernels instead of the scalar/AVX2 fallback.
   #
   # Pattern adapted from microsoft/DiskANN's CI (also a vector-search crate).
-  # SDE pin is a fixed Intel downloadmirror build for reproducibility; bump
-  # deliberately. If Intel ever moves the URL this job fails loudly (the gate
-  # stays honest) rather than silently skipping AVX-512 coverage.
+  # SDE pin is a fixed Intel downloadmirror build, SHA256-verified before it is
+  # unpacked or run; bump the version + checksum together when upgrading. If
+  # Intel ever moves the URL or the bytes change, this job fails loudly (the
+  # gate stays honest) rather than silently skipping AVX-512 coverage.
   avx512:
     name: avx512 (Intel SDE / Sapphire Rapids)
     runs-on: ubuntu-latest
@@ -147,9 +151,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install Intel SDE
+        env:
+          # SHA256 of ${SDE_VERSION}.tar.xz — verified before the archive is
+          # unpacked and executed. Bump together with SDE_VERSION.
+          SDE_SHA256: ca3d4086de4acb3faedf9f57b541c6936b7d5e19ae2bf763b6ea933573a0a217
         run: |
           set -euo pipefail
           wget -qO intel-sde.tar.xz "${SDE_URL_BASE}/${SDE_VERSION}.tar.xz"
+          echo "${SDE_SHA256}  intel-sde.tar.xz" | sha256sum -c -
           mkdir -p "${GITHUB_WORKSPACE}/intel-sde"
           tar xf intel-sde.tar.xz --strip-components=1 -C "${GITHUB_WORKSPACE}/intel-sde"
           rm intel-sde.tar.xz
