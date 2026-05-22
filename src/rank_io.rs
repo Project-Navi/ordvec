@@ -11,8 +11,9 @@
 //! deterministic-encode index types so the on-disk format is exactly the
 //! in-memory buffer plus enough header to rehydrate the type parameters.
 //!
-//! The shape mirrors [`crate::io`] for `TurboQuantIndex`. ID-map wrappers
-//! (analogous to `.tvim`) are an obvious follow-up but not in this v1.
+//! Each format is a minimal fixed-size header followed by a contiguous
+//! payload. ID-map wrappers (analogous to `.tvim`) are an obvious
+//! follow-up but not in this v1.
 //!
 //! # Safety against malformed files
 //!

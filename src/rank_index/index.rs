@@ -201,8 +201,8 @@ impl RankIndex {
         self.ranks.len() * std::mem::size_of::<u16>()
     }
 
-    /// Remove a vector in O(1) by swapping with the last (mirrors
-    /// `TurboQuantIndex::swap_remove`).
+    /// Remove a vector in O(1) by swapping with the last
+    /// (swap-remove semantics).
     pub fn swap_remove(&mut self, idx: usize) -> usize {
         assert!(idx < self.n_vectors, "index out of bounds");
         let last = self.n_vectors - 1;

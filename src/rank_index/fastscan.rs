@@ -5,9 +5,10 @@
 //! at `bits == 2`. It re-blocks the b=2 bucket codes into a block-32,
 //! PQ-style nibble layout and scores 32 documents per VPSHUFB lookup
 //! against a per-query 8-bit affine-quantised LUT — the classic FAISS
-//! FastScan trick. On a Harrier 207k × 1024 paraphrase workload this
-//! ran ~1.63× faster than TurboQuant b=2 (and ~3× faster than the
-//! single-rate exact RankQuant b=2 kernel) at the same recall.
+//! FastScan trick. It trades roughly 2× the storage of the single-rate
+//! b=2 packing for a lower per-query scan latency at matched recall;
+//! the `RankQuant b=2 fastscan` row of `examples/bench_rank` reports
+//! the in-repo, reproducible comparison against the single-rate kernel.
 //!
 //! Cost: `dim / 2` bytes per document (2× the single-rate
 //! [`RankQuantIndex`](super::quant::RankQuantIndex) b=2 packing), and
@@ -457,19 +458,22 @@ pub(crate) fn search_asymmetric_fastscan_b2(
 ///
 /// Same retrieval semantics as
 /// [`RankQuantIndex::search_asymmetric`](super::quant::RankQuantIndex)
-/// at b=2 (within 8-bit LUT quantization noise; 99% per-query top-10
-/// overlap measured on Harrier 207k × 1024). Single-pass single-index
-/// kernel for callers who can't restructure their query path for the
-/// two-stage [`BitmapIndex`](super::bitmap::BitmapIndex) →
+/// at b=2, up to 8-bit LUT quantization noise (the
+/// `fastscan_b2_top10_matches_avx512_kernel` test checks the top-10
+/// agreement against the single-rate kernel on synthetic data).
+/// Single-pass single-index kernel for callers who can't restructure
+/// their query path for the two-stage
+/// [`BitmapIndex`](super::bitmap::BitmapIndex) →
 /// [`RankQuantIndex::search_asymmetric_subset`](super::quant::RankQuantIndex)
 /// pipeline.
 ///
 /// # Storage
 ///
 /// `dim / 2` bytes per document (2× the single-rate `RankQuantIndex`
-/// at b=2). The block-32 layout doubles the byte rate in exchange
-/// for a ~3× lower scan latency vs the single-rate kernel and
-/// ~1.6× lower than TurboQuant b=2 on Harrier.
+/// at b=2). The block-32 layout doubles the byte rate in exchange for
+/// lower per-query scan latency than the single-rate kernel; the
+/// `RankQuant b=2 fastscan` row of `examples/bench_rank` reports the
+/// in-repo comparison on the synthetic corpus.
 ///
 /// # v1 limitations
 ///

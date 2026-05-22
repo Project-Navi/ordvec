@@ -1,7 +1,7 @@
 # Follow-up: deterministic tie-breaking for body bitmap candidate selection
 
 `BitmapIndex::top_m_candidates` and `top_m_candidates_batched`
-(in `turbovec/src/rank_index/bitmap.rs`) currently partition on
+(in `src/rank_index/bitmap.rs`) currently partition on
 bitmap overlap score alone. Boundary ties are not rare — overlap
 scores are small integers (`0..n_top`, e.g. `0..256`), so multiple
 docs frequently share the cutoff score, and `select_nth_unstable_by`

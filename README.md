@@ -1,6 +1,6 @@
 # ordvec
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Training-free ordinal & sign quantization for vector retrieval.
 
@@ -26,8 +26,7 @@ analytical. There are **no system dependencies** — no BLAS, no
 Extracted from [turbovec](https://github.com/RyanCodrai/turbovec) (MIT)
 — the ordinal/sign retrieval substrate, lifted out as a standalone,
 zero-system-dependency crate. The full development history of these
-modules is preserved in this repository's git log. See
-[LICENSE](LICENSE) for attribution.
+modules is preserved in this repository's git log.
 
 ## Reproducible benchmark
 
@@ -44,4 +43,9 @@ A committed capture of one run lives at
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Licensed under either of
+
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.

@@ -6,8 +6,8 @@
 //!
 //! This is the **SimHash family** primitive (Charikar 2002) applied to
 //! native embedding coords rather than random projections. For
-//! contrastively-trained embeddings (BGE / Harrier / OpenAI ada
-//! family), the native coord axes already carry semantically-aligned
+//! contrastively-trained embeddings (e.g. BGE or OpenAI ada), the
+//! native coord axes already carry semantically-aligned
 //! signal — making direct sign quantization competitive with, and
 //! sometimes superior to, learned hash codes or rank-thresholded
 //! bitmaps at the same byte budget.
@@ -535,7 +535,7 @@ mod tests {
         let mut original = SignBitmapIndex::new(BIG_D);
         original.add(&corpus);
 
-        let tmp = std::env::temp_dir().join("turbovec_sign_bitmap_large_dim.tvsb");
+        let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_large_dim.tvsb");
         original
             .write(&tmp)
             .expect("write must accept dim > u16::MAX");
@@ -554,7 +554,7 @@ mod tests {
         let mut original = SignBitmapIndex::new(D);
         original.add(&corpus);
 
-        let tmp = std::env::temp_dir().join("turbovec_sign_bitmap_roundtrip.tvsb");
+        let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_roundtrip.tvsb");
         original.write(&tmp).expect("write should succeed");
         let loaded = SignBitmapIndex::load(&tmp).expect("load should succeed");
         std::fs::remove_file(&tmp).ok();
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn load_rejects_bad_magic() {
-        let tmp = std::env::temp_dir().join("turbovec_sign_bitmap_bad_magic.tvsb");
+        let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_bad_magic.tvsb");
         std::fs::write(&tmp, b"BAD!\x01\x00\x00\x01\x00\x00\x00\x00\x00").expect("write tmp");
         // SignBitmapIndex does not derive Debug (matches the convention of
         // other rank-mode types), so unwrap_err / expect_err do not apply;
