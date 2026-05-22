@@ -557,6 +557,7 @@ fn bitmap_scan_collect_batched_scalar(
 // at the bandwidth/register-pressure inflection. Larger `batch` is
 // processed in multiple CHUNK-sized passes through the bitmap stream
 // — each pass amortises the doc load across CHUNK queries.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const BATCHED_AVX512_CHUNK: usize = 8;
 
 #[cfg(target_arch = "x86_64")]

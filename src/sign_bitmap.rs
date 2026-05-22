@@ -309,6 +309,7 @@ unsafe fn sign_scan_collect_avx512vpop(
 // `bitmap_scan_collect_batched_avx512vpop` in rank_index.rs.
 // -------------------------------------------------------------------
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const BATCHED_AVX512_CHUNK: usize = 8;
 
 fn sign_scan_collect_batched(

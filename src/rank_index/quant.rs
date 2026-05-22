@@ -51,6 +51,8 @@ pub struct RankQuantIndex {
 /// kernel lane invariant for the configured `(dim, bits)` — see
 /// [`select_simd_tier`].
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+// `Avx2`/`Avx512` are constructed only by the x86_64 SIMD dispatch.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 enum SimdTier {
     None,
     Avx2,
@@ -281,6 +283,7 @@ impl RankQuantIndex {
         // wrong top-k. The dispatch below must therefore only select a
         // tier whose invariant holds for (dim, bits); otherwise it falls
         // back to the scalar LUT path which handles any valid dim.
+        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
 
         // For the AVX2 path we drop the per-lane centre subtract from
@@ -296,6 +299,7 @@ impl RankQuantIndex {
             .for_each(|((q, out_scores), out_indices)| {
                 let q_unit = l2_normalise(q);
                 let mut top = TopK::new(k_eff);
+                #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
                 let mut centre_drop_used = false;
 
                 #[cfg(target_arch = "x86_64")]
@@ -505,8 +509,10 @@ impl RankQuantIndex {
         // `select_simd_tier` — the same guard `search_asymmetric` uses —
         // so a constructor-valid-but-SIMD-invalid dim (48 / 80 / 20)
         // never reaches a kernel that would drop its tail chunk.
+        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
         let mut top = TopK::new(k_eff);
+        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
         let mut centre_drop_used = false;
         #[cfg(target_arch = "x86_64")]
         unsafe {
