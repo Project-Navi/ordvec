@@ -29,7 +29,7 @@
 //! Any malformed input returns `io::Error` rather than panicking.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 const TVR_MAGIC: &[u8; 4] = b"TVR1";
@@ -55,6 +55,70 @@ pub const MAX_VECTORS: usize = 64 * 1024 * 1024;
 
 fn invalid<S: Into<String>>(msg: S) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// Allocate a zeroed `Vec<u8>` of `n` bytes using *fallible* allocation.
+///
+/// `vec![0u8; n]` aborts the process on allocation failure (the abort is
+/// not a recoverable `io::Error`). Sizes here are derived from
+/// attacker-influenced headers, so reserve via `try_reserve_exact` and only
+/// then `resize` — an OOM becomes `InvalidData` instead of `SIGABRT`.
+fn try_alloc_zeroed(n: usize) -> io::Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(n)
+        .map_err(|_| invalid("payload allocation too large"))?;
+    buf.resize(n, 0);
+    Ok(buf)
+}
+
+/// Read `n` little-endian `W`-byte elements directly into a fallibly
+/// pre-reserved Vec, so an oversized/under-memory load returns an
+/// io::Error instead of aborting (and avoids the 2x byte-buffer + typed-Vec peak).
+///
+/// Building the typed `Vec` via `bytes.chunks_exact(W).map(..).collect()`
+/// uses an infallible allocation — an OOM there is a `SIGABRT`, not a
+/// recoverable error — and holds both the byte buffer and the typed `Vec`
+/// live at once (2x peak). Reserving fallibly and reading element-by-element
+/// removes both problems. The size guards ([`check_payload_bytes`],
+/// [`check_payload_fits_file`]) run *before* this call; `read_le_vec`
+/// reserves the same element count those guards validated.
+fn read_le_vec<R: Read, T, const W: usize>(
+    r: &mut R,
+    n: usize,
+    parse: impl Fn([u8; W]) -> T,
+) -> io::Result<Vec<T>> {
+    let mut v: Vec<T> = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| invalid("payload allocation too large"))?;
+    let mut buf = [0u8; W];
+    for _ in 0..n {
+        r.read_exact(&mut buf)?;
+        v.push(parse(buf));
+    }
+    Ok(v)
+}
+
+/// Reject a declared payload that cannot fit in the file's remaining bytes.
+///
+/// `reader` is positioned just past the header; `file_len` is the file's
+/// total length. A file cannot contain more payload than its own length,
+/// so this catches a forged "tiny header claims gigabytes" before any
+/// allocation — the primary defense, with [`try_alloc_zeroed`] as
+/// defense-in-depth. `stream_position` gives the bytes already consumed
+/// without manual offset accounting.
+fn check_payload_fits_file<R: Seek>(
+    reader: &mut R,
+    file_len: u64,
+    payload_bytes: usize,
+) -> io::Result<()> {
+    let pos = reader.stream_position()?;
+    let remaining = file_len.saturating_sub(pos);
+    if payload_bytes as u64 > remaining {
+        return Err(invalid(
+            "declared payload exceeds remaining file size (truncated or forged header)",
+        ));
+    }
+    Ok(())
 }
 
 fn check_dim(dim: usize) -> io::Result<()> {
@@ -135,7 +199,9 @@ pub fn write_rank(
 }
 
 pub fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u16>)> {
-    let mut f = BufReader::new(File::open(path)?);
+    let file = File::open(path)?;
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != TVR_MAGIC {
@@ -159,12 +225,23 @@ pub fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u16>)>
         .and_then(|x| x.checked_mul(2))
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    let mut bytes = vec![0u8; payload_bytes];
-    f.read_exact(&mut bytes)?;
-    let ranks: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-        .collect();
+    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    // `payload_bytes == n_vectors * dim * 2`, so the u16 element count is
+    // `payload_bytes / 2`. Read directly into a fallibly reserved Vec<u16>
+    // instead of allocating a byte buffer and `.collect()`-ing it — the old
+    // intermediate was an infallible (abort-on-OOM) allocation that also
+    // doubled peak memory.
+    let ranks = read_le_vec(&mut f, payload_bytes / 2, u16::from_le_bytes)?;
+    // Every stored rank must be a valid coordinate index in `[0, dim)`.
+    // An out-of-range value is not an OOB read here (it indexes a
+    // per-query LUT sized to `dim` downstream) but silently corrupts the
+    // Spearman score, so reject it at the loader boundary rather than
+    // surfacing as a wrong-but-not-crashing result.
+    if ranks.iter().any(|&r| (r as usize) >= dim) {
+        return Err(invalid(format!(
+            "TVR1 rank value >= dim ({dim}); ranks must be a permutation of [0, dim)"
+        )));
+    }
     Ok((dim, n_vectors, ranks))
 }
 
@@ -195,7 +272,9 @@ pub fn write_rankquant(
 }
 
 pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, Vec<u8>)> {
-    let mut f = BufReader::new(File::open(path)?);
+    let file = File::open(path)?;
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != TVRQ_MAGIC {
@@ -218,6 +297,26 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
     f.read_exact(&mut dim_buf)?;
     let dim = u32::from_le_bytes(dim_buf) as usize;
     check_dim(dim)?;
+    // Constant-composition invariants (documented at module level and
+    // enforced by `RankQuantIndex::new`): `dim` must be a multiple of
+    // both `2^bits` (one bucket-rank slot per code value) and the
+    // codes-per-byte packing factor `8 / bits`. Without these, a forged
+    // header with an indivisible `dim` would yield a packed buffer the
+    // bucket-rank decoder cannot interpret. `bits ∈ {1,2,4}` is already
+    // validated above, so neither divisor is zero.
+    let n_buckets = 1usize << bits;
+    if dim % n_buckets != 0 {
+        return Err(invalid(format!(
+            "TVRQ dim {dim} is not a multiple of 2^bits = {n_buckets}; \
+             constant-composition invariant violated"
+        )));
+    }
+    let codes_per_byte = (8 / bits) as usize;
+    if dim % codes_per_byte != 0 {
+        return Err(invalid(format!(
+            "TVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}"
+        )));
+    }
     let mut n_buf = [0u8; 4];
     f.read_exact(&mut n_buf)?;
     let n_vectors = u32::from_le_bytes(n_buf) as usize;
@@ -228,7 +327,8 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
         .map(|x| x / 8)
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    let mut packed = vec![0u8; payload_bytes];
+    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    let mut packed = try_alloc_zeroed(payload_bytes)?;
     f.read_exact(&mut packed)?;
     Ok((bits, dim, n_vectors, packed))
 }
@@ -264,7 +364,9 @@ pub fn write_bitmap(
 pub fn load_bitmap(
     path: impl AsRef<Path>,
 ) -> io::Result<(usize, usize, usize, Vec<u64>)> {
-    let mut f = BufReader::new(File::open(path)?);
+    let file = File::open(path)?;
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != TVBM_MAGIC {
@@ -302,12 +404,11 @@ pub fn load_bitmap(
         .and_then(|x| x.checked_mul(8))
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    let mut bytes = vec![0u8; payload_bytes];
-    f.read_exact(&mut bytes)?;
-    let bitmaps: Vec<u64> = bytes
-        .chunks_exact(8)
-        .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-        .collect();
+    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
+    // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
+    // rather than allocating a byte buffer and `.collect()`-ing it.
+    let bitmaps = read_le_vec(&mut f, payload_bytes / 8, u64::from_le_bytes)?;
     Ok((dim, n_top, n_vectors, bitmaps))
 }
 
@@ -362,7 +463,9 @@ pub fn write_sign_bitmap(
 pub fn load_sign_bitmap(
     path: impl AsRef<Path>,
 ) -> io::Result<(usize, usize, Vec<u64>)> {
-    let mut f = BufReader::new(File::open(path)?);
+    let file = File::open(path)?;
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != TVSB_MAGIC {
@@ -387,11 +490,10 @@ pub fn load_sign_bitmap(
         .and_then(|x| x.checked_mul(8))
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    let mut bytes = vec![0u8; payload_bytes];
-    f.read_exact(&mut bytes)?;
-    let bitmaps: Vec<u64> = bytes
-        .chunks_exact(8)
-        .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-        .collect();
+    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
+    // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
+    // rather than allocating a byte buffer and `.collect()`-ing it.
+    let bitmaps = read_le_vec(&mut f, payload_bytes / 8, u64::from_le_bytes)?;
     Ok((dim, n_vectors, bitmaps))
 }

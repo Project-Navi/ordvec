@@ -45,6 +45,11 @@ pub struct MultiBucketBitmapIndex {
 impl MultiBucketBitmapIndex {
     pub fn new(dim: usize, bits: u8) -> Self {
         assert!(matches!(bits, 1 | 2 | 4), "bits must be 1, 2, or 4");
+        // dim=0 satisfies `% 64` and `% n_buckets` divisibility but
+        // produces qwords_per_bitmap=0, deferring a div-by-zero into
+        // `add` (n = vectors.len() / dim). Reject at construction,
+        // mirroring SignBitmapIndex::new.
+        assert!(dim > 0, "dim must be > 0");
         assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
         let n_buckets = 1usize << bits;
         let qpb = dim / 64;
@@ -127,6 +132,11 @@ impl MultiBucketBitmapIndex {
     pub fn bilinear_score(&self, q_bitmaps: &[u64], w: &[f32], doc_idx: usize) -> f32 {
         let qpb = self.qwords_per_bitmap;
         let nb = self.n_buckets;
+        assert!(
+            doc_idx < self.n_vectors,
+            "bilinear_score: doc_idx {doc_idx} out of range (n_vectors {})",
+            self.n_vectors,
+        );
         debug_assert_eq!(q_bitmaps.len(), nb * qpb);
         debug_assert_eq!(w.len(), nb * nb);
         let doc_base = doc_idx * nb * qpb;

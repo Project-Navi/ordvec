@@ -19,7 +19,7 @@
 
 use rayon::prelude::*;
 
-use super::util::TopK;
+use super::util::{result_buffer_len, TopK};
 use crate::rank::rank_transform;
 use crate::SearchResults;
 
@@ -100,9 +100,18 @@ impl BitmapIndex {
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
         let nq = queries.len() / self.dim;
         assert_eq!(queries.len(), nq * self.dim);
-        let k_eff = k.min(self.n_vectors);
-        let mut scores_flat = vec![f32::NEG_INFINITY; nq * k];
-        let mut indices_flat = vec![-1i64; nq * k];
+        // Clamp the user `k` to n_vectors BEFORE it sizes any
+        // allocation. `vec![_; nq * k]` with an unclamped `k` (e.g.
+        // usize::MAX) overflows Vec capacity and aborts. There can
+        // never be more than n_vectors results, so the clamp is also
+        // semantically correct — and it keeps the reported `k`, the
+        // row stride (`par_chunks(k)`), and `k_eff` mutually
+        // consistent.
+        let k = k.min(self.n_vectors);
+        let k_eff = k;
+        let buf_len = result_buffer_len(nq, k);
+        let mut scores_flat = vec![f32::NEG_INFINITY; buf_len];
+        let mut indices_flat = vec![-1i64; buf_len];
         if k_eff == 0 {
             return SearchResults {
                 scores: scores_flat,
@@ -280,6 +289,19 @@ impl BitmapIndex {
         let qpv = self.qwords_per_vec;
         assert_eq!(q_bitmap.len(), qpv);
         assert_eq!(out.len(), doc_ids.len());
+        // CRITICAL: bound-check every doc_id BEFORE dispatch. The
+        // AVX-512 kernel forwards `di` straight into
+        // `bitmaps.as_ptr().add(di * qpv)` + `_mm512_loadu_si512`,
+        // which is a raw load with no bounds check — an out-of-range
+        // id reads past the heap allocation (silent garbage in
+        // release, SEGV on a large id). The scalar fallback would
+        // panic on the slice index, but only after the SIMD path has
+        // already corrupted; assert here so both paths are covered.
+        assert!(
+            doc_ids.iter().all(|&di| (di as usize) < self.n_vectors),
+            "body_overlap_scores_subset: doc_id out of range [0, {})",
+            self.n_vectors,
+        );
         debug_assert!(
             doc_ids.windows(2).all(|w| w[0] <= w[1]),
             "body_overlap_scores_subset: doc_ids must be sorted ascending",

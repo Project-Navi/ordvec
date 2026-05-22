@@ -7,7 +7,7 @@
 
 use rayon::prelude::*;
 
-use super::util::{l2_normalise, TopK};
+use super::util::{l2_normalise, result_buffer_len, TopK};
 use crate::rank::{rank_norm, rank_transform, rank_transform_into};
 use crate::SearchResults;
 
@@ -66,11 +66,16 @@ impl RankIndex {
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
         let nq = queries.len() / self.dim;
         assert_eq!(queries.len(), nq * self.dim);
-        let k_eff = k.min(self.n_vectors);
+        // Clamp `k` to `n_vectors` before it sizes the `vec![_; nq * k]`
+        // result buffers; an unclamped `usize::MAX` aborts the process
+        // with `capacity overflow`.
+        let k = k.min(self.n_vectors);
+        let k_eff = k;
+        let buf_len = result_buffer_len(nq, k);
         if k_eff == 0 {
             return SearchResults {
-                scores: vec![0.0; nq * k],
-                indices: vec![-1; nq * k],
+                scores: vec![0.0; buf_len],
+                indices: vec![-1; buf_len],
                 nq,
                 k,
             };
@@ -81,8 +86,8 @@ impl RankIndex {
         let norm = rank_norm(dim);
         let inv_norm_sq = 1.0_f32 / (norm * norm);
 
-        let mut scores_flat = vec![0.0f32; nq * k];
-        let mut indices_flat = vec![-1i64; nq * k];
+        let mut scores_flat = vec![0.0f32; buf_len];
+        let mut indices_flat = vec![-1i64; buf_len];
 
         queries
             .par_chunks(dim)
@@ -125,11 +130,16 @@ impl RankIndex {
     pub fn search_asymmetric(&self, queries: &[f32], k: usize) -> SearchResults {
         let nq = queries.len() / self.dim;
         assert_eq!(queries.len(), nq * self.dim);
-        let k_eff = k.min(self.n_vectors);
+        // Clamp `k` to `n_vectors` before sizing the `vec![_; nq * k]`
+        // result buffers; `usize::MAX` otherwise aborts with capacity
+        // overflow.
+        let k = k.min(self.n_vectors);
+        let k_eff = k;
+        let buf_len = result_buffer_len(nq, k);
         if k_eff == 0 {
             return SearchResults {
-                scores: vec![0.0; nq * k],
-                indices: vec![-1; nq * k],
+                scores: vec![0.0; buf_len],
+                indices: vec![-1; buf_len],
                 nq,
                 k,
             };
@@ -140,8 +150,8 @@ impl RankIndex {
         let inv_norm = 1.0_f32 / norm;
         let mean = (dim as f32 - 1.0) / 2.0;
 
-        let mut scores_flat = vec![0.0f32; nq * k];
-        let mut indices_flat = vec![-1i64; nq * k];
+        let mut scores_flat = vec![0.0f32; buf_len];
+        let mut indices_flat = vec![-1i64; buf_len];
 
         queries
             .par_chunks(dim)

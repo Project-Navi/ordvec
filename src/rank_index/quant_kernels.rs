@@ -152,7 +152,11 @@ pub(super) unsafe fn scan_b2_asym_avx2(
 ) {
     use std::arch::x86_64::*;
 
-    debug_assert_eq!(dim % 16, 0, "b=2 AVX2 path needs dim % 16 == 0");
+    // Hard backstop: the dispatch in `quant.rs` must only route here
+    // when `dim % 16 == 0`. Kept as a real `assert!` (not debug-only)
+    // so a mis-dispatch fails loudly in release instead of silently
+    // dropping the trailing chunk and returning wrong top-k.
+    assert_eq!(dim % 16, 0, "b=2 AVX2 path needs dim % 16 == 0");
     let bytes_per_vec = dim / 4;
     // For each chunk of 4 doc bytes we extract 16 codes (top byte first,
     // most-significant 2 bits first within a byte). Shift amounts:
@@ -217,7 +221,9 @@ pub(super) unsafe fn scan_b4_asym_avx2(
 ) {
     use std::arch::x86_64::*;
 
-    debug_assert_eq!(dim % 8, 0, "b=4 AVX2 path needs dim % 8 == 0");
+    // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
+    // loudly in release, not silently drop the trailing chunk.
+    assert_eq!(dim % 8, 0, "b=4 AVX2 path needs dim % 8 == 0");
     let bytes_per_vec = dim / 2;
     // For each chunk of 4 doc bytes we extract 8 codes (one nibble each).
     //   chunk u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3,
@@ -296,7 +302,9 @@ pub(super) unsafe fn scan_b2_asym_avx512(
 ) {
     use std::arch::x86_64::*;
 
-    debug_assert_eq!(dim % 64, 0, "b=2 AVX-512 path needs dim % 64 == 0 for 4-way unroll");
+    // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
+    // loudly in release, not silently drop the trailing 64-code block.
+    assert_eq!(dim % 64, 0, "b=2 AVX-512 path needs dim % 64 == 0 for 4-way unroll");
     let bytes_per_vec = dim / 4;
     let shifts = _mm512_setr_epi32(
         30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0,
@@ -367,7 +375,9 @@ pub(super) unsafe fn scan_b4_asym_avx512(
 ) {
     use std::arch::x86_64::*;
 
-    debug_assert_eq!(dim % 64, 0, "b=4 AVX-512 path needs dim % 64 == 0 for 4-way unroll");
+    // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
+    // loudly in release, not silently drop the trailing 64-code block.
+    assert_eq!(dim % 64, 0, "b=4 AVX-512 path needs dim % 64 == 0 for 4-way unroll");
     let bytes_per_vec = dim / 2;
     let shifts = _mm512_setr_epi32(
         28, 24, 20, 16, 12, 8, 4, 0, 28, 24, 20, 16, 12, 8, 4, 0,

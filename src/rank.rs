@@ -55,6 +55,13 @@ pub fn rank_transform_into(v: &[f32], out: &mut [u16]) {
 /// `[0, d)`. Returns a value in `[0, 1 << bits)`.
 #[inline]
 pub fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> u8 {
+    // `bits` is a `u8`, so a caller could pass e.g. 8 or 255. `1u32 << bits`
+    // overflows for `bits >= 32` (in release that silently wraps and yields a
+    // wrong bucket; in debug it panics inconsistently), and the result must
+    // also fit in the returned `u8`, so cap at 7. `d == 0` would divide by
+    // zero. Guard both up front so the failure is loud in every build.
+    assert!(bits <= 7, "bits too large");
+    assert!(d > 0, "d must be positive");
     let n_buckets = 1u32 << bits;
     let b = (rank as u32 * n_buckets) / (d as u32);
     b.min(n_buckets - 1) as u8
@@ -117,6 +124,10 @@ pub fn unpack_buckets(packed: &[u8], d: usize, bits: u8) -> Vec<u8> {
 /// bit width `bits ∈ {1, 2, 4}`.
 #[inline]
 pub fn rankquant_bytes_per_vec(d: usize, bits: u8) -> usize {
+    // Guard the same domain as the sibling pack/unpack helpers: `bits == 0`
+    // would divide by zero computing `codes_per_byte`, and only 1/2/4 give an
+    // integral codes-per-byte.
+    assert!(matches!(bits, 1 | 2 | 4), "bits must be 1,2,4");
     let codes_per_byte = (8 / bits) as usize;
     d / codes_per_byte
 }
