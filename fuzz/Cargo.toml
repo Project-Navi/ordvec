@@ -12,7 +12,6 @@ cargo-fuzz = true
 # beyond rand for test corpora, and nothing here leaks back into it.
 [dependencies]
 libfuzzer-sys = "0.4"
-arbitrary = "1"
 # `tempfile` gives each fuzz iteration a unique, auto-cleaned path so the
 # loaders (which take a `&Path`) can be driven on arbitrary bytes without
 # leaking files into $TMPDIR across millions of runs.

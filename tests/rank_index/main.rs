@@ -192,10 +192,10 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
             let mut v = Vec::new();
             v.extend_from_slice(b"TVR1");
             v.push(1);
+            // Header claims 100 * 64 * 2 = 12800 payload bytes but only 100
+            // are provided, so the loader hits UnexpectedEof, not a panic.
             v.extend_from_slice(&64u32.to_le_bytes()); // dim
             v.extend_from_slice(&100u32.to_le_bytes()); // n_vectors
-                                                        // Header says 100 * 64 * 2 = 12800 payload bytes; provide
-                                                        // only 100.
             v.extend(std::iter::repeat_n(0u8, 100));
             v
         }),
