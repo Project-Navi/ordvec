@@ -1,16 +1,41 @@
-//! Head-to-head benchmark: TurboQuant vs RankIndex / RankQuantIndex.
+//! Head-to-head benchmark for the rank-mode index family:
+//! RankIndex, RankQuantIndex (b=1/2/4), BitmapIndex (single-stage and
+//! two-stage candidate-gen + exact rerank), and SignBitmapIndex — with
+//! TurboQuantIndex b=2/4 as the magnitude-quantiser reference.
 //!
-//! Measures, on a single synthetic corpus:
-//! - bytes per document
-//! - encode throughput (vectors / second)
-//! - single-query latency p50 / p99 (top-10)
-//! - recall@10 against FP32 brute-force cosine ground truth
+//! SELF-CONTAINED BY DEFAULT. The default run needs NO external corpus
+//! file: it generates a seeded (seed = `CORPUS_SEED`) low-rank clustered
+//! synthetic corpus in-process, so the headline numbers are regenerable
+//! from a clean checkout with a single command:
 //!
-//! Run with:
 //!     cargo run --release --example bench_rank
-//!     cargo run --release --example bench_rank -- --dim 1024 --n 100000 --queries 200
 //!
-//! Output is two human-readable tables followed by a JSON line for
+//! (If the OpenBLAS link fails on Linux, prefix with
+//!  `RUSTFLAGS="-L /usr/lib -l openblas"`.)
+//!
+//! Measures, per index type:
+//! - bytes per document and total index size
+//! - encode throughput (vectors / second)
+//! - single-query latency p50 / p99 (top-10) + derived scan bandwidth
+//! - recall@10 against FP32 brute-force cosine ground truth
+//! - candidate-recall (CR) for the two-stage modes (ANN probe quality)
+//!
+//! DETERMINISM. The corpus, queries, and ground truth are fully seeded,
+//! so every QUALITY column (R@10, CR, bytes/vec, total MiB, ns/dim) is
+//! bit-identical across runs on the same machine. Only the wall-clock
+//! THROUGHPUT/LATENCY columns (encode v/s, p50/p99 ms, GiB/s, Mdocs/s)
+//! vary run-to-run as expected. A committed capture of one run lives at
+//! `turbovec/benchmarks/rank_modes_results.txt`.
+//!
+//! Larger sweeps / real public corpora:
+//!     cargo run --release --example bench_rank -- --dim 1024 --n 100000 --queries 200
+//!     # Point at a real public embedding corpus (no file required for
+//!     # the default run). Both must be 2-D little-endian float32 .npy
+//!     # (C order). For GloVe or OpenAI text-embedding-3 dumps:
+//!     cargo run --release --example bench_rank -- \
+//!         --corpus-npy /path/to/corpus.npy --queries-npy /path/to/queries.npy
+//!
+//! Output is a human-readable table followed by a JSON line for
 //! downstream tooling.
 
 // Required by the `blas-src` pattern: the link directives that
@@ -30,6 +55,11 @@ use turbovec::{
     BitmapIndex, RankIndex, RankQuantIndex,
     SignBitmapIndex, TurboQuantIndex,
 };
+
+/// Fixed RNG seed for the synthetic corpus + queries. Pinning this is
+/// what makes the recall/CR columns reproducible run-to-run. Change it
+/// only if you intend to regenerate the committed results artifact.
+const CORPUS_SEED: u64 = 1;
 
 #[derive(Clone)]
 struct Config {
@@ -72,8 +102,15 @@ struct Config {
 
 fn parse_args() -> Config {
     let mut cfg = Config {
-        dim: 1024,
-        n: 50_000,
+        // Defaults chosen so the *self-contained synthetic* run is cheap
+        // and reproducible: dim=256, n=30k, 200 queries finishes in well
+        // under a minute on a laptop-class core, while still giving clean
+        // recall separation between the rank-mode index types. Override
+        // with --dim / --n / --queries for larger sweeps, or point at a
+        // real public corpus with --corpus-npy / --queries-npy (see the
+        // header comment for the GloVe / OpenAI .npy recipe).
+        dim: 256,
+        n: 30_000,
         n_queries: 200,
         k: 10,
         n_clusters: 200,
@@ -858,8 +895,6 @@ fn bench_sign_bitmap(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Confi
 /// Sign-cosine two-stage: SignBitmap candidate gen → exact RankQuant
 /// b=`bits` rerank. Direct head-to-head with the rank-bitmap
 /// two-stage at the same 384 B/vec storage (128 sign + 256 RQ b=2).
-#[allow(dead_code)] // single-query variant retained for future reference; current
-                    // sign-headline mode uses the batched variant only.
 fn bench_sign_two_stage(
     corpus: &[f32],
     queries: &[f32],
@@ -1064,13 +1099,13 @@ fn bench_rankquant(
 
 fn print_table(rows: &[Row]) {
     println!(
-        "{:<26} {:>10} {:>10} {:>13} {:>9} {:>9} {:>8} {:>8} {:>14} {:>8}",
+        "{:<32} {:>10} {:>10} {:>13} {:>9} {:>9} {:>8} {:>8} {:>14} {:>8}",
         "mode", "bytes/vec", "total MiB", "encode v/s", "p50 ms", "p99 ms", "GiB/s", "ns/dim", "Mdocs/s scan", "R@10",
     );
-    println!("{}", "-".repeat(126));
+    println!("{}", "-".repeat(132));
     for r in rows {
         println!(
-            "{:<26} {:>10} {:>10.1} {:>13.0} {:>9.3} {:>9.3} {:>8.2} {:>8.3} {:>14.2} {:>8.4}",
+            "{:<32} {:>10} {:>10.1} {:>13.0} {:>9.3} {:>9.3} {:>8.2} {:>8.3} {:>14.2} {:>8.4}",
             r.name,
             r.bytes_per_vec,
             r.total_mib,
@@ -1165,8 +1200,8 @@ fn main() {
             "generating low-rank clustered corpus (clusters={}, latent={}) ...",
             cfg.n_clusters, cfg.latent_dim,
         );
-        let (corpus, queries, _q_clusters) = make_clustered_corpus(&cfg, 1);
-        eprintln!("  done in {:.2}s", t0.elapsed().as_secs_f64());
+        let (corpus, queries, _q_clusters) = make_clustered_corpus(&cfg, CORPUS_SEED);
+        eprintln!("  done in {:.2}s (seed={CORPUS_SEED}, self-contained)", t0.elapsed().as_secs_f64());
         (corpus, queries)
     };
 
@@ -1372,6 +1407,12 @@ fn main() {
     eprintln!("benching Bitmap (n_top={n_top}, b=2-equivalent) ...");
     all_rows.push(bench_bitmap(&corpus, &queries, &truth, &cfg, n_top));
 
+    // Sign-cosine probe (data-independent threshold at zero, dim/8
+    // bytes/vec). Included in the default suite so the SignBitmap
+    // substrate is represented head-to-head with the rank-bitmap probe.
+    eprintln!("benching SignBitmap probe (sign-cosine, dim/8 B/vec) ...");
+    all_rows.push(bench_sign_bitmap(&corpus, &queries, &truth, &cfg));
+
     // Precompute exact-RankQuant b=2 top-k per query so two-stage
     // rows can report candidate-recall (ANN probe quality, distinct
     // from task R@10).
@@ -1395,6 +1436,21 @@ fn main() {
             Some(&rq_top),
         ));
     }
+
+    // Sign-cosine two-stage (SignBitmap candidate-gen → exact RankQuant
+    // b=2 rerank), at a representative mid M, so the sign substrate is
+    // represented in a two-stage configuration alongside the rank
+    // two-stage rows above.
+    eprintln!("benching SignTwoStage b=2 M=500 ...");
+    all_rows.push(bench_sign_two_stage(
+        &corpus,
+        &queries,
+        &truth,
+        &cfg,
+        2,
+        500,
+        Some(&rq_top),
+    ));
 
     println!();
     print_table(&all_rows);
