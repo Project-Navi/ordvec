@@ -19,7 +19,7 @@
 
 use rayon::prelude::*;
 
-use super::util::TopK;
+use super::util::{result_buffer_len, TopK};
 use crate::rank::rank_transform;
 use crate::SearchResults;
 
@@ -109,8 +109,9 @@ impl BitmapIndex {
         // consistent.
         let k = k.min(self.n_vectors);
         let k_eff = k;
-        let mut scores_flat = vec![f32::NEG_INFINITY; nq * k];
-        let mut indices_flat = vec![-1i64; nq * k];
+        let buf_len = result_buffer_len(nq, k);
+        let mut scores_flat = vec![f32::NEG_INFINITY; buf_len];
+        let mut indices_flat = vec![-1i64; buf_len];
         if k_eff == 0 {
             return SearchResults {
                 scores: scores_flat,

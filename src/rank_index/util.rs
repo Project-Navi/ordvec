@@ -9,6 +9,22 @@
 //! modules (`index`, `quant`, `bitmap`, `multi_bucket`, `quant_kernels`)
 //! but not from outside `crate::rank_index`.
 
+/// Result-buffer length `nq * k`, panicking loudly on usize overflow
+/// instead of silently wrapping to a too-small allocation.
+///
+/// `k` is already clamped to `n_vectors` at every call site (a single
+/// query can never return more than the corpus size), so this guards
+/// the *remaining* axis: a huge query count `nq`, or a modest `nq * k`
+/// on a 32-bit target. Without the check the wrapped product would size
+/// a too-small `Vec`, and `par_chunks_mut(k)` would then silently drop
+/// the trailing queries' results. An explicit panic turns that data-
+/// corruption path into a loud, debuggable abort.
+#[inline]
+pub(crate) fn result_buffer_len(nq: usize, k: usize) -> usize {
+    nq.checked_mul(k)
+        .expect("search result buffer length (nq * k) overflows usize")
+}
+
 pub(super) fn l2_normalise(v: &[f32]) -> Vec<f32> {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm <= 1e-12 {

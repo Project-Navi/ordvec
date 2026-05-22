@@ -19,7 +19,7 @@ use super::quant_kernels::{
 use super::quant_kernels::{
     scan_b2_asym_avx2, scan_b2_asym_avx512, scan_b4_asym_avx2, scan_b4_asym_avx512,
 };
-use super::util::{l2_normalise, TopK};
+use super::util::{l2_normalise, result_buffer_len, TopK};
 use crate::rank::{
     bucket_centre, bucket_ranks, pack_buckets, rank_to_bucket, rank_transform,
     rankquant_bytes_per_vec, rankquant_norm,
@@ -177,10 +177,11 @@ impl RankQuantIndex {
         // otherwise aborts the process with `capacity overflow`.
         let k = k.min(self.n_vectors);
         let k_eff = k;
+        let buf_len = result_buffer_len(nq, k);
         if k_eff == 0 {
             return SearchResults {
-                scores: vec![0.0; nq * k],
-                indices: vec![-1; nq * k],
+                scores: vec![0.0; buf_len],
+                indices: vec![-1; buf_len],
                 nq,
                 k,
             };
@@ -192,8 +193,8 @@ impl RankQuantIndex {
         let inv_norm_sq = 1.0_f32 / (norm * norm);
         let bytes_per_vec = rankquant_bytes_per_vec(dim, bits);
 
-        let mut scores_flat = vec![0.0f32; nq * k];
-        let mut indices_flat = vec![-1i64; nq * k];
+        let mut scores_flat = vec![0.0f32; buf_len];
+        let mut indices_flat = vec![-1i64; buf_len];
 
         let n_buckets = 1usize << bits;
         queries
@@ -246,10 +247,11 @@ impl RankQuantIndex {
         // overflow.
         let k = k.min(self.n_vectors);
         let k_eff = k;
+        let buf_len = result_buffer_len(nq, k);
         if k_eff == 0 {
             return SearchResults {
-                scores: vec![0.0; nq * k],
-                indices: vec![-1; nq * k],
+                scores: vec![0.0; buf_len],
+                indices: vec![-1; buf_len],
                 nq,
                 k,
             };
@@ -262,8 +264,8 @@ impl RankQuantIndex {
         let n_buckets = 1usize << bits;
         let bytes_per_vec = rankquant_bytes_per_vec(dim, bits);
 
-        let mut scores_flat = vec![0.0f32; nq * k];
-        let mut indices_flat = vec![-1i64; nq * k];
+        let mut scores_flat = vec![0.0f32; buf_len];
+        let mut indices_flat = vec![-1i64; buf_len];
 
         // Asymmetric mode: prefer AVX-512 → AVX2 → scalar LUT.
         // Both SIMD paths use the centre-drop trick (raw codes in the
@@ -684,11 +686,31 @@ pub fn search_asymmetric_byte_lut(
     let n = index.n_vectors;
     let nq = queries.len() / dim;
     assert_eq!(queries.len(), nq * dim);
-    let k_eff = k.min(n);
+    // Shadow `k` with the clamp so the clamped value flows into the
+    // buffer sizing *and* the `par_chunks_mut(k)` row stride — matching
+    // the other search methods. Previously only `k_eff` was clamped
+    // while the allocations and chunking used the raw `k`, so a huge
+    // `k` (e.g. `usize::MAX`) sized `nq * k` and aborted with capacity
+    // overflow. The `result_buffer_len` guard below additionally
+    // catches `nq * k` overflowing usize for a large query count.
+    let k = k.min(n);
+    let k_eff = k;
+    let buf_len = result_buffer_len(nq, k);
+    if k_eff == 0 {
+        // Empty corpus (or k==0): `par_chunks_mut(0)` would panic, and
+        // there is nothing to score. Return a correctly-shaped result
+        // with `k == 0`, matching the other search methods' early-out.
+        return SearchResults {
+            scores: vec![0.0; buf_len],
+            indices: vec![-1; buf_len],
+            nq,
+            k,
+        };
+    }
     let norm = rankquant_norm(dim, bits);
     let inv_norm = 1.0_f32 / norm;
-    let mut scores_flat = vec![0.0f32; nq * k];
-    let mut indices_flat = vec![-1i64; nq * k];
+    let mut scores_flat = vec![0.0f32; buf_len];
+    let mut indices_flat = vec![-1i64; buf_len];
     queries
         .par_chunks(dim)
         .zip(scores_flat.par_chunks_mut(k))
