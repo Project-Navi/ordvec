@@ -1,7 +1,9 @@
 //! Training-free ordinal & sign quantization for vector retrieval.
 //!
-//! `ordvec` is the ordinal/sign retrieval substrate extracted from
-//! [turbovec](https://github.com/RyanCodrai/turbovec) (MIT). It carries
+//! `ordvec` is an original training-free ordinal/sign retrieval
+//! substrate, developed within the
+//! [turbovec](https://github.com/RyanCodrai/turbovec) project (MIT, by
+//! Ryan Codrai) and factored out here as a standalone crate. It carries
 //! no system dependencies — no BLAS, no `ndarray`, no `faer` — and needs
 //! no training, rotation, or codebook. Norms are analytical.
 //!
