@@ -456,10 +456,10 @@ impl RankQuant {
     }
 
     /// Single-query asymmetric scoring restricted to a candidate
-    /// subset (e.g., the top-M from a bitmap probe). Returns the
-    /// top-`k` *candidate* indices (i.e., positions in `candidates`,
-    /// not global doc IDs) and their scores. Caller is expected to
-    /// map back to global IDs.
+    /// subset (e.g., the top-M from a bitmap probe). Returns
+    /// `(scores, indices)`: the top-`k` scores and their corresponding
+    /// **global** doc IDs (the local candidate positions are mapped back
+    /// to global IDs before returning).
     ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just

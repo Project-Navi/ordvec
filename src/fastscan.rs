@@ -495,6 +495,7 @@ pub(crate) fn search_asymmetric_fastscan_b2(
 /// path, not part of the headline API. Prefer
 /// [`RankQuant`](crate::RankQuant) unless you have
 /// measured FastScan to win on your workload.
+#[doc(hidden)]
 pub struct RankQuantFastscan {
     dim: usize,
     n_vectors: usize,
