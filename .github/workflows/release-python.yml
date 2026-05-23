@@ -2,6 +2,9 @@
 # PyPI via Trusted Publishing (OIDC). abi3-py39 => one wheel per platform covers
 # CPython 3.9+, so the matrix varies by platform/arch only.
 #
+# maturin runs with working-directory: ordvec-python (matching python.yml) so the
+# binding's own pyproject.toml/Cargo.toml are the unambiguous build context.
+#
 # PUBLISH-HELD by design:
 #   * workflow_dispatch only.
 #   * the publish job is bound to the `pypi` GitHub Environment; add a Required
@@ -14,6 +17,11 @@ name: release-python
 
 on:
   workflow_dispatch:
+
+# Serialize releases; never cancel an in-flight publish.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -36,14 +44,15 @@ jobs:
       - name: Build abi3 wheel (covers CPython 3.9+)
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
+          working-directory: ordvec-python
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist --manifest-path ordvec-python/Cargo.toml
+          args: --release --out dist
           sccache: 'true'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
-          path: dist
+          path: ordvec-python/dist
 
   build-sdist:
     name: sdist
@@ -53,12 +62,13 @@ jobs:
       - name: Build the sdist
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
+          working-directory: ordvec-python
           command: sdist
-          args: --out dist --manifest-path ordvec-python/Cargo.toml
+          args: --out dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sdist
-          path: dist
+          path: ordvec-python/dist
 
   publish:
     name: publish to PyPI
