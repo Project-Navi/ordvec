@@ -446,10 +446,10 @@ pub fn write_sign_bitmap(
 /// `[64, MAX_SIGN_BITMAP_DIM]` and a multiple of 64), and `n_vectors`
 /// (≤ `MAX_VECTORS`). Payload size is computed with `checked_mul` and
 /// rejected if it overflows or exceeds the 128 GiB hard cap from
-/// [`check_payload_bytes`]. Any malformed input returns
+/// `check_payload_bytes`. Any malformed input returns
 /// `io::Error::InvalidData`.
 ///
-/// Dim validation deliberately does NOT use [`check_dim`]: that helper
+/// Dim validation deliberately does NOT use `check_dim`: that helper
 /// caps at `u16::MAX` to honour [`crate::Rank`]'s `u16` rank
 /// invariant, which sign bitmaps do not share. Sharing it would reject
 /// valid `SignBitmap::new(d)` instances for any `d > 65535`,
