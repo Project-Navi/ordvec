@@ -54,7 +54,10 @@ def two_stage_rerank(
 
     # Stage 1 — batched candidate generation.
     cand_matrix = sign_idx.top_m_candidates_batched(queries, m=m_candidates)
-    assert cand_matrix.shape == (n_q, m_candidates)
+    # m_eff caps at the index size; it equals m_candidates in these tests but
+    # stays correct if this helper is reused as example code with m > len(index).
+    m_eff = min(m_candidates, corpus.shape[0])
+    assert cand_matrix.shape == (n_q, m_eff)
 
     # Stage 2 — per-query exact rerank against the global RankQuant.
     out_ids = np.empty((n_q, k_final), dtype=np.int64)
