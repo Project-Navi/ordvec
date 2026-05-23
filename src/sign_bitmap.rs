@@ -17,7 +17,7 @@
 //! candidate selector takes top-M docs by **lowest** Hamming
 //! (= **highest** agreement).
 //!
-//! Kernel architecture mirrors [`crate::BitmapIndex`] (single-query
+//! Kernel architecture mirrors [`crate::Bitmap`] (single-query
 //! and CHUNK=8 batched hot+tail paths under AVX-512 VPOPCNTDQ). The
 //! only material difference is `_mm512_xor_si512` in place of
 //! `_mm512_and_si512` and an ascending tie-broken composite-key
@@ -29,8 +29,8 @@ use rayon::prelude::*;
 ///
 /// Storage: `dim / 8` bytes per doc. Dim must be a multiple of 64
 /// (so the u64-packed layout has no straddling tail bits — same
-/// invariant as [`crate::BitmapIndex`]).
-pub struct SignBitmapIndex {
+/// invariant as [`crate::Bitmap`]).
+pub struct SignBitmap {
     dim: usize,
     qwords_per_vec: usize,
     n_vectors: usize,
@@ -39,7 +39,7 @@ pub struct SignBitmapIndex {
     bitmaps: Vec<u64>,
 }
 
-impl SignBitmapIndex {
+impl SignBitmap {
     /// Build an empty index for `dim`-dimensional embeddings.
     ///
     /// `dim` must be a multiple of 64 in
@@ -112,7 +112,7 @@ impl SignBitmapIndex {
     /// `(hamming ascending, doc_id ascending)` so boundary ties at
     /// `m_eff` produce a deterministic survivor set across runs and
     /// SIMD dispatch paths — same audit discipline as
-    /// [`crate::BitmapIndex::top_m_candidates`].
+    /// [`crate::Bitmap::top_m_candidates`].
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
         let m_eff = m.min(self.n_vectors);
         if m_eff == 0 {
@@ -143,7 +143,7 @@ impl SignBitmapIndex {
 
     /// Batched variant: stream the sign bitmaps **once** and produce
     /// top-`m` candidate sets for `batch` queries in parallel. Mirrors
-    /// [`crate::BitmapIndex::top_m_candidates_batched`] in kernel
+    /// [`crate::Bitmap::top_m_candidates_batched`] in kernel
     /// shape (CHUNK=8 hot + tail) and tie-break semantics.
     pub fn top_m_candidates_batched(&self, queries: &[f32], m: usize) -> Vec<Vec<u32>> {
         let dim = self.dim;
@@ -235,7 +235,7 @@ impl SignBitmapIndex {
 // -------------------------------------------------------------------
 // Scan kernels: XOR-popcount, write Hamming distance per doc.
 //
-// Identical shape to `bitmap_scan_collect{,_batched}` in rank_index.rs,
+// Identical shape to `bitmap_scan_collect{,_batched}` in index/bitmap.rs,
 // but with `_mm512_xor_si512` in place of `_mm512_and_si512`. The
 // kernel structure (lane preload, hot+tail CHUNK=8 in the batched
 // variant, const-bounded inner loop for accumulator register
@@ -306,7 +306,7 @@ unsafe fn sign_scan_collect_avx512vpop(
 
 // -------------------------------------------------------------------
 // Batched variant — CHUNK=8 hot + tail, same shape as
-// `bitmap_scan_collect_batched_avx512vpop` in rank_index.rs.
+// `bitmap_scan_collect_batched_avx512vpop` in index/bitmap.rs.
 // -------------------------------------------------------------------
 
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -448,12 +448,12 @@ mod tests {
         // by zero on `vectors.len() / self.dim`. The explicit
         // `assert!(dim > 0)` in `new` rejects the bad input upfront
         // with a clear message.
-        let _ = SignBitmapIndex::new(0);
+        let _ = SignBitmap::new(0);
     }
 
     #[test]
     fn sign_encoding_threshold_at_zero() {
-        let mut idx = SignBitmapIndex::new(D);
+        let mut idx = SignBitmap::new(D);
         // First doc: alternating signs (j even → positive, j odd → negative)
         let mut v: Vec<f32> = (0..D)
             .map(|j| if j % 2 == 0 { 1.0 } else { -1.0 })
@@ -474,7 +474,7 @@ mod tests {
     fn top_m_returns_ascending_hamming() {
         let n = 100;
         let corpus = make_corpus(7, n);
-        let mut idx = SignBitmapIndex::new(D);
+        let mut idx = SignBitmap::new(D);
         idx.add(&corpus);
         let mut rng = ChaCha8Rng::seed_from_u64(11);
         let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
@@ -500,7 +500,7 @@ mod tests {
     fn batched_matches_single_query() {
         let n = 200;
         let corpus = make_corpus(13, n);
-        let mut idx = SignBitmapIndex::new(D);
+        let mut idx = SignBitmap::new(D);
         idx.add(&corpus);
         let mut rng = ChaCha8Rng::seed_from_u64(99);
         let batch: usize = 5;
@@ -522,24 +522,24 @@ mod tests {
 
     #[test]
     fn large_dim_above_u16_max_roundtrips() {
-        // Regression for the Codex stop-time finding: SignBitmapIndex::new
+        // Regression for the Codex stop-time finding: SignBitmap::new
         // accepts dim > u16::MAX (65535) as a positive multiple of 64,
         // but the first revision of `load_sign_bitmap` reused the
-        // RankIndex-specific `check_dim` helper whose u16::MAX cap
+        // Rank-specific `check_dim` helper whose u16::MAX cap
         // rejected any such file. The dedicated `check_sign_bitmap_dim`
         // aligns the constructor and loader invariants.
         const BIG_D: usize = 65_536; // u16::MAX + 1 — the smallest dim above the old cap
         let n = 4;
         let mut rng = ChaCha8Rng::seed_from_u64(41);
         let corpus: Vec<f32> = (0..n * BIG_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let mut original = SignBitmapIndex::new(BIG_D);
+        let mut original = SignBitmap::new(BIG_D);
         original.add(&corpus);
 
         let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_large_dim.tvsb");
         original
             .write(&tmp)
             .expect("write must accept dim > u16::MAX");
-        let loaded = SignBitmapIndex::load(&tmp).expect("load must accept dim > u16::MAX");
+        let loaded = SignBitmap::load(&tmp).expect("load must accept dim > u16::MAX");
         std::fs::remove_file(&tmp).ok();
 
         assert_eq!(loaded.dim(), BIG_D);
@@ -551,12 +551,12 @@ mod tests {
     fn write_then_load_roundtrips() {
         let n = 64;
         let corpus = make_corpus(17, n);
-        let mut original = SignBitmapIndex::new(D);
+        let mut original = SignBitmap::new(D);
         original.add(&corpus);
 
         let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_roundtrip.tvsb");
         original.write(&tmp).expect("write should succeed");
-        let loaded = SignBitmapIndex::load(&tmp).expect("load should succeed");
+        let loaded = SignBitmap::load(&tmp).expect("load should succeed");
         std::fs::remove_file(&tmp).ok();
 
         assert_eq!(loaded.dim(), original.dim());
@@ -575,10 +575,10 @@ mod tests {
     fn load_rejects_bad_magic() {
         let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_bad_magic.tvsb");
         std::fs::write(&tmp, b"BAD!\x01\x00\x00\x01\x00\x00\x00\x00\x00").expect("write tmp");
-        // SignBitmapIndex does not derive Debug (matches the convention of
+        // SignBitmap does not derive Debug (matches the convention of
         // other rank-mode types), so unwrap_err / expect_err do not apply;
         // use a match to inspect the Err arm instead.
-        match SignBitmapIndex::load(&tmp) {
+        match SignBitmap::load(&tmp) {
             Ok(_) => {
                 std::fs::remove_file(&tmp).ok();
                 panic!("load must reject a file with the wrong magic");
@@ -596,7 +596,7 @@ mod tests {
         let n = 256;
         let mut rng = ChaCha8Rng::seed_from_u64(31);
         let corpus: Vec<f32> = (0..n * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let mut idx = SignBitmapIndex::new(PROD_D);
+        let mut idx = SignBitmap::new(PROD_D);
         idx.add(&corpus);
         let queries: Vec<f32> = (0..3 * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
         // Batched (AVX-512 dispatched at qpv=16) must agree with scalar

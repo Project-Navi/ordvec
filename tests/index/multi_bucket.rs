@@ -1,8 +1,8 @@
-//! MultiBucketBitmapIndex integration tests — the bilinear bucket-overlap
+//! MultiBucketBitmap integration tests — the bilinear bucket-overlap
 //! identity that underwrites the bucket decomposition.
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_transform};
-use ordvec::MultiBucketBitmapIndex;
+use ordvec::MultiBucketBitmap;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -16,7 +16,7 @@ use crate::{make_corpus, D, N};
 /// floating-point epsilon, not approximately.
 fn multi_bucket_bilinear_equals_symmetric_rankquant_inner(bits: u8) {
     let corpus = make_corpus(30 + bits as u64);
-    let mut mb = MultiBucketBitmapIndex::new(D, bits);
+    let mut mb = MultiBucketBitmap::new(D, bits);
     mb.add(&corpus);
     let w = mb.outer_product_weights();
 
@@ -59,8 +59,8 @@ fn multi_bucket_bilinear_equals_symmetric_rankquant_b4() {
 
 #[test]
 fn multi_bucket_storage_matches_formula() {
-    let mb2 = MultiBucketBitmapIndex::new(D, 2);
-    let mb4 = MultiBucketBitmapIndex::new(D, 4);
+    let mb2 = MultiBucketBitmap::new(D, 2);
+    let mb4 = MultiBucketBitmap::new(D, 4);
     assert_eq!(mb2.bytes_per_vec(), D * 4 / 8); // 4 buckets, dim/8 B per bitmap
     assert_eq!(mb4.bytes_per_vec(), D * 16 / 8); // 16 buckets
     assert_eq!(mb2.bytes_per_vec(), D / 2);

@@ -1,4 +1,4 @@
-//! MultiBucketBitmapIndex: `2^bits` bitmaps per document, one per bucket.
+//! MultiBucketBitmap: `2^bits` bitmaps per document, one per bucket.
 //!
 //! Represents the constant-composition bucket assignment of each
 //! document explicitly as a set of `2^bits` disjoint bitmaps over the
@@ -31,7 +31,7 @@ use rayon::prelude::*;
 use crate::rank::{rank_to_bucket, rank_transform};
 
 /// Multi-bucket bitmap index over a constant-composition partition.
-pub struct MultiBucketBitmapIndex {
+pub struct MultiBucketBitmap {
     dim: usize,
     bits: u8,
     n_buckets: usize,
@@ -42,13 +42,13 @@ pub struct MultiBucketBitmapIndex {
     bitmaps: Vec<u64>,
 }
 
-impl MultiBucketBitmapIndex {
+impl MultiBucketBitmap {
     pub fn new(dim: usize, bits: u8) -> Self {
         assert!(matches!(bits, 1 | 2 | 4), "bits must be 1, 2, or 4");
         // dim=0 satisfies `% 64` and `% n_buckets` divisibility but
         // produces qwords_per_bitmap=0, deferring a div-by-zero into
         // `add` (n = vectors.len() / dim). Reject at construction,
-        // mirroring SignBitmapIndex::new.
+        // mirroring SignBitmap::new.
         assert!(dim > 0, "dim must be > 0");
         assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
         let n_buckets = 1usize << bits;

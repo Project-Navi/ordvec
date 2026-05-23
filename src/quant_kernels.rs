@@ -10,17 +10,17 @@
 //! - AVX-512 + AVX-512DQ ([`scan_b{2,4}_asym_avx512`]) — 4-way unrolled
 //!   with 4 independent accumulators to break the FMA dep chain.
 //!
-//! All kernels feed into a [`TopK`](super::util::TopK) collector
+//! All kernels feed into a [`TopK`](crate::util::TopK) collector
 //! supplied by the caller. The caller is responsible for runtime
 //! CPU-feature detection before reaching for any `unsafe` SIMD kernel.
 
-use super::util::TopK;
 use crate::rank::bucket_centre;
+use crate::util::TopK;
 
 /// Build the per-coord, per-bucket LUT for this query and dispatch
 /// the matching `scan_b{N}_to_topk` for the configured `bits`.
 #[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
-pub(super) fn scan_via_lut_scalar(
+pub(crate) fn scan_via_lut_scalar(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -54,7 +54,7 @@ pub(super) fn scan_via_lut_scalar(
 // -------------------------------------------------------------------
 
 /// 1-bit scan. 8 codes per byte; n_buckets = 2.
-pub(super) fn scan_b1_to_topk(
+pub(crate) fn scan_b1_to_topk(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -82,7 +82,7 @@ pub(super) fn scan_b1_to_topk(
 }
 
 /// 2-bit scan. 4 codes per byte; n_buckets = 4.
-pub(super) fn scan_b2_to_topk(
+pub(crate) fn scan_b2_to_topk(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -106,7 +106,7 @@ pub(super) fn scan_b2_to_topk(
 }
 
 /// 4-bit scan. 2 codes per byte; n_buckets = 16.
-pub(super) fn scan_b4_to_topk(
+pub(crate) fn scan_b4_to_topk(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -143,7 +143,7 @@ pub(super) fn scan_b4_to_topk(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-pub(super) unsafe fn scan_b2_asym_avx2(
+pub(crate) unsafe fn scan_b2_asym_avx2(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -212,7 +212,7 @@ pub(super) unsafe fn scan_b2_asym_avx2(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-pub(super) unsafe fn scan_b4_asym_avx2(
+pub(crate) unsafe fn scan_b4_asym_avx2(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -293,7 +293,7 @@ unsafe fn horizontal_sum_avx2(v: std::arch::x86_64::__m256) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq")]
-pub(super) unsafe fn scan_b2_asym_avx512(
+pub(crate) unsafe fn scan_b2_asym_avx512(
     packed: &[u8],
     n: usize,
     dim: usize,
@@ -368,7 +368,7 @@ pub(super) unsafe fn scan_b2_asym_avx512(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq")]
-pub(super) unsafe fn scan_b4_asym_avx512(
+pub(crate) unsafe fn scan_b4_asym_avx512(
     packed: &[u8],
     n: usize,
     dim: usize,

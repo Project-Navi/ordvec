@@ -1,6 +1,6 @@
 //! Head-to-head benchmark for the rank-mode index family:
-//! RankIndex, RankQuantIndex (b=1/2/4), BitmapIndex (single-stage and
-//! two-stage candidate-gen + exact rerank), and SignBitmapIndex.
+//! Rank, RankQuant (b=1/2/4), Bitmap (single-stage and
+//! two-stage candidate-gen + exact rerank), and SignBitmap.
 //!
 //! SELF-CONTAINED BY DEFAULT. The default run needs NO external corpus
 //! file: it generates a seeded (seed = `CORPUS_SEED`) low-rank clustered
@@ -36,15 +36,15 @@
 //! Output is a human-readable table followed by a JSON line for
 //! downstream tooling.
 
-use ordvec::rank_index::search_asymmetric_byte_lut;
+use ordvec::search_asymmetric_byte_lut;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
-// `RankQuantFastscanIndex` is `#[doc(hidden)]` (optional b=2 scan path);
+// `RankQuantFastscan` is `#[doc(hidden)]` (optional b=2 scan path);
 // the bench imports it to compare its throughput/recall against the
 // production RankQuant b=2 asym kernel on identical data.
-use ordvec::RankQuantFastscanIndex;
-use ordvec::{BitmapIndex, RankIndex, RankQuantIndex, SignBitmapIndex};
+use ordvec::RankQuantFastscan;
+use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 
 /// Fixed RNG seed for the synthetic corpus + queries. Pinning this is
 /// what makes the recall/CR columns reproducible run-to-run. Change it
@@ -490,7 +490,7 @@ where
 }
 
 fn bench_rank_full(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config) -> Vec<Row> {
-    let mut idx = RankIndex::new(cfg.dim);
+    let mut idx = Rank::new(cfg.dim);
     let t0 = Instant::now();
     idx.add(corpus);
     let encode_secs = t0.elapsed().as_secs_f64();
@@ -499,7 +499,7 @@ fn bench_rank_full(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config)
     let encode_vps = cfg.n as f64 / encode_secs;
 
     let mut rows = Vec::new();
-    for &(label, asym) in &[("RankIndex sym", false), ("RankIndex asym", true)] {
+    for &(label, asym) in &[("Rank sym", false), ("Rank asym", true)] {
         let (p50, p99) = time_queries(queries, cfg.dim, cfg.n_queries, |q| {
             let _ = if asym {
                 idx.search_asymmetric(q, cfg.k)
@@ -532,7 +532,7 @@ fn bench_rank_full(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config)
 }
 
 /// Bench the byte-LUT alternative scoring path for the same
-/// RankQuantIndex (asymmetric only, bits in {2, 4}). Returns one
+/// RankQuant (asymmetric only, bits in {2, 4}). Returns one
 /// row labelled `RankQuant b={bits} asym byte-LUT`.
 fn bench_rankquant_byte_lut(
     corpus: &[f32],
@@ -541,7 +541,7 @@ fn bench_rankquant_byte_lut(
     cfg: &Config,
     bits: u8,
 ) -> Row {
-    let mut idx = RankQuantIndex::new(cfg.dim, bits);
+    let mut idx = RankQuant::new(cfg.dim, bits);
     let t0 = Instant::now();
     idx.add(corpus);
     let encode_secs = t0.elapsed().as_secs_f64();
@@ -575,7 +575,7 @@ fn bench_rankquant_byte_lut(
 /// `n_top` is the bitmap's set-bit count per doc (e.g., dim/4 for the
 /// "top quarter" / b=2-equivalent operating point).
 fn bench_bitmap(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config, n_top: usize) -> Row {
-    let mut idx = BitmapIndex::new(cfg.dim, n_top);
+    let mut idx = Bitmap::new(cfg.dim, n_top);
     let t0 = Instant::now();
     idx.add(corpus);
     let encode_secs = t0.elapsed().as_secs_f64();
@@ -627,8 +627,8 @@ fn bench_two_stage(
     n_top: usize,
     exact_rq_top: Option<&[i64]>,
 ) -> Row {
-    let mut bitmap = BitmapIndex::new(cfg.dim, n_top);
-    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let mut bitmap = Bitmap::new(cfg.dim, n_top);
+    let mut rq = RankQuant::new(cfg.dim, bits);
     let t0 = Instant::now();
     bitmap.add(corpus);
     rq.add(corpus);
@@ -725,8 +725,8 @@ fn bench_two_stage_batched(
     batch_size: usize,
     exact_rq_top: Option<&[i64]>,
 ) -> Row {
-    let mut bitmap = BitmapIndex::new(cfg.dim, n_top);
-    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let mut bitmap = Bitmap::new(cfg.dim, n_top);
+    let mut rq = RankQuant::new(cfg.dim, bits);
     let t0 = Instant::now();
     bitmap.add(corpus);
     rq.add(corpus);
@@ -827,7 +827,7 @@ fn bench_two_stage_batched(
 /// probe — but the threshold is `coord > 0` rather than `rank ≥ dim
 /// − n_top`. Score = `dim − popcount(q XOR d)` = sign-agreement count.
 fn bench_sign_bitmap(corpus: &[f32], queries: &[f32], truth: &[i64], cfg: &Config) -> Row {
-    let mut idx = SignBitmapIndex::new(cfg.dim);
+    let mut idx = SignBitmap::new(cfg.dim);
     let t0 = Instant::now();
     idx.add(corpus);
     let encode_secs = t0.elapsed().as_secs_f64();
@@ -874,8 +874,8 @@ fn bench_sign_two_stage(
     m: usize,
     exact_rq_top: Option<&[i64]>,
 ) -> Row {
-    let mut sign = SignBitmapIndex::new(cfg.dim);
-    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let mut sign = SignBitmap::new(cfg.dim);
+    let mut rq = RankQuant::new(cfg.dim, bits);
     let t0 = Instant::now();
     sign.add(corpus);
     rq.add(corpus);
@@ -948,8 +948,8 @@ fn bench_sign_two_stage_batched(
     batch_size: usize,
     exact_rq_top: Option<&[i64]>,
 ) -> Row {
-    let mut sign = SignBitmapIndex::new(cfg.dim);
-    let mut rq = RankQuantIndex::new(cfg.dim, bits);
+    let mut sign = SignBitmap::new(cfg.dim);
+    let mut rq = RankQuant::new(cfg.dim, bits);
     let t0 = Instant::now();
     sign.add(corpus);
     rq.add(corpus);
@@ -1053,7 +1053,7 @@ fn bench_rankquant_fastscan_b2(
     // add() encapsulates rank-transform + bucket + pack_fastscan_b2;
     // time the whole encode for the encode-throughput column.
     let t0 = Instant::now();
-    let mut fs_idx = RankQuantFastscanIndex::new(dim);
+    let mut fs_idx = RankQuantFastscan::new(dim);
     fs_idx.add(corpus);
     let encode_secs = t0.elapsed().as_secs_f64();
     let encode_vps = n as f64 / encode_secs;
@@ -1092,7 +1092,7 @@ fn bench_rankquant(
     cfg: &Config,
     bits: u8,
 ) -> Vec<Row> {
-    let mut idx = RankQuantIndex::new(cfg.dim, bits);
+    let mut idx = RankQuant::new(cfg.dim, bits);
     let t0 = Instant::now();
     idx.add(corpus);
     let encode_secs = t0.elapsed().as_secs_f64();
@@ -1286,7 +1286,7 @@ fn main() {
                 // --batch size, plus the single-query M=500 row as a
                 // direct head-to-head sanity-check.
                 eprintln!("computing exact RankQuant b=2 top-k for CR metric ...");
-                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                let mut rq_exact = RankQuant::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
                 let rq_top: Vec<i64> =
                     collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
@@ -1331,7 +1331,7 @@ fn main() {
                 all_rows.push(bench_bitmap(&corpus, &queries, &truth, &cfg, bitmap_n_top));
 
                 eprintln!("computing exact RankQuant b=2 top-k for CR ...");
-                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                let mut rq_exact = RankQuant::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
                 let rq_top: Vec<i64> =
                     collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
@@ -1372,7 +1372,7 @@ fn main() {
                 // 256 B/vec). Also runs the 384 B/vec b=2 rerank rows
                 // for the existing +50% storage Pareto.
                 eprintln!("computing exact RankQuant b=2 top-k for CR ...");
-                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                let mut rq_exact = RankQuant::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
                 let rq_top: Vec<i64> =
                     collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
@@ -1414,7 +1414,7 @@ fn main() {
                 // noise; small overhead expected from the extra
                 // copy in top_m_candidates_batched).
                 eprintln!("computing exact RankQuant b=2 top-k for CR metric ...");
-                let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+                let mut rq_exact = RankQuant::new(cfg.dim, 2);
                 rq_exact.add(&corpus);
                 let rq_top: Vec<i64> =
                     collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
@@ -1458,7 +1458,7 @@ fn main() {
         return;
     }
 
-    eprintln!("benching RankIndex (full u16) ...");
+    eprintln!("benching Rank (full u16) ...");
     all_rows.extend(bench_rank_full(&corpus, &queries, &truth, &cfg));
 
     eprintln!("benching RankQuant b=2 ...");
@@ -1488,7 +1488,7 @@ fn main() {
     // rows can report candidate-recall (ANN probe quality, distinct
     // from task R@10).
     eprintln!("computing exact RankQuant b=2 top-k for candidate-recall metric ...");
-    let mut rq_exact = RankQuantIndex::new(cfg.dim, 2);
+    let mut rq_exact = RankQuant::new(cfg.dim, 2);
     rq_exact.add(&corpus);
     let rq_top: Vec<i64> = collect_preds(&queries, cfg.dim, cfg.n_queries, cfg.k, |q| {
         rq_exact.search_asymmetric(q, cfg.k).indices

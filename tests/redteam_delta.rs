@@ -11,7 +11,7 @@
 //!   but not the `dim % (1 << bits) == 0` / `dim % (8 / bits) == 0`
 //!   constant-composition invariant, even though the module doc
 //!   (rank_io.rs ~26-27) claims it is enforced on load. The invariant
-//!   was only re-checked one layer up in `RankQuantIndex::load`, so a
+//!   was only re-checked one layer up in `RankQuant::load`, so a
 //!   direct caller of `load_rankquant` (or any future consumer) could
 //!   silently accept a malformed packed buffer.
 //! * **TV-DESER-005** — [`rank_io::load_rank`] accepted rank values

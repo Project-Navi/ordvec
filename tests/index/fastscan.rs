@@ -1,4 +1,4 @@
-//! RankQuantFastscanIndex (FastScan b=2 block-32 scan) integration
+//! RankQuantFastscan (FastScan b=2 block-32 scan) integration
 //! tests.
 //!
 //! FastScan is an optional b=2 scan path that wraps a FastScan-specific
@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use ordvec::{RankQuantFastscanIndex, RankQuantIndex};
+use ordvec::{RankQuant, RankQuantFastscan};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -33,14 +33,14 @@ fn fastscan_b2_top10_matches_avx512_kernel() {
     let docs: Vec<f32> = (0..FN * FD).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let queries: Vec<f32> = (0..3 * FD).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
-    // Reference: the production RankQuantIndex asym kernel.
-    let mut idx = RankQuantIndex::new(FD, 2);
+    // Reference: the production RankQuant asym kernel.
+    let mut idx = RankQuant::new(FD, 2);
     idx.add(&docs);
     let ref_res = idx.search_asymmetric(&queries, 10);
 
     // FastScan via the type wrapper (encapsulates rank-transform +
     // bucket + pack_fastscan_b2 + scan dispatch).
-    let mut fs_idx = RankQuantFastscanIndex::new(FD);
+    let mut fs_idx = RankQuantFastscan::new(FD);
     fs_idx.add(&docs);
     let fs_res = fs_idx.search(&queries, 10);
 
@@ -76,7 +76,7 @@ fn fastscan_handles_k_zero() {
     let mut rng = ChaCha8Rng::seed_from_u64(251);
     let queries: Vec<f32> = (0..(2 * D)).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
-    let mut fs = RankQuantFastscanIndex::new(D);
+    let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
     let r = fs.search(&queries, 0);
     assert_eq!(r.k, 0, "result.k must equal caller's k");
@@ -86,7 +86,7 @@ fn fastscan_handles_k_zero() {
 
 #[test]
 fn fastscan_search_on_empty_corpus_returns_sentinel() {
-    let fs = RankQuantFastscanIndex::new(D);
+    let fs = RankQuantFastscan::new(D);
     let q: Vec<f32> = vec![0.5; D];
     let r = fs.search(&q, 10);
     assert_eq!(r.nq, 1);
@@ -103,7 +103,7 @@ fn fastscan_search_on_empty_corpus_returns_sentinel() {
 #[test]
 fn fastscan_search_on_empty_query_returns_empty_results() {
     let corpus = make_corpus(260);
-    let mut fs = RankQuantFastscanIndex::new(D);
+    let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
     let r = fs.search(&[], 10);
     assert_eq!(r.nq, 0);
@@ -118,14 +118,14 @@ fn fastscan_handles_k_greater_than_n_vectors() {
     let corpus: Vec<f32> = (0..(N_SMALL * D))
         .map(|_| rng.gen_range(-1.0..1.0))
         .collect();
-    let mut fs = RankQuantFastscanIndex::new(D);
+    let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
     let query: Vec<f32> = corpus[0..D].to_vec();
     let k = 20usize;
     let r = fs.search(&query, k);
     // k is clamped to n_vectors before sizing the result buffers, so a
     // k > N request returns exactly N_SMALL slots (all valid hits),
-    // matching `RankQuantIndex::search_asymmetric`'s clamp discipline.
+    // matching `RankQuant::search_asymmetric`'s clamp discipline.
     assert_eq!(r.k, N_SMALL, "k clamps to n_vectors when k > N");
     for slot in 0..N_SMALL {
         assert!(
@@ -142,7 +142,7 @@ fn fastscan_search_is_thread_safe() {
     let mut rng = ChaCha8Rng::seed_from_u64(263);
     let queries: Vec<f32> = (0..(4 * D)).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
-    let mut fs = RankQuantFastscanIndex::new(D);
+    let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
     let fs = Arc::new(fs);
     let ref_indices = fs.search(&queries, 10).indices;
@@ -176,7 +176,7 @@ fn fastscan_dim_boundary_matrix() {
         let corpus: Vec<f32> = (0..(N_SMALL * dim))
             .map(|_| rng.gen_range(-1.0..1.0))
             .collect();
-        let mut fs = RankQuantFastscanIndex::new(dim);
+        let mut fs = RankQuantFastscan::new(dim);
         fs.add(&corpus);
         let q: Vec<f32> = corpus[0..dim].to_vec();
         let r = fs.search(&q, 5);
@@ -203,7 +203,7 @@ fn fastscan_second_add_panics_per_v1_contract() {
     // loosening of this limit doesn't silently corrupt the addressing
     // scheme.
     let corpus = make_corpus(280);
-    let mut fs = RankQuantFastscanIndex::new(D);
+    let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
     fs.add(&corpus); // <- must panic with "incremental add()" in message
 }
@@ -212,7 +212,7 @@ fn fastscan_second_add_panics_per_v1_contract() {
 fn fastscan_construct_then_metadata_roundtrips() {
     // Sanity-pin the type's read-only accessors after add().
     let corpus = make_corpus(281);
-    let mut fs = RankQuantFastscanIndex::new(D);
+    let mut fs = RankQuantFastscan::new(D);
     assert!(fs.is_empty());
     assert_eq!(fs.len(), 0);
     assert_eq!(fs.dim(), D);

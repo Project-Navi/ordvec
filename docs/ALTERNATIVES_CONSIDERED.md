@@ -34,7 +34,7 @@ supporting a claim in the public docs. The current set is:
 |--------------|-------------|--------|
 | `bitmap-pulp` | `pulp-kernel`-feature variant of the single-query bitmap scan | Prototype; see Pulp-based bitmap scan above. Both the bench mode and the underlying feature flag are gone from the upstream-PR tree. |
 | `count-fold-two-stage` | α sweep over the count-fold survivor tier | Null result; see Count-fold summary tier above |
-| `--kind {full16x16, diag, top4}` filters of the default-suite multi-bucket b=4 probe | Bilinear bucket-overlap weight schemes used for research-side QPP feature extraction (paper-only, not user-facing) | Not tied to any RANK_MODES.md / README claim; the `MultiBucketBitmapIndex` type itself remains exposed for direct construction by callers who need it |
+| `--kind {full16x16, diag, top4}` filters of the default-suite multi-bucket b=4 probe | Bilinear bucket-overlap weight schemes used for research-side QPP feature extraction (paper-only, not user-facing) | Not tied to any RANK_MODES.md / README claim; the `MultiBucketBitmap` type itself remains exposed for direct construction by callers who need it |
 
 ## Scope note
 

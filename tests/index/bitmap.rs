@@ -1,9 +1,9 @@
-//! BitmapIndex integration tests: top-bucket bitmap candidate
+//! Bitmap integration tests: top-bucket bitmap candidate
 //! generation, two-stage rerank wiring, and the AVX-512 VPOPCNTDQ
 //! batched-kernel parity proofs.
 
 use ordvec::rank::rank_transform;
-use ordvec::{BitmapIndex, RankQuantIndex};
+use ordvec::{Bitmap, RankQuant};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -12,11 +12,11 @@ use crate::{make_corpus, D, N};
 #[test]
 fn rank_io_round_trip_bitmap_index() {
     let corpus = make_corpus(42);
-    let mut idx = BitmapIndex::new(D, D / 4);
+    let mut idx = Bitmap::new(D, D / 4);
     idx.add(&corpus);
     let tmp = std::env::temp_dir().join("bitmap_index_io.tvbm");
     idx.write(&tmp).expect("write");
-    let loaded = BitmapIndex::load(&tmp).expect("load");
+    let loaded = Bitmap::load(&tmp).expect("load");
     std::fs::remove_file(&tmp).ok();
 
     assert_eq!(loaded.len(), idx.len());
@@ -35,7 +35,7 @@ fn bitmap_index_constant_composition_invariant() {
     // Every doc bitmap should have exactly n_top bits set.
     let corpus = make_corpus(20);
     let n_top = D / 4;
-    let mut idx = BitmapIndex::new(D, n_top);
+    let mut idx = Bitmap::new(D, n_top);
     idx.add(&corpus);
     assert_eq!(idx.len(), N);
     assert_eq!(idx.bytes_per_vec(), D / 8);
@@ -52,12 +52,12 @@ fn bitmap_index_constant_composition_invariant() {
 #[test]
 fn bitmap_then_subset_recovers_exact_when_m_eq_n() {
     // When M = N the bitmap probe returns every doc and the subset
-    // rerank must agree with the full RankQuantIndex.search_asymmetric.
+    // rerank must agree with the full RankQuant.search_asymmetric.
     let corpus = make_corpus(21);
     let n_top = D / 4;
-    let mut bitmap = BitmapIndex::new(D, n_top);
+    let mut bitmap = Bitmap::new(D, n_top);
     bitmap.add(&corpus);
-    let mut rq = RankQuantIndex::new(D, 2);
+    let mut rq = RankQuant::new(D, 2);
     rq.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(99_999);
@@ -83,7 +83,7 @@ fn bitmap_top_m_candidates_uses_no_ground_truth() {
     // same query twice must yield identical candidates.
     let corpus = make_corpus(22);
     let n_top = D / 4;
-    let mut bitmap = BitmapIndex::new(D, n_top);
+    let mut bitmap = Bitmap::new(D, n_top);
     bitmap.add(&corpus);
     let mut rng = ChaCha8Rng::seed_from_u64(50);
     let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
@@ -119,7 +119,7 @@ fn bitmap_top_m_candidates_deterministic_at_ties() {
     }
     let _ = rank_transform(&duplicate_vec); // assert symbol is in scope
     let n_top = TIE_D / 4;
-    let mut bitmap = BitmapIndex::new(TIE_D, n_top);
+    let mut bitmap = Bitmap::new(TIE_D, n_top);
     bitmap.add(&corpus);
     let query: Vec<f32> = (0..TIE_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
@@ -174,7 +174,7 @@ fn bitmap_batched_avx512_production_dim() {
         .map(|_| rng.gen_range(-1.0..1.0))
         .collect();
     let n_top = PROD_D / 4;
-    let mut bitmap = BitmapIndex::new(PROD_D, n_top);
+    let mut bitmap = Bitmap::new(PROD_D, n_top);
     bitmap.add(&corpus);
     for m in [10usize, 50, 200] {
         let single: Vec<Vec<u32>> = (0..BATCH)
@@ -210,7 +210,7 @@ fn bitmap_batched_hot_plus_tail_split() {
         .map(|_| rng.gen_range(-1.0..1.0))
         .collect();
     let n_top = PROD_D / 4;
-    let mut bitmap = BitmapIndex::new(PROD_D, n_top);
+    let mut bitmap = Bitmap::new(PROD_D, n_top);
     bitmap.add(&corpus);
     let single: Vec<Vec<u32>> = (0..BATCH)
         .map(|bi| bitmap.top_m_candidates(&queries[bi * PROD_D..(bi + 1) * PROD_D], 32))
@@ -233,7 +233,7 @@ fn bitmap_batched_edge_cases() {
     // contract.
     let corpus = make_corpus(13);
     let n_top = D / 4;
-    let mut bitmap = BitmapIndex::new(D, n_top);
+    let mut bitmap = Bitmap::new(D, n_top);
     bitmap.add(&corpus);
 
     // Empty batch.
@@ -278,7 +278,7 @@ fn bitmap_batched_edge_cases() {
 fn bitmap_batched_avx512_high_qpv_no_panic() {
     // Regression for the AVX-512 batched kernel: an earlier version
     // capped the per-doc lane cache at 8 lanes (dim ≤ 4096), but
-    // BitmapIndex accepts any dim multiple of 64 and the AVX-512
+    // Bitmap accepts any dim multiple of 64 and the AVX-512
     // dispatch fires on any qpv % 8 == 0. At dim=4608 (qpv=72, lanes
     // = 9) the cached-doc-lane array would index out of bounds and
     // panic in release builds. The current kernel uses per-batch
@@ -296,7 +296,7 @@ fn bitmap_batched_avx512_high_qpv_no_panic() {
         .map(|_| rng.gen_range(-1.0..1.0))
         .collect();
     let n_top = HIGH_D / 4;
-    let mut bitmap = BitmapIndex::new(HIGH_D, n_top);
+    let mut bitmap = Bitmap::new(HIGH_D, n_top);
     bitmap.add(&corpus);
     let single: Vec<Vec<u32>> = (0..BATCH)
         .map(|bi| bitmap.top_m_candidates(&queries[bi * HIGH_D..(bi + 1) * HIGH_D], 16))
@@ -320,7 +320,7 @@ fn bitmap_batched_matches_single_query() {
     // selection) to exercise the select_nth boundary.
     let corpus = make_corpus(31);
     let n_top = D / 4;
-    let mut bitmap = BitmapIndex::new(D, n_top);
+    let mut bitmap = Bitmap::new(D, n_top);
     bitmap.add(&corpus);
     let mut rng = ChaCha8Rng::seed_from_u64(99);
     let batch: usize = 7; // intentionally non-power-of-2

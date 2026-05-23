@@ -33,8 +33,8 @@ the exact command, under
 they are not the lead claim because the corpus is not shipped here.
 Real-corpus evaluation appears in the accompanying paper (link TBD).
 
-The bitmap two-stage path (`BitmapIndex` candidate gen →
-`RankQuantIndex` exact subset rerank) is the operating point that
+The bitmap two-stage path (`Bitmap` candidate gen →
+`RankQuant` exact subset rerank) is the operating point that
 turns RankQuant from a slow exact scan into a sub-linear retriever:
 the bitmap probe is the cheap candidate generator, and
 `search_asymmetric_subset` reruns the exact RankQuant kernel on only
@@ -68,16 +68,16 @@ throughput/latency columns are wall-clock and vary across hardware.
 
 The three scored index families are:
 
-- **`RankIndex`** — stores the dimension-wise rank transform of each
+- **`Rank`** — stores the dimension-wise rank transform of each
   document as `u16` (`2 * dim` bytes per document).
-- **`RankQuantIndex`** — buckets each rank into `1 << bits` equal-width
+- **`RankQuant`** — buckets each rank into `1 << bits` equal-width
   bins on `[0, dim)` and packs `bits` bits per coordinate
   (`dim * bits / 8` bytes per document). Supported `bits ∈ {1, 2, 4}`.
-- **`BitmapIndex`** / **`SignBitmapIndex`** — one bit per coordinate
+- **`Bitmap`** / **`SignBitmap`** — one bit per coordinate
   (`dim / 8` bytes per document); the cheap candidate-gen front end for
-  the two-stage path (see [README](../README.md#substrate-families)).
+  the two-stage path (see [README](../README.md#ordinal-index-family)).
 
-Both `RankIndex` and `RankQuantIndex` expose `search` (symmetric:
+Both `Rank` and `RankQuant` expose `search` (symmetric:
 rank-vs-rank, Spearman correlation) and `search_asymmetric` (FP32
 query against rank-stored documents).
 
@@ -173,8 +173,8 @@ throughput is a representative wall-clock figure (see
 
 | mode               | bytes/vec | encode v/s | R@10  |
 |--------------------|-----------|------------|-------|
-| RankIndex sym      | 512       | 4,559,550  | 0.7825 |
-| RankIndex asym     | 512       | 4,559,550  | 0.8450 |
+| Rank sym           | 512       | 4,559,550  | 0.7825 |
+| Rank asym          | 512       | 4,559,550  | 0.8450 |
 | RankQuant b=4 sym  | 128       | 5,205,223  | 0.7475 |
 | RankQuant b=4 asym | 128       | 5,205,223  | 0.8055 |
 | RankQuant b=2 sym  | 64        | 5,251,083  | 0.4660 |
@@ -201,8 +201,8 @@ recovers a consistent R@10 margin over the symmetric (rank-vs-rank)
 scan, and the margin widens as document-side precision shrinks.
 
 **Storage is `dim * bits / 8` bytes per document** for the bucketed
-modes (`RankQuantIndex`); the single-bit probes (`BitmapIndex`,
-`SignBitmapIndex`) are `dim / 8` bytes. `RankQuantFastscanIndex` is the
+modes (`RankQuant`); the single-bit probes (`Bitmap`,
+`SignBitmap`) are `dim / 8` bytes. `RankQuantFastscan` is the
 exception — its block-32 re-blocking costs `dim / 2` bytes (2× the
 single-rate b=2 packing) in exchange for lower per-query scan latency.
 
@@ -212,7 +212,7 @@ data-independent (the dominant per-vector cost is the rank transform).
 
 **Single-query exact-scan latency is the standing weakness.** The
 per-query exact RankQuant scan is decode-bound at the narrow byte
-budgets; the two-stage path (`BitmapIndex` → `RankQuantIndex` subset
+budgets; the two-stage path (`Bitmap` → `RankQuant` subset
 rerank) is what closes this in practice — it scores only the M bitmap
 survivors instead of the full corpus. The candidate-recall vs latency
 trade is the bench's two-stage rows; remaining single-query SIMD
@@ -249,7 +249,7 @@ shows how to reproduce that contrast on your own data.
 |-----------------|-----------|------------|
 | RankQuant b=2   | 64        | 5,251,083  |
 | RankQuant b=4   | 128       | 5,205,223  |
-| RankIndex       | 512       | 4,559,550  |
+| Rank            | 512       | 4,559,550  |
 | SignBitmap      | 32        | 19,641,040 |
 
 The architectural reason is straightforward: no rotation matrix
@@ -261,7 +261,7 @@ is data-independent.
 ### Storage
 
 `bytes_per_vec = dim * bits / 8` for the bucketed modes. The
-single-bit probes are `dim / 8` bytes; `RankQuantFastscanIndex` is
+single-bit probes are `dim / 8` bytes; `RankQuantFastscan` is
 `dim / 2` bytes (the FastScan space-for-latency trade).
 
 ### Asymmetric beats symmetric
@@ -316,10 +316,10 @@ facts qualify this:
   approximation.** It returns identical top-k to the scalar RankQuant
   scorer and agrees within 1e-4 on scores (verified by
   `rankquant_asymmetric_matches_reference_b{1,2,4}` in
-  `tests/rank_index/quant.rs`).
+  `tests/index/quant.rs`).
 
 The byte-LUT scorer remains in the codebase as a labelled reference
-path (`ordvec::rank_index::search_asymmetric_byte_lut`,
+path (`ordvec::search_asymmetric_byte_lut`,
 benched as the `RankQuant b=… asym byte-LUT` rows) but is not the
 production scoring route — streaming SIMD math beats query-LUT cache
 traffic on the hardware tested.
@@ -335,13 +335,13 @@ latency, in priority order:
 2. **Unroll across docs** — process 2-4 docs per inner iteration so
    the front-end can hide the broadcast/shift/mask latency.
 3. **SIMD-blocked layout** — repack into 32-doc tiles (the approach
-   `RankQuantFastscanIndex` already takes for its b=2 fast path).
+   `RankQuantFastscan` already takes for its b=2 fast path).
    Improves the memory access pattern. Highest single-step win but
    largest restructuring.
 
 None of these are research questions; the AVX-512 kernel in
-`src/rank_index/quant_kernels.rs` (and the block-32 layout in
-`src/rank_index/fastscan.rs`) is a direct template.
+`src/quant_kernels.rs` (and the block-32 layout in
+`src/fastscan.rs`) is a direct template.
 
 The symmetric path is still scalar (lower-priority — asymmetric is
 the recommended mode and wins every recall comparison here).
@@ -394,7 +394,7 @@ that experiment appear in the accompanying paper (link TBD).
 
 ## API surface
 
-| capability | RankIndex | RankQuantIndex | Bitmap / SignBitmap |
+| capability | Rank | RankQuant | Bitmap / SignBitmap |
 |---|---|---|---|
 | `new(...)` | `new(dim)` | `new(dim, bits)` | `new(dim[, n_top])` |
 | `add(&[f32])` | ✓ | ✓ | ✓ |
@@ -406,17 +406,17 @@ that experiment appear in the accompanying paper (link TBD).
 | `len`/`is_empty`/`dim`/`bytes_per_vec`/`byte_size` | ✓ | ✓ | ✓ |
 | `write`/`load` | ✓ | ✓ | ✓ |
 
-`write`/`load` are implemented for every rank-mode type (`RankIndex`,
-`RankQuantIndex`, `BitmapIndex`, `SignBitmapIndex`) with the byte-level
+`write`/`load` are implemented for every ordinal-family type (`Rank`,
+`RankQuant`, `Bitmap`, `SignBitmap`) with the byte-level
 serialisers living in [`src/rank_io.rs`](../src/rank_io.rs) and
-[`src/sign_bitmap.rs`](../src/sign_bitmap.rs). `RankQuantIndex`
+[`src/sign_bitmap.rs`](../src/sign_bitmap.rs). `RankQuant`
 additionally exposes `search_asymmetric_subset` for scoring a
 precomputed candidate set — the rerank half of the two-stage pattern.
 
-`RankQuantFastscanIndex` (re-exported `#[doc(hidden)]`) is an optional
+`RankQuantFastscan` (re-exported `#[doc(hidden)]`) is an optional
 single-pass b=2 fast path; it supports `add`/`search` but not
 `swap_remove`/`write`/`load` (see its module docs in
-`src/rank_index/fastscan.rs`). `MultiBucketBitmapIndex` underwrites the
+`src/fastscan.rs`). `MultiBucketBitmap` underwrites the
 bilinear bucket-overlap decomposition and is reachable only behind the
 `experimental` feature.
 
@@ -428,12 +428,12 @@ bilinear bucket-overlap decomposition and is reachable only behind the
 partitioning, bucket-centre symmetry, pack/unpack round-trips, and
 analytical norms.
 
-`cargo test --test rank_index` — the integration suite in
-[`tests/rank_index/`](../tests/rank_index/) (`index.rs`, `quant.rs`,
+`cargo test --test index` — the integration suite in
+[`tests/index/`](../tests/index/) (`rank.rs`, `quant.rs`,
 `bitmap.rs`, `fastscan.rs`, and `multi_bucket.rs` under the
 `experimental` feature). Representative cases:
 
-- `rank_index_symmetric_matches_reference` — `RankIndex::search`
+- `rank_index_symmetric_matches_reference` — `Rank::search`
   matches a scalar Spearman implementation on a 256-doc / 128-dim
   corpus, exact top-10 ordering, score agreement to 1e-4.
 - `rank_index_asymmetric_matches_reference` — same, for the FP32-vs-
@@ -462,7 +462,7 @@ inputs and robustness regressions.
 
 ```bash
 cargo test --lib                                     # unit tests
-cargo test --test rank_index                         # integration
+cargo test --test index                              # integration
 cargo test --features experimental                   # + MultiBucket tests
 
 # Headline benchmark (synthetic clustered corpus — no external data,
@@ -485,8 +485,8 @@ multi-seed stability is your call.
 
 ## Design summary
 
-1. **Additive index family.** `RankIndex`, `RankQuantIndex`,
-   `BitmapIndex`, and `SignBitmapIndex` are independent types,
+1. **Additive index family.** `Rank`, `RankQuant`,
+   `Bitmap`, and `SignBitmap` are independent types,
    compiled and tested alongside one another.
 2. **No heavy dependencies.** The rank primitives use `ordered_float`
    and `rayon`. No BLAS, no codebook training, no rotation matrix.

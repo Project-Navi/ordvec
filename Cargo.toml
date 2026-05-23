@@ -1,6 +1,6 @@
 [package]
 name = "ordvec"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; verified builds + 80 tests pass
 description = "Training-free ordinal & sign quantization for vector retrieval"
@@ -12,7 +12,7 @@ keywords = ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"]
 categories = ["algorithms", "science", "compression"]
 
 # docs.rs build configuration. Build with default features only so the
-# experimental research scaffold (MultiBucketBitmapIndex) and the
+# experimental research scaffold (MultiBucketBitmap) and the
 # `#[doc(hidden)]` FastScan path stay off the published docs surface.
 # `--cfg docsrs` lets the crate gate `#[doc(cfg(...))]` annotations on a
 # build flag docs.rs sets but a normal `cargo doc` does not.
@@ -32,7 +32,7 @@ rand_chacha = "0.3"
 [features]
 # SIMD is always compiled and dispatched at runtime via is_x86_feature_detected!
 # with a scalar fallback — no feature flag gates it. `experimental` exposes
-# MultiBucketBitmapIndex (research scaffold), kept off the stable surface.
+# MultiBucketBitmap (research scaffold), kept off the stable surface.
 experimental = []
 
 [profile.release]

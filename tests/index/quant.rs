@@ -1,6 +1,6 @@
-//! RankQuantIndex (B-bit bucket-packed) integration tests.
+//! RankQuant (B-bit bucket-packed) integration tests.
 
-use ordvec::RankQuantIndex;
+use ordvec::RankQuant;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -23,7 +23,7 @@ fn rankquant_asymmetric_matches_reference_b1() {
 
 fn rankquant_asymmetric_matches_reference(bits: u8) {
     let corpus = make_corpus(3 + bits as u64);
-    let mut idx = RankQuantIndex::new(D, bits);
+    let mut idx = RankQuant::new(D, bits);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(200 + bits as u64);
@@ -73,7 +73,7 @@ fn rankquant_b2_recovers_planted_neighbour_in_top_10() {
     // that asymmetric RankQuant-2 finds it in the top-10 across a
     // batch of queries.
     let mut corpus = make_corpus(42);
-    let mut idx = RankQuantIndex::new(D, 2);
+    let mut idx = RankQuant::new(D, 2);
 
     // For each of 50 queries, pick a corpus doc and add small noise to
     // produce the query. Top-1 should be the corpus doc itself.
@@ -117,7 +117,7 @@ fn rankquant_b2_recovers_planted_neighbour_in_top_10() {
 #[test]
 fn rankquant_swap_remove_keeps_state_consistent() {
     let corpus = make_corpus(11);
-    let mut idx = RankQuantIndex::new(D, 2);
+    let mut idx = RankQuant::new(D, 2);
     idx.add(&corpus);
     assert_eq!(idx.len(), N);
     let bpv = idx.bytes_per_vec();
@@ -130,11 +130,11 @@ fn rankquant_swap_remove_keeps_state_consistent() {
 #[test]
 fn rank_io_round_trip_rankquant_index() {
     let corpus = make_corpus(41);
-    let mut idx = RankQuantIndex::new(D, 2);
+    let mut idx = RankQuant::new(D, 2);
     idx.add(&corpus);
     let tmp = std::env::temp_dir().join("rankquant_index_io.tvrq");
     idx.write(&tmp).expect("write");
-    let loaded = RankQuantIndex::load(&tmp).expect("load");
+    let loaded = RankQuant::load(&tmp).expect("load");
     std::fs::remove_file(&tmp).ok();
 
     assert_eq!(loaded.len(), idx.len());

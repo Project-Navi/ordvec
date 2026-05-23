@@ -1,13 +1,13 @@
-//! Shared internals for the `rank_index` family.
+//! Shared internals for the ordvec index family.
 //!
 //! - [`TopK`] is the running top-`k` collector used by every search
 //!   path (full ranks, bucketed ranks, bitmap overlap).
 //! - [`l2_normalise`] returns the unit-norm copy of a query vector for
 //!   the asymmetric scoring path.
 //!
-//! Both items are `pub(super)` so they are reachable from sibling
-//! modules (`index`, `quant`, `bitmap`, `multi_bucket`, `quant_kernels`)
-//! but not from outside `crate::rank_index`.
+//! Both items are `pub(crate)` so they are reachable from the sibling
+//! index modules (`rank`, `quant`, `bitmap`, `multi_bucket`, `fastscan`)
+//! but not from outside the crate.
 
 /// Result-buffer length `nq * k`, panicking loudly on usize overflow
 /// instead of silently wrapping to a too-small allocation.
@@ -25,7 +25,7 @@ pub(crate) fn result_buffer_len(nq: usize, k: usize) -> usize {
         .expect("search result buffer length (nq * k) overflows usize")
 }
 
-pub(super) fn l2_normalise(v: &[f32]) -> Vec<f32> {
+pub(crate) fn l2_normalise(v: &[f32]) -> Vec<f32> {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm <= 1e-12 {
         vec![0.0; v.len()]
@@ -54,7 +54,7 @@ pub(super) fn l2_normalise(v: &[f32]) -> Vec<f32> {
 /// The "worst kept" entry — the one evicted first — is therefore the
 /// one with the lowest score and, among equal-score entries, the
 /// HIGHEST doc_id.
-pub(super) struct TopK {
+pub(crate) struct TopK {
     k: usize,
     scores: Vec<f32>,
     indices: Vec<i64>,
@@ -70,7 +70,7 @@ pub(super) struct TopK {
 }
 
 impl TopK {
-    pub(super) fn new(k: usize) -> Self {
+    pub(crate) fn new(k: usize) -> Self {
         Self {
             k,
             scores: vec![f32::NEG_INFINITY; k],
@@ -83,7 +83,7 @@ impl TopK {
     }
 
     #[inline]
-    pub(super) fn maybe_insert(&mut self, score: f32, idx: usize) {
+    pub(crate) fn maybe_insert(&mut self, score: f32, idx: usize) {
         if self.filled < self.k {
             self.scores[self.filled] = score;
             self.indices[self.filled] = idx as i64;
@@ -133,7 +133,7 @@ impl TopK {
     /// key `(score desc, doc_id asc)`. `out_scores.len()` is the
     /// user-requested `k`; positions beyond `self.filled` are left as
     /// sentinels.
-    pub(super) fn finalize_into(&self, out_scores: &mut [f32], out_indices: &mut [i64]) {
+    pub(crate) fn finalize_into(&self, out_scores: &mut [f32], out_indices: &mut [i64]) {
         debug_assert_eq!(out_scores.len(), out_indices.len());
         for s in out_scores.iter_mut() {
             *s = f32::NEG_INFINITY;

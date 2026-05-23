@@ -2,8 +2,8 @@
 //!
 //! Each test pins a robustness fix to a concrete failure mode. These
 //! cases were extracted from turbovec's `redteam_beta.rs`; all of them
-//! exercise the rank-mode substrate (`RankIndex`, `RankQuantIndex`,
-//! `SignBitmapIndex`, and the byte-LUT bench helper) that lives in
+//! exercise the rank-mode substrate (`Rank`, `RankQuant`,
+//! `SignBitmap`, and the byte-LUT bench helper) that lives in
 //! `ordvec`.
 //!
 //! - **RT-2 / RT-3**: the AVX-512 / AVX2 asymmetric kernels carry lane
@@ -20,7 +20,7 @@
 //! - **P-H**: passing `k = usize::MAX` used to attempt `vec![_; nq*k]`
 //!   and abort with `capacity overflow`. `k` must be clamped to
 //!   `n_vectors` before any allocation.
-//! - **P-I**: a b=1 `RankQuantIndex` must run `search_asymmetric`
+//! - **P-I**: a b=1 `RankQuant` must run `search_asymmetric`
 //!   end-to-end (routed away from the {2,4}-only byte-LUT path) and
 //!   match a scalar reference.
 
@@ -28,8 +28,8 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_transform, rankquant_norm};
-use ordvec::rank_index::search_asymmetric_byte_lut;
-use ordvec::{RankIndex, RankQuantIndex, SearchResults, SignBitmapIndex};
+use ordvec::search_asymmetric_byte_lut;
+use ordvec::{Rank, RankQuant, SearchResults, SignBitmap};
 
 fn make_corpus(seed: u64, n: usize, dim: usize) -> Vec<f32> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -75,7 +75,7 @@ fn ref_rankquant_asymmetric(query: &[f32], doc: &[f32], bits: u8) -> f32 {
 fn assert_asym_matches_byte_lut(dim: usize, bits: u8, seed: u64) {
     let n = 64;
     let corpus = make_corpus(seed, n, dim);
-    let mut idx = RankQuantIndex::new(dim, bits);
+    let mut idx = RankQuant::new(dim, bits);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(7));
@@ -159,7 +159,7 @@ fn subset_rejects_out_of_range_candidate() {
     let dim = 64;
     let n = 32;
     let corpus = make_corpus(201, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 2);
+    let mut idx = RankQuant::new(dim, 2);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(202);
@@ -176,7 +176,7 @@ fn subset_accepts_in_range_candidates() {
     let dim = 64;
     let n = 32;
     let corpus = make_corpus(203, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 2);
+    let mut idx = RankQuant::new(dim, 2);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(204);
@@ -202,7 +202,7 @@ fn rankquant_search_huge_k_clamps() {
     let dim = 64;
     let n = 16;
     let corpus = make_corpus(301, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 2);
+    let mut idx = RankQuant::new(dim, 2);
     idx.add(&corpus);
     let query = make_corpus(302, 1, dim);
 
@@ -217,7 +217,7 @@ fn rankquant_search_asymmetric_huge_k_clamps() {
     let dim = 64;
     let n = 16;
     let corpus = make_corpus(303, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 2);
+    let mut idx = RankQuant::new(dim, 2);
     idx.add(&corpus);
     let query = make_corpus(304, 1, dim);
 
@@ -232,7 +232,7 @@ fn rank_index_search_huge_k_clamps() {
     let dim = 64;
     let n = 16;
     let corpus = make_corpus(305, n, dim);
-    let mut idx = RankIndex::new(dim);
+    let mut idx = Rank::new(dim);
     idx.add(&corpus);
     let query = make_corpus(306, 1, dim);
 
@@ -247,7 +247,7 @@ fn rank_index_search_asymmetric_huge_k_clamps() {
     let dim = 64;
     let n = 16;
     let corpus = make_corpus(307, n, dim);
-    let mut idx = RankIndex::new(dim);
+    let mut idx = Rank::new(dim);
     idx.add(&corpus);
     let query = make_corpus(308, 1, dim);
 
@@ -262,7 +262,7 @@ fn sign_bitmap_top_m_huge_m_clamps() {
     let dim = 64;
     let n = 16;
     let corpus = make_corpus(309, n, dim);
-    let mut idx = SignBitmapIndex::new(dim);
+    let mut idx = SignBitmap::new(dim);
     idx.add(&corpus);
     let query = make_corpus(310, 1, dim);
 
@@ -291,7 +291,7 @@ fn byte_lut_huge_k_clamps_no_overflow() {
     let dim = 64;
     let n = 16;
     let corpus = make_corpus(501, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 2);
+    let mut idx = RankQuant::new(dim, 2);
     idx.add(&corpus);
     let query = make_corpus(502, 1, dim);
 
@@ -321,7 +321,7 @@ fn byte_lut_huge_k_multi_query_clamps_no_overflow() {
     let n = 16;
     let nq = 3;
     let corpus = make_corpus(503, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 2);
+    let mut idx = RankQuant::new(dim, 2);
     idx.add(&corpus);
     let queries = make_corpus(504, nq, dim);
 
@@ -348,7 +348,7 @@ fn rankquant_b1_asymmetric_works_and_matches_reference() {
     let dim = 64;
     let n = 64;
     let corpus = make_corpus(401, n, dim);
-    let mut idx = RankQuantIndex::new(dim, 1);
+    let mut idx = RankQuant::new(dim, 1);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(402);

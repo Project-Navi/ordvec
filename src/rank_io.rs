@@ -1,9 +1,10 @@
-//! Read/write rank-mode index files.
+//! Read/write ordinal/sign index files.
 //!
-//! Three formats live here, each self-describing via a 4-byte magic:
-//! * `.tvr`  — [`RankIndex`](crate::RankIndex)        — magic `TVR1`
-//! * `.tvrq` — [`RankQuantIndex`](crate::RankQuantIndex) — magic `TVRQ`
-//! * `.tvbm` — [`BitmapIndex`](crate::BitmapIndex)    — magic `TVBM`
+//! Four formats live here, each self-describing via a 4-byte magic:
+//! * `.tvr`  — [`Rank`](crate::Rank) — magic `TVR1`
+//! * `.tvrq` — [`RankQuant`](crate::RankQuant) — magic `TVRQ`
+//! * `.tvbm` — [`Bitmap`](crate::Bitmap) — magic `TVBM`
+//! * `.tvsb` — [`SignBitmap`](crate::SignBitmap) — magic `TVSB`
 //!
 //! All formats are little-endian. Headers are small fixed-size structs
 //! followed by a single contiguous payload (the rank / packed / bitmap
@@ -40,7 +41,7 @@ const TVSB_MAGIC: &[u8; 4] = b"TVSB";
 const VERSION: u8 = 1;
 
 /// Largest accepted `dim` from a loaded file. Matches `u16::MAX` so the
-/// rank transform's `u16` invariant in [`crate::RankIndex`] is honoured.
+/// rank transform's `u16` invariant in [`crate::Rank`] is honoured.
 pub const MAX_DIM: usize = u16::MAX as usize;
 /// Largest accepted `dim` for sign-bitmap files. The rank-storage
 /// invariant (`u16` ranks) does not apply here, so the cap is the
@@ -132,10 +133,10 @@ fn check_dim(dim: usize) -> io::Result<()> {
 /// Dimension check for `.tvsb` sign-bitmap files.
 ///
 /// The `u16::MAX` ceiling in [`check_dim`] exists to honour
-/// [`crate::RankIndex`]'s `u16` rank-storage invariant. Sign bitmaps
+/// [`crate::Rank`]'s `u16` rank-storage invariant. Sign bitmaps
 /// have no such constraint — `dim` is just a bit count — so this check
 /// uses [`MAX_SIGN_BITMAP_DIM`] instead. Without it, any
-/// `SignBitmapIndex::new(d)` with `d > u16::MAX` could be written but
+/// `SignBitmap::new(d)` with `d > u16::MAX` could be written but
 /// would fail on load, breaking roundtrip persistence.
 fn check_sign_bitmap_dim(dim: usize) -> io::Result<()> {
     if !(64..=MAX_SIGN_BITMAP_DIM).contains(&dim) {
@@ -171,7 +172,7 @@ fn check_payload_bytes(payload_bytes: usize) -> io::Result<()> {
 }
 
 // -------------------------------------------------------------------
-// RankIndex: u16 ranks per coordinate.
+// Rank: u16 ranks per coordinate.
 // Header: magic(4) | version(1) | dim(u32 LE) | n_vectors(u32 LE)  = 13 B
 // Payload: n_vectors * dim * 2 bytes (u16 LE ranks).
 // -------------------------------------------------------------------
@@ -243,7 +244,7 @@ pub fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u16>)>
 }
 
 // -------------------------------------------------------------------
-// RankQuantIndex: B-bit packed bucket vectors.
+// RankQuant: B-bit packed bucket vectors.
 // Header: magic(4) | version(1) | bits(u8) | dim(u32 LE) | n_vectors(u32 LE) = 14 B
 // Payload: n_vectors * dim * bits / 8 packed bytes.
 // -------------------------------------------------------------------
@@ -295,7 +296,7 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
     let dim = u32::from_le_bytes(dim_buf) as usize;
     check_dim(dim)?;
     // Constant-composition invariants (documented at module level and
-    // enforced by `RankQuantIndex::new`): `dim` must be a multiple of
+    // enforced by `RankQuant::new`): `dim` must be a multiple of
     // both `2^bits` (one bucket-rank slot per code value) and the
     // codes-per-byte packing factor `8 / bits`. Without these, a forged
     // header with an indivisible `dim` would yield a packed buffer the
@@ -331,7 +332,7 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
 }
 
 // -------------------------------------------------------------------
-// BitmapIndex: top-n_top bitmap per document.
+// Bitmap: top-n_top bitmap per document.
 // Header: magic(4) | version(1) | dim(u32 LE) | n_top(u32 LE) | n_vectors(u32 LE) = 17 B
 // Payload: n_vectors * dim / 8 bytes (qwords as u64 LE).
 // -------------------------------------------------------------------
@@ -405,7 +406,7 @@ pub fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, V
     Ok((dim, n_top, n_vectors, bitmaps))
 }
 
-/// Persist a [`crate::SignBitmapIndex`] payload to a `.tvsb` file.
+/// Persist a [`crate::SignBitmap`] payload to a `.tvsb` file.
 ///
 /// On-disk layout (little-endian throughout):
 ///
@@ -417,7 +418,7 @@ pub fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, V
 /// | 9      | 4     | `n_vectors` (u32)           |
 /// | 13     | …     | `n_vectors * dim/64` u64s   |
 ///
-/// 13-byte header — one u32 shorter than `TVBM` because SignBitmapIndex
+/// 13-byte header — one u32 shorter than `TVBM` because SignBitmap
 /// has no `n_top` parameter (the threshold is fixed at zero).
 pub fn write_sign_bitmap(
     path: impl AsRef<Path>,
@@ -449,9 +450,9 @@ pub fn write_sign_bitmap(
 /// `io::Error::InvalidData`.
 ///
 /// Dim validation deliberately does NOT use [`check_dim`]: that helper
-/// caps at `u16::MAX` to honour [`crate::RankIndex`]'s `u16` rank
+/// caps at `u16::MAX` to honour [`crate::Rank`]'s `u16` rank
 /// invariant, which sign bitmaps do not share. Sharing it would reject
-/// valid `SignBitmapIndex::new(d)` instances for any `d > 65535`,
+/// valid `SignBitmap::new(d)` instances for any `d > 65535`,
 /// breaking the constructor↔loader roundtrip.
 pub fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u64>)> {
     let file = File::open(path)?;

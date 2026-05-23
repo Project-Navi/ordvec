@@ -1,6 +1,6 @@
-//! RankIndex (full-precision u16 ranks) integration tests.
+//! Rank (full-precision u16 ranks) integration tests.
 
-use ordvec::RankIndex;
+use ordvec::Rank;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -9,7 +9,7 @@ use crate::{make_corpus, ref_asymmetric, ref_rank_cosine, D, N};
 #[test]
 fn rank_index_symmetric_matches_reference() {
     let corpus = make_corpus(1);
-    let mut idx = RankIndex::new(D);
+    let mut idx = Rank::new(D);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(99);
@@ -50,7 +50,7 @@ fn rank_index_symmetric_matches_reference() {
 #[test]
 fn rank_index_asymmetric_matches_reference() {
     let corpus = make_corpus(2);
-    let mut idx = RankIndex::new(D);
+    let mut idx = Rank::new(D);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(100);
@@ -87,12 +87,12 @@ fn rank_index_asymmetric_matches_reference() {
 
 #[test]
 fn rank_index_recall_at_10_matches_fp32() {
-    // Top-10 from RankIndex.search should match the brute-force FP32
+    // Top-10 from Rank.search should match the brute-force FP32
     // cosine baseline on >= 80% of queries (rank-cosine is *not*
     // identical to FP32 cosine, so we don't demand 100% — but on
     // smooth random data overlap should be high).
     let corpus = make_corpus(7);
-    let mut idx = RankIndex::new(D);
+    let mut idx = Rank::new(D);
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(8);
@@ -140,7 +140,7 @@ fn rank_index_recall_at_10_matches_fp32() {
 #[test]
 fn rank_index_swap_remove_keeps_state_consistent() {
     let corpus = make_corpus(12);
-    let mut idx = RankIndex::new(D);
+    let mut idx = Rank::new(D);
     idx.add(&corpus);
     assert_eq!(idx.len(), N);
     let moved = idx.swap_remove(0);
@@ -152,11 +152,11 @@ fn rank_index_swap_remove_keeps_state_consistent() {
 #[test]
 fn rank_io_round_trip_rank_index() {
     let corpus = make_corpus(40);
-    let mut idx = RankIndex::new(D);
+    let mut idx = Rank::new(D);
     idx.add(&corpus);
     let tmp = std::env::temp_dir().join("rank_index_io.tvr");
     idx.write(&tmp).expect("write");
-    let loaded = RankIndex::load(&tmp).expect("load");
+    let loaded = Rank::load(&tmp).expect("load");
     std::fs::remove_file(&tmp).ok();
 
     assert_eq!(loaded.len(), idx.len());

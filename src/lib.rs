@@ -7,23 +7,23 @@
 //! no system dependencies — no BLAS, no `ndarray`, no `faer` — and needs
 //! no training, rotation, or codebook. Norms are analytical.
 //!
-//! Three substrate families, all data-oblivious:
+//! Four substrate families, all data-oblivious:
 //!
-//! - [`RankIndex`] stores full-precision rank vectors (`u16` per
+//! - [`Rank`] stores full-precision rank vectors (`u16` per
 //!   coordinate, `2 * dim` bytes per document).
-//! - [`RankQuantIndex`] buckets each rank into `1 << bits` equal-width
+//! - [`RankQuant`] buckets each rank into `1 << bits` equal-width
 //!   bins and packs `bits` bits per coordinate (`dim * bits / 8` bytes
 //!   per document).
-//! - [`BitmapIndex`] stores a top-bucket bitmap per document (one bit
+//! - [`Bitmap`] stores a top-bucket bitmap per document (one bit
 //!   per coordinate) and scores via `popcount(Q AND D)`.
-//! - [`SignBitmapIndex`] stores a sign bitmap per document (one bit per
+//! - [`SignBitmap`] stores a sign bitmap per document (one bit per
 //!   coordinate, set when the coordinate is positive) for sign-cosine
 //!   candidate generation.
 //!
 //! ```no_run
-//! use ordvec::{RankIndex, RankQuantIndex};
+//! use ordvec::{Rank, RankQuant};
 //!
-//! let mut idx = RankQuantIndex::new(1024, 2);
+//! let mut idx = RankQuant::new(1024, 2);
 //! let docs: Vec<f32> = vec![0.0; 1024 * 10_000];
 //! idx.add(&docs);
 //!
@@ -32,26 +32,54 @@
 //! assert_eq!(res.k, 10);
 //! ```
 
+mod bitmap;
+mod fastscan;
+#[cfg(feature = "experimental")]
+mod multi_bucket;
+mod quant;
+mod quant_kernels;
+/// Rank math primitives and the [`Rank`] index type.
 pub mod rank;
-pub mod rank_index;
 pub mod rank_io;
 pub mod sign_bitmap;
+mod util;
 
-pub use rank_index::{BitmapIndex, RankIndex, RankQuantIndex};
-pub use sign_bitmap::SignBitmapIndex;
+pub use bitmap::Bitmap;
+pub use quant::{search_asymmetric_byte_lut, RankQuant};
+pub use rank::Rank;
+pub use sign_bitmap::SignBitmap;
 
-// `MultiBucketBitmapIndex` underwrites the bilinear bucket-overlap
+// `MultiBucketBitmap` underwrites the bilinear bucket-overlap
 // decomposition but is not stable public API. It is reachable only with
 // the `experimental` feature; the default surface excludes it.
 #[cfg(feature = "experimental")]
-pub use rank_index::MultiBucketBitmapIndex;
+pub use multi_bucket::MultiBucketBitmap;
 
-// `RankQuantFastscanIndex` is an optional FastScan b=2 scan path. It is
+// `RankQuantFastscan` is an optional FastScan b=2 scan path. It is
 // re-exported `#[doc(hidden)]` at the crate root — reachable as
-// `ordvec::RankQuantFastscanIndex` for callers who opt in, but not
+// `ordvec::RankQuantFastscan` for callers who opt in, but not
 // advertised alongside the headline index types above.
 #[doc(hidden)]
-pub use rank_index::RankQuantFastscanIndex;
+pub use fastscan::RankQuantFastscan;
+
+// Pre-0.2 names (the `Index` suffix was dropped in the OrdVec ontology
+// rebrand). Retained as deprecated type aliases for back-compat; remove
+// in a future release. `pub type` (rather than `pub use … as`) causes
+// the `#[deprecated]` to actually warn at use sites.
+#[deprecated(since = "0.2.0", note = "renamed to `Rank`")]
+pub type RankIndex = Rank;
+#[deprecated(since = "0.2.0", note = "renamed to `RankQuant`")]
+pub type RankQuantIndex = RankQuant;
+#[deprecated(since = "0.2.0", note = "renamed to `Bitmap`")]
+pub type BitmapIndex = Bitmap;
+#[deprecated(since = "0.2.0", note = "renamed to `SignBitmap`")]
+pub type SignBitmapIndex = SignBitmap;
+#[cfg(feature = "experimental")]
+#[deprecated(since = "0.2.0", note = "renamed to `MultiBucketBitmap`")]
+pub type MultiBucketBitmapIndex = MultiBucketBitmap;
+#[doc(hidden)]
+#[deprecated(since = "0.2.0", note = "renamed to `RankQuantFastscan`")]
+pub type RankQuantFastscanIndex = RankQuantFastscan;
 
 /// Top-k search results, laid out as `nq` contiguous blocks of `k`.
 ///

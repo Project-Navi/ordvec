@@ -3,31 +3,31 @@
 //! Each test pins a specific robustness fix in the `rank_index` family.
 //! These cases were extracted from turbovec's `redteam_alpha.rs`; only
 //! the rank-relevant cases (the substrate that lives in `ordvec`) are
-//! kept. The `MultiBucketBitmapIndex` cases are gated behind the
+//! kept. The `MultiBucketBitmap` cases are gated behind the
 //! `experimental` feature because that type is not on the default
 //! public surface.
 //!
-//! - RT-1: `BitmapIndex::body_overlap_scores_subset` must reject
+//! - RT-1: `Bitmap::body_overlap_scores_subset` must reject
 //!   out-of-range `doc_ids` *before* dispatching into the AVX-512
 //!   VPOPCNTDQ kernel, which would otherwise issue an unchecked
 //!   `bitmaps.as_ptr().add(di * qpv)` load → heap-buffer-overflow read.
-//! - P-F: `MultiBucketBitmapIndex::bilinear_score` must guard a
+//! - P-F: `MultiBucketBitmap::bilinear_score` must guard a
 //!   `doc_idx` out of range with a clear assert. (experimental)
-//! - P-G: `MultiBucketBitmapIndex::new` must reject `dim == 0` (which
+//! - P-G: `MultiBucketBitmap::new` must reject `dim == 0` (which
 //!   would defer a div-by-zero into `add`). (experimental)
 //! - P-H: top-k methods must clamp a user `k`/`m` to `n_vectors` so a
 //!   `usize::MAX` request does not trigger a `Vec` capacity overflow.
-//! - R2: `TopK` (via `BitmapIndex::search`) must tie-break deterministically
+//! - R2: `TopK` (via `Bitmap::search`) must tie-break deterministically
 //!   on `(score desc, doc_id asc)` so SIMD-vs-scalar summation-order
 //!   differences cannot flip near-ties across CPUs.
 
 use ordvec::rank::rank_transform;
-use ordvec::BitmapIndex;
+use ordvec::Bitmap;
 #[cfg(feature = "experimental")]
-use ordvec::MultiBucketBitmapIndex;
+use ordvec::MultiBucketBitmap;
 
 /// Reconstruct a single document's top-bucket bitmap exactly the way
-/// `BitmapIndex::add` does (bit j set iff rank[j] >= dim - n_top), so
+/// `Bitmap::add` does (bit j set iff rank[j] >= dim - n_top), so
 /// the subset-overlap correctness check is independent of the kernel
 /// under test.
 fn ref_doc_bitmap(doc: &[f32], dim: usize, n_top: usize) -> Vec<u64> {
@@ -62,7 +62,7 @@ fn rt1_subset_rejects_oob_doc_id_at_simd_dim() {
     // allocation. The guard must panic before dispatch instead.
     const DIM: usize = 1024;
     const N_TOP: usize = 256;
-    let mut idx = BitmapIndex::new(DIM, N_TOP);
+    let mut idx = Bitmap::new(DIM, N_TOP);
     let corpus: Vec<f32> = (0..4 * DIM)
         .map(|i| ((i * 7) % 101) as f32 - 50.0)
         .collect();
@@ -82,7 +82,7 @@ fn rt1_subset_in_range_matches_reference_popcount() {
     const DIM: usize = 1024;
     const N_TOP: usize = 256;
     let n_docs = 6usize;
-    let mut idx = BitmapIndex::new(DIM, N_TOP);
+    let mut idx = Bitmap::new(DIM, N_TOP);
     let corpus: Vec<f32> = (0..n_docs * DIM)
         .map(|i| (((i * 31) % 211) as f32) - 105.0)
         .collect();
@@ -114,7 +114,7 @@ fn rt1_subset_in_range_matches_reference_popcount() {
 fn pf_bilinear_score_rejects_oob_doc_idx() {
     const DIM: usize = 128;
     let n_docs = 4usize;
-    let mut mb = MultiBucketBitmapIndex::new(DIM, 2);
+    let mut mb = MultiBucketBitmap::new(DIM, 2);
     let corpus: Vec<f32> = (0..n_docs * DIM)
         .map(|i| ((i * 5) % 71) as f32 - 35.0)
         .collect();
@@ -134,8 +134,8 @@ fn pf_bilinear_score_rejects_oob_doc_idx() {
 fn pg_multi_bucket_new_rejects_dim_zero() {
     // dim=0 satisfies `dim % 64 == 0` and `dim % n_buckets == 0`, so it
     // currently constructs and defers a div-by-zero to `add`. Reject it
-    // at construction, mirroring SignBitmapIndex::new.
-    let _ = MultiBucketBitmapIndex::new(0, 2);
+    // at construction, mirroring SignBitmap::new.
+    let _ = MultiBucketBitmap::new(0, 2);
 }
 
 // --- P-H (k-clamp: no capacity overflow on huge k/m) -----------------
@@ -147,7 +147,7 @@ fn ph_bitmap_search_clamps_huge_k() {
     // the result (and the allocation) to n_vectors.
     const DIM: usize = 128;
     let n_docs = 16usize;
-    let mut idx = BitmapIndex::new(DIM, DIM / 4);
+    let mut idx = Bitmap::new(DIM, DIM / 4);
     let corpus: Vec<f32> = (0..n_docs * DIM)
         .map(|i| ((i * 3) % 53) as f32 - 26.0)
         .collect();
@@ -174,7 +174,7 @@ fn ph_bitmap_search_clamps_huge_k() {
 fn ph_multi_bucket_top_m_bilinear_clamps_huge_m() {
     const DIM: usize = 128;
     let n_docs = 16usize;
-    let mut mb = MultiBucketBitmapIndex::new(DIM, 2);
+    let mut mb = MultiBucketBitmap::new(DIM, 2);
     let corpus: Vec<f32> = (0..n_docs * DIM)
         .map(|i| ((i * 7) % 61) as f32 - 30.0)
         .collect();
@@ -195,7 +195,7 @@ fn ph_multi_bucket_top_m_bilinear_clamps_huge_m() {
 #[test]
 fn r2_topk_breaks_ties_by_lower_doc_id() {
     // Discriminating construction (see probe scenario C). The corpus is
-    // laid out so that the documents `BitmapIndex::search` scans first
+    // laid out so that the documents `Bitmap::search` scans first
     // (low ids) have a LOWER overlap than a block of exact-duplicate
     // documents at HIGHER ids that all tie at the maximum overlap.
     //
@@ -211,7 +211,7 @@ fn r2_topk_breaks_ties_by_lower_doc_id() {
     // order on genuine near-ties).
     const DIM: usize = 128;
     let n_top = DIM / 4;
-    let mut idx = BitmapIndex::new(DIM, n_top);
+    let mut idx = Bitmap::new(DIM, n_top);
 
     // The query / duplicate vector: a clean ramp so its top-bucket is
     // well defined and an exact copy reproduces the maximum overlap.

@@ -10,15 +10,15 @@ nearest-neighbour search over high-dimensional embeddings. It is
 analytical. There are **no system dependencies** — no BLAS, no
 `ndarray`, no `faer`.
 
-## Substrate families
+## Ordinal index family
 
-- **`RankIndex`** — full-precision rank vectors (`u16` per coordinate).
-- **`RankQuantIndex`** — ranks bucketed into `1 << bits` equal-width
+- **`Rank`** — full-precision rank vectors (`u16` per coordinate).
+- **`RankQuant`** — ranks bucketed into `1 << bits` equal-width
   bins, `bits` bits per coordinate (`dim * bits / 8` bytes/doc). Both a
   symmetric (Spearman) and asymmetric (float-query LUT) scorer.
-- **`BitmapIndex`** — a top-bucket bitmap per document (one bit per
+- **`Bitmap`** — a top-bucket bitmap per document (one bit per
   coordinate); scoring is `popcount(Q AND D)`, a coarsened rank overlap.
-- **`SignBitmapIndex`** — a sign bitmap per document for sign-cosine
+- **`SignBitmap`** — a sign bitmap per document for sign-cosine
   candidate generation, feeding an exact rerank stage.
 
 ## Provenance

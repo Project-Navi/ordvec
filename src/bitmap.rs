@@ -1,4 +1,4 @@
-//! BitmapIndex: top-bucket bitmap per document (constant-composition).
+//! Bitmap: top-bucket bitmap per document (constant-composition).
 //!
 //! Each document is encoded as a `dim`-bit bitmap where bit j is set
 //! iff the document's rank vector places coordinate j in the top
@@ -19,12 +19,12 @@
 
 use rayon::prelude::*;
 
-use super::util::{result_buffer_len, TopK};
 use crate::rank::rank_transform;
+use crate::util::{result_buffer_len, TopK};
 use crate::SearchResults;
 
 /// Top-bucket bitmap index for constant-composition coarse scoring.
-pub struct BitmapIndex {
+pub struct Bitmap {
     dim: usize,
     n_top: usize,
     qwords_per_vec: usize,
@@ -33,7 +33,7 @@ pub struct BitmapIndex {
     bitmaps: Vec<u64>,
 }
 
-impl BitmapIndex {
+impl Bitmap {
     pub fn new(dim: usize, n_top: usize) -> Self {
         assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
         assert!(n_top > 0 && n_top < dim, "0 < n_top < dim");
@@ -444,7 +444,7 @@ unsafe fn bitmap_scan_avx512vpop(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64
 
 /// Scan all N docs and write the raw popcount-overlap score into
 /// `scores[di]`. No top-k maintenance, no allocation per doc, no
-/// O(N · k) tax — used by [`BitmapIndex::top_m_candidates`] for large
+/// O(N · k) tax — used by [`Bitmap::top_m_candidates`] for large
 /// M where the streaming top-k path would dominate.
 fn bitmap_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores: &mut [u32]) {
     debug_assert_eq!(scores.len(), n);

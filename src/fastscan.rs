@@ -1,7 +1,7 @@
-//! FastScan b=2 scan path ([`RankQuantFastscanIndex`]).
+//! FastScan b=2 scan path ([`RankQuantFastscan`]).
 //!
 //! An *optional, non-default* alternative to
-//! [`RankQuantIndex::search_asymmetric`](super::quant::RankQuantIndex)
+//! [`RankQuant::search_asymmetric`](crate::quant::RankQuant)
 //! at `bits == 2`. It re-blocks the b=2 bucket codes into a block-32,
 //! PQ-style nibble layout and scores 32 documents per VPSHUFB lookup
 //! against a per-query 8-bit affine-quantised LUT — the classic FAISS
@@ -11,15 +11,15 @@
 //! the in-repo, reproducible comparison against the single-rate kernel.
 //!
 //! Cost: `dim / 2` bytes per document (2× the single-rate
-//! [`RankQuantIndex`](super::quant::RankQuantIndex) b=2 packing), and
+//! [`RankQuant`](crate::RankQuant) b=2 packing), and
 //! a single-shot `add()` (the block layout's tail padding does not
 //! compose with incremental extend).
 //!
 //! This module is intentionally *not* part of the headline API. The
-//! [`RankQuantFastscanIndex`] wrapper is re-exported `#[doc(hidden)]`
+//! [`RankQuantFastscan`] wrapper is re-exported `#[doc(hidden)]`
 //! and the free [`search_asymmetric_fastscan_b2`] entry point is
 //! `pub(crate)`: production callers should reach for
-//! [`RankQuantIndex::search_asymmetric`](super::quant::RankQuantIndex),
+//! [`RankQuant::search_asymmetric`](crate::RankQuant::search_asymmetric),
 //! whose AVX-512 → AVX2 → scalar dispatch is the maintained surface.
 //!
 //! # Provenance
@@ -32,15 +32,15 @@
 //! `c4fd4d6` (k==0 short-circuit), `e08506d` (independent feature-
 //! detection dispatch). Integrated against ordvec's decomposed,
 //! hardened `quant`/`util` modules: result buffers are sized through
-//! [`result_buffer_len`](super::util::result_buffer_len) (overflow-
+//! [`result_buffer_len`](crate::util::result_buffer_len) (overflow-
 //! safe `nq * k`), queries are normalised through the shared
-//! [`l2_normalise`](super::util::l2_normalise), and `k` is clamped to
+//! [`l2_normalise`](crate::util::l2_normalise), and `k` is clamped to
 //! `n_vectors` exactly as the sibling search methods do.
 
 use rayon::prelude::*;
 
-use super::util::{l2_normalise, result_buffer_len, TopK};
 use crate::rank::{bucket_ranks, rank_transform, rankquant_norm};
+use crate::util::{l2_normalise, result_buffer_len, TopK};
 use crate::SearchResults;
 
 // -------------------------------------------------------------------
@@ -79,7 +79,7 @@ use crate::SearchResults;
 /// Tail docs (`n % 32 != 0`) are zero-padded to a full block; the
 /// scan kernel only emits scores for `n` real docs.
 ///
-/// Internal — call via [`RankQuantFastscanIndex`], which owns the
+/// Internal — call via [`RankQuantFastscan`], which owns the
 /// packed bytes and enforces `(n, dim, packed.len())` consistency
 /// by construction.
 pub(crate) fn pack_fastscan_b2(buckets: &[u8], n: usize, dim: usize) -> Vec<u8> {
@@ -317,7 +317,7 @@ fn scan_b2_fastscan_scalar(
 /// FastScan b=2 search entry point. `packed_fs` was built by
 /// [`pack_fastscan_b2`].
 ///
-/// Internal — call via [`RankQuantFastscanIndex::search`], which
+/// Internal — call via [`RankQuantFastscan::search`], which
 /// owns `(dim, n_vectors, packed_fs)` and enforces consistency by
 /// construction. The `pub(crate)` visibility + asserts below are
 /// defense-in-depth for in-crate callers; the type-level wrapper
@@ -401,7 +401,7 @@ pub(crate) fn search_asymmetric_fastscan_b2(
         .zip(indices.par_chunks_mut(k))
         .for_each(|((q, out_scores), out_indices)| {
             // Shared L2 normaliser (zeros a degenerate <=1e-12 query),
-            // matching `RankQuantIndex::search_asymmetric`.
+            // matching `RankQuant::search_asymmetric`.
             let q_unit = l2_normalise(q);
 
             let (lut_u8, bias_sum, inv_q) = build_fastscan_b2_query(&q_unit, dim);
@@ -444,7 +444,7 @@ pub(crate) fn search_asymmetric_fastscan_b2(
 }
 
 // -------------------------------------------------------------------
-// RankQuantFastscanIndex: type wrapper around the FastScan b=2 path.
+// RankQuantFastscan: type wrapper around the FastScan b=2 path.
 //
 // Wraps pack_fastscan_b2 + search_asymmetric_fastscan_b2 in a type
 // that owns the packed bytes and enforces (n_vectors, dim,
@@ -457,19 +457,19 @@ pub(crate) fn search_asymmetric_fastscan_b2(
 /// FastScan b=2 RankQuant index.
 ///
 /// Same retrieval semantics as
-/// [`RankQuantIndex::search_asymmetric`](super::quant::RankQuantIndex)
+/// [`RankQuant::search_asymmetric`](crate::RankQuant::search_asymmetric)
 /// at b=2, up to 8-bit LUT quantization noise (the
 /// `fastscan_b2_top10_matches_avx512_kernel` test checks the top-10
 /// agreement against the single-rate kernel on synthetic data).
 /// Single-pass single-index kernel for callers who can't restructure
 /// their query path for the two-stage
-/// [`BitmapIndex`](super::bitmap::BitmapIndex) →
-/// [`RankQuantIndex::search_asymmetric_subset`](super::quant::RankQuantIndex)
+/// [`Bitmap`](crate::Bitmap) →
+/// [`RankQuant::search_asymmetric_subset`](crate::RankQuant::search_asymmetric_subset)
 /// pipeline.
 ///
 /// # Storage
 ///
-/// `dim / 2` bytes per document (2× the single-rate `RankQuantIndex`
+/// `dim / 2` bytes per document (2× the single-rate `RankQuant`
 /// at b=2). The block-32 layout doubles the byte rate in exchange for
 /// lower per-query scan latency than the single-rate kernel; the
 /// `RankQuant b=2 fastscan` row of `examples/bench_rank` reports the
@@ -493,16 +493,16 @@ pub(crate) fn search_asymmetric_fastscan_b2(
 ///
 /// This type is re-exported `#[doc(hidden)]`: it is an optional scan
 /// path, not part of the headline API. Prefer
-/// [`RankQuantIndex`](super::quant::RankQuantIndex) unless you have
+/// [`RankQuant`](crate::RankQuant) unless you have
 /// measured FastScan to win on your workload.
-pub struct RankQuantFastscanIndex {
+pub struct RankQuantFastscan {
     dim: usize,
     n_vectors: usize,
     /// Block-32 FastScan layout. Length = `n_blocks * (dim/2) * 32`.
     packed_fs: Vec<u8>,
 }
 
-impl RankQuantFastscanIndex {
+impl RankQuantFastscan {
     /// Construct an empty FastScan b=2 index.
     ///
     /// # Panics
@@ -537,7 +537,7 @@ impl RankQuantFastscanIndex {
             self.n_vectors == 0,
             "FastScan v1: incremental add() not supported (block-32 \
              layout has tail-padding semantics that don't compose); \
-             construct a new RankQuantFastscanIndex instead"
+             construct a new RankQuantFastscan instead"
         );
 
         let mut buckets = Vec::with_capacity(n * self.dim);
@@ -553,7 +553,7 @@ impl RankQuantFastscanIndex {
     /// Run top-`k` asymmetric search.
     ///
     /// Same scoring contract as
-    /// [`RankQuantIndex::search_asymmetric`](super::quant::RankQuantIndex)
+    /// [`RankQuant::search_asymmetric`](crate::RankQuant::search_asymmetric)
     /// at b=2, within 8-bit LUT quantization noise.
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
         // (dim, n_vectors, packed_fs.len()) consistent by construction.
@@ -569,7 +569,7 @@ impl RankQuantFastscanIndex {
     pub fn dim(&self) -> usize {
         self.dim
     }
-    /// `dim / 2` bytes per document (2× the single-rate `RankQuantIndex`
+    /// `dim / 2` bytes per document (2× the single-rate `RankQuant`
     /// b=2 packing).
     pub fn bytes_per_vec(&self) -> usize {
         self.dim / 2

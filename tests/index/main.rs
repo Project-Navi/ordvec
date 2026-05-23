@@ -11,7 +11,7 @@
 //! 3. Loader robustness — malformed serialisation files surface as
 //!    `Err`, never panic.
 //!
-//! The file split mirrors `ordvec::rank_index` (`index.rs`,
+//! The file split mirrors `ordvec::index` (`rank.rs`,
 //! `quant.rs`, `bitmap.rs`, `multi_bucket.rs`). Shared corpus +
 //! reference helpers live here; loader fuzz lives here because it
 //! crosses all four loader types (rank, rankquant, bitmap, sign
@@ -20,14 +20,14 @@
 use std::io::Write;
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankquant_norm};
-use ordvec::{BitmapIndex, RankIndex, RankQuantIndex, SignBitmapIndex};
+use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 mod bitmap;
 mod fastscan;
-mod index;
-// `MultiBucketBitmapIndex` is gated behind the `experimental` feature.
+mod rank;
+// `MultiBucketBitmap` is gated behind the `experimental` feature.
 #[cfg(feature = "experimental")]
 mod multi_bucket;
 mod quant;
@@ -239,30 +239,24 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
         // Use catch_unwind to enforce the no-panic contract: if any
         // loader panics on a malformed input, the test fails.
         let p1 = p.clone();
-        let r1 = std::panic::catch_unwind(|| RankIndex::load(&p1));
-        assert!(r1.is_ok(), "RankIndex::load panicked on {label}");
-        assert!(r1.unwrap().is_err(), "RankIndex::load accepted {label}");
+        let r1 = std::panic::catch_unwind(|| Rank::load(&p1));
+        assert!(r1.is_ok(), "Rank::load panicked on {label}");
+        assert!(r1.unwrap().is_err(), "Rank::load accepted {label}");
 
         let p2 = p.clone();
-        let r2 = std::panic::catch_unwind(|| RankQuantIndex::load(&p2));
-        assert!(r2.is_ok(), "RankQuantIndex::load panicked on {label}");
-        assert!(
-            r2.unwrap().is_err(),
-            "RankQuantIndex::load accepted {label}"
-        );
+        let r2 = std::panic::catch_unwind(|| RankQuant::load(&p2));
+        assert!(r2.is_ok(), "RankQuant::load panicked on {label}");
+        assert!(r2.unwrap().is_err(), "RankQuant::load accepted {label}");
 
         let p3 = p.clone();
-        let r3 = std::panic::catch_unwind(|| BitmapIndex::load(&p3));
-        assert!(r3.is_ok(), "BitmapIndex::load panicked on {label}");
-        assert!(r3.unwrap().is_err(), "BitmapIndex::load accepted {label}");
+        let r3 = std::panic::catch_unwind(|| Bitmap::load(&p3));
+        assert!(r3.is_ok(), "Bitmap::load panicked on {label}");
+        assert!(r3.unwrap().is_err(), "Bitmap::load accepted {label}");
 
         let p4 = p.clone();
-        let r4 = std::panic::catch_unwind(|| SignBitmapIndex::load(&p4));
-        assert!(r4.is_ok(), "SignBitmapIndex::load panicked on {label}");
-        assert!(
-            r4.unwrap().is_err(),
-            "SignBitmapIndex::load accepted {label}"
-        );
+        let r4 = std::panic::catch_unwind(|| SignBitmap::load(&p4));
+        assert!(r4.is_ok(), "SignBitmap::load panicked on {label}");
+        assert!(r4.unwrap().is_err(), "SignBitmap::load accepted {label}");
 
         paths.push(p);
     }

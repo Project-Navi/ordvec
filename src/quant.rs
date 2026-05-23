@@ -1,29 +1,29 @@
-//! `B`-bit bucketed-rank index ([`RankQuantIndex`]).
+//! `B`-bit bucketed-rank index ([`RankQuant`]).
 //!
 //! Storage is `dim * bits / 8` bytes per document at `bits ∈ {1, 2, 4}`.
 //! Symmetric search uses a per-query, per-coord LUT; asymmetric search
 //! dispatches AVX-512 → AVX2 → scalar via the kernels in
-//! [`super::quant_kernels`].
+//! [`crate::quant_kernels`].
 //!
 //! The byte-LUT path ([`search_asymmetric_byte_lut`]) is exposed
-//! publicly via `crate::rank_index::search_asymmetric_byte_lut` so
+//! publicly via `ordvec::search_asymmetric_byte_lut` so
 //! `examples/bench_rank.rs` can compare it against the production
 //! AVX path on the same data.
 
 use rayon::prelude::*;
 
-use super::quant_kernels::{
+use crate::quant_kernels::{
     scan_b1_to_topk, scan_b2_to_topk, scan_b4_to_topk, scan_via_lut_scalar,
 };
 #[cfg(target_arch = "x86_64")]
-use super::quant_kernels::{
+use crate::quant_kernels::{
     scan_b2_asym_avx2, scan_b2_asym_avx512, scan_b4_asym_avx2, scan_b4_asym_avx512,
 };
-use super::util::{l2_normalise, result_buffer_len, TopK};
 use crate::rank::{
     bucket_centre, bucket_ranks, pack_buckets, rank_to_bucket, rank_transform,
     rankquant_bytes_per_vec, rankquant_norm,
 };
+use crate::util::{l2_normalise, result_buffer_len, TopK};
 use crate::SearchResults;
 
 /// `B`-bit RankQuant index.
@@ -37,12 +37,12 @@ use crate::SearchResults;
 /// The mean-centred bucket vector has fixed analytical L2 norm
 /// `sqrt(dim * (2^(2B) - 1) / 12)` when `dim % (1 << bits) == 0`, so
 /// no per-document norms are stored.
-pub struct RankQuantIndex {
-    pub(super) dim: usize,
-    pub(super) bits: u8,
-    pub(super) n_vectors: usize,
+pub struct RankQuant {
+    pub(crate) dim: usize,
+    pub(crate) bits: u8,
+    pub(crate) n_vectors: usize,
     /// Row-major packed bucket bytes. `n_vectors * dim * bits / 8` total.
-    pub(super) packed: Vec<u8>,
+    pub(crate) packed: Vec<u8>,
 }
 
 /// SIMD dispatch tier for the asymmetric scan kernels.
@@ -70,7 +70,7 @@ enum SimdTier {
 ///   codes per 4-byte chunk (`dim % 16 == 0`); b=4 emits 8 codes per
 ///   4-byte chunk (`dim % 8 == 0`).
 ///
-/// The [`RankQuantIndex::new`] constructor only guarantees
+/// The [`RankQuant::new`] constructor only guarantees
 /// `dim % (1 << bits) == 0` and `dim % (8 / bits) == 0`, which is
 /// *weaker* than the SIMD invariants (e.g. dim 48 / 80 / 20 are valid
 /// constructor dims that violate them). A kernel whose invariant is
@@ -110,7 +110,7 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
     }
 }
 
-impl RankQuantIndex {
+impl RankQuant {
     pub fn new(dim: usize, bits: u8) -> Self {
         assert!(matches!(bits, 1 | 2 | 4), "bits must be 1, 2, or 4");
         assert!(dim >= 2, "dim must be >= 2");
@@ -419,7 +419,7 @@ impl RankQuantIndex {
 
     /// Load from a `.tvrq` file produced by [`Self::write`].
     ///
-    /// Re-runs the same constructor invariants `RankQuantIndex::new`
+    /// Re-runs the same constructor invariants `RankQuant::new`
     /// enforces (`bits ∈ {1, 2, 4}`, `dim % (1 << bits) == 0`,
     /// `dim % (8 / bits) == 0`). Returns `io::Error::InvalidData` on
     /// any violation — never panics on malformed input.
@@ -594,7 +594,7 @@ impl RankQuantIndex {
 //   B=4: 512 groups × 256 entries × 4 B = 512 KiB per query (spills L2 a little)
 //
 // Exposed publicly for benchmarking. Production callers should reach
-// for [`RankQuantIndex::search_asymmetric`] which dispatches to the
+// for [`RankQuant::search_asymmetric`] which dispatches to the
 // fastest implementation for the current CPU.
 // -------------------------------------------------------------------
 
@@ -683,7 +683,7 @@ fn scan_b4_asym_byte_lut(
 }
 
 /// Bench-only entrypoint for the byte-LUT path. Not used by
-/// [`RankQuantIndex::search_asymmetric`] in production (which prefers
+/// [`RankQuant::search_asymmetric`] in production (which prefers
 /// the AVX2 inline-expand kernel where available). Exposed so the
 /// example bench can compare the two empirically on the same data.
 ///
@@ -691,17 +691,13 @@ fn scan_b4_asym_byte_lut(
 /// contributions for the 4-codes-per-byte (b=2) and 2-codes-per-byte
 /// (b=4) packings only. It does **not** support b=1 and will panic on
 /// a b=1 index. This is acceptable because it is a benchmarking helper:
-/// production callers reach for [`RankQuantIndex::search_asymmetric`],
+/// production callers reach for [`RankQuant::search_asymmetric`],
 /// whose dispatch routes b=1 to the scalar LUT path (the SIMD/byte-LUT
 /// kernels are only selected for b ∈ {2, 4}). Pass a b ∈ {2, 4} index.
 ///
 /// Returns the raw `Vec<i64>` of doc indices per query, length
 /// `queries.len() / dim * k`.
-pub fn search_asymmetric_byte_lut(
-    index: &RankQuantIndex,
-    queries: &[f32],
-    k: usize,
-) -> SearchResults {
+pub fn search_asymmetric_byte_lut(index: &RankQuant, queries: &[f32], k: usize) -> SearchResults {
     let dim = index.dim;
     let bits = index.bits;
     let n = index.n_vectors;
