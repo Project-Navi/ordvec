@@ -67,7 +67,17 @@ pub(crate) fn assert_all_finite(v: &[f32]) {
 /// bitmap top-bucket overlap.
 #[inline]
 pub(crate) fn and_popcount(doc: &[u64], q: &[u64]) -> u32 {
-    debug_assert_eq!(doc.len(), q.len());
+    // Hard assert (not debug_assert): these are pub(crate) "safe" fns whose
+    // SIMD paths read `q` at offsets up to `doc.len()`, so a length mismatch
+    // would be a release-mode OOB read (the scalar path would silently
+    // truncate instead — the paths must not diverge). All callers pass equal
+    // `qpv` rows; this turns any future misuse into a clean panic, matching the
+    // crate's hard-assert-before-SIMD pattern (see `body_overlap_scores_subset`).
+    assert_eq!(
+        doc.len(),
+        q.len(),
+        "popcount: doc and query bitmap rows must be equal length"
+    );
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: NEON is part of the aarch64 baseline ABI, so these
@@ -91,7 +101,17 @@ pub(crate) fn and_popcount(doc: &[u64], q: &[u64]) -> u32 {
 /// sign-bitmap Hamming distance.
 #[inline]
 pub(crate) fn xor_popcount(doc: &[u64], q: &[u64]) -> u32 {
-    debug_assert_eq!(doc.len(), q.len());
+    // Hard assert (not debug_assert): these are pub(crate) "safe" fns whose
+    // SIMD paths read `q` at offsets up to `doc.len()`, so a length mismatch
+    // would be a release-mode OOB read (the scalar path would silently
+    // truncate instead — the paths must not diverge). All callers pass equal
+    // `qpv` rows; this turns any future misuse into a clean panic, matching the
+    // crate's hard-assert-before-SIMD pattern (see `body_overlap_scores_subset`).
+    assert_eq!(
+        doc.len(),
+        q.len(),
+        "popcount: doc and query bitmap rows must be equal length"
+    );
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: as above — NEON is baseline on aarch64.
