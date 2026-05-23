@@ -319,7 +319,7 @@ facts qualify this:
   `tests/index/quant.rs`).
 
 The byte-LUT scorer remains in the codebase as a labelled reference
-path (`ordvec::index::search_asymmetric_byte_lut`,
+path (`ordvec::search_asymmetric_byte_lut`,
 benched as the `RankQuant b=… asym byte-LUT` rows) but is not the
 production scoring route — streaming SIMD math beats query-LUT cache
 traffic on the hardware tested.
@@ -428,8 +428,8 @@ bilinear bucket-overlap decomposition and is reachable only behind the
 partitioning, bucket-centre symmetry, pack/unpack round-trips, and
 analytical norms.
 
-`cargo test --test rank_index` — the integration suite in
-[`tests/index/`](../tests/index/) (`index.rs`, `quant.rs`,
+`cargo test --test index` — the integration suite in
+[`tests/index/`](../tests/index/) (`rank.rs`, `quant.rs`,
 `bitmap.rs`, `fastscan.rs`, and `multi_bucket.rs` under the
 `experimental` feature). Representative cases:
 

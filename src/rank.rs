@@ -386,9 +386,8 @@ impl Rank {
         let last = self.n_vectors - 1;
         let dim = self.dim;
         if idx != last {
-            for d in 0..dim {
-                self.ranks[idx * dim + d] = self.ranks[last * dim + d];
-            }
+            self.ranks
+                .copy_within(last * dim..last * dim + dim, idx * dim);
         }
         self.ranks.truncate(last * dim);
         self.n_vectors -= 1;

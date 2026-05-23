@@ -12,8 +12,8 @@ _No unreleased changes yet._
 ## [0.2.0] - 2026-05-22
 
 OrdVec ontology rebrand: index types drop the `Index` suffix; the `rank_index`
-module is renamed to `index`. Deprecated `*Index` aliases are retained for
-back-compat.
+module is flattened into the crate root. Deprecated `*Index` aliases are
+retained for back-compat.
 
 ### Changed
 
@@ -22,8 +22,9 @@ back-compat.
   `BitmapIndex` → `Bitmap`, `SignBitmapIndex` → `SignBitmap`,
   `MultiBucketBitmapIndex` → `MultiBucketBitmap`,
   `RankQuantFastscanIndex` → `RankQuantFastscan`.
-- **Module rename** — `ordvec::rank_index` → `ordvec::index`; the test
-  tree mirrors this (`tests/rank_index/` → `tests/index/`).
+- **Module flatten** — the `ordvec::rank_index` submodule was flattened into
+  the crate root (the types stay re-exported at `ordvec::*`); the test tree
+  mirrors this (`tests/rank_index/` → `tests/index/`).
 - **Crate version** bumped to `0.2.0`.
 
 ### Deprecated

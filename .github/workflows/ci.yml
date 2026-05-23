@@ -125,7 +125,7 @@ jobs:
           fi
           echo "OK: no forbidden dependencies"
       - name: cargo publish --dry-run
-        run: cargo publish --dry-run
+        run: cargo publish --dry-run --locked
 
   # ----------------------------------------------------------------------
   # AVX-512 coverage via Intel SDE. GitHub-hosted runners lack AVX-512, so we
