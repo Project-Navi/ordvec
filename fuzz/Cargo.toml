@@ -1,0 +1,50 @@
+[package]
+name = "ordvec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Fuzz-only dependencies. These are deliberately isolated from the main
+# crate's manifest: the `ordvec` library has zero system/dev dependencies
+# beyond rand for test corpora, and nothing here leaks back into it.
+[dependencies]
+libfuzzer-sys = "0.4"
+# `tempfile` gives each fuzz iteration a unique, auto-cleaned path so the
+# loaders (which take a `&Path`) can be driven on arbitrary bytes without
+# leaking files into $TMPDIR across millions of runs.
+tempfile = "3"
+
+[dependencies.ordvec]
+path = ".."
+
+# Prevent this benchmark/test profile from interfering with libFuzzer.
+[[bin]]
+name = "load_rank"
+path = "fuzz_targets/load_rank.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_rankquant"
+path = "fuzz_targets/load_rankquant.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_bitmap"
+path = "fuzz_targets/load_bitmap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_sign_bitmap"
+path = "fuzz_targets/load_sign_bitmap.rs"
+test = false
+doc = false
+bench = false

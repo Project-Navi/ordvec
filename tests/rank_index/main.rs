@@ -14,12 +14,13 @@
 //! The file split mirrors `ordvec::rank_index` (`index.rs`,
 //! `quant.rs`, `bitmap.rs`, `multi_bucket.rs`). Shared corpus +
 //! reference helpers live here; loader fuzz lives here because it
-//! crosses all three types in a single hermetic test.
+//! crosses all four loader types (rank, rankquant, bitmap, sign
+//! bitmap) in a single hermetic test.
 
 use std::io::Write;
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankquant_norm};
-use ordvec::{BitmapIndex, RankIndex, RankQuantIndex};
+use ordvec::{BitmapIndex, RankIndex, RankQuantIndex, SignBitmapIndex};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -110,7 +111,7 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
         ("empty", vec![]),
         ("garbage_16", vec![0xAB; 16]),
         ("garbage_4k", vec![0xCC; 4096]),
-        // Wrong magic for every type.
+        // Wrong magic for every loader (TVR1 / TVRQ / TVBM / TVSB).
         (
             "wrong_magic",
             b"XXXX\x01".iter().chain([0u8; 8].iter()).copied().collect(),
@@ -191,11 +192,42 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
             let mut v = Vec::new();
             v.extend_from_slice(b"TVR1");
             v.push(1);
+            // Header claims 100 * 64 * 2 = 12800 payload bytes but only 100
+            // are provided, so the loader hits UnexpectedEof, not a panic.
             v.extend_from_slice(&64u32.to_le_bytes()); // dim
             v.extend_from_slice(&100u32.to_le_bytes()); // n_vectors
-                                                        // Header says 100 * 64 * 2 = 12800 payload bytes; provide
-                                                        // only 100.
             v.extend(std::iter::repeat_n(0u8, 100));
+            v
+        }),
+        // TVSB with dim that isn't a multiple of 64 (sign bitmaps pack
+        // 64 coordinates per u64 qword, so the loader rejects it).
+        ("tvsb_dim_not_64", {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"TVSB");
+            v.push(1);
+            v.extend_from_slice(&100u32.to_le_bytes()); // dim, not /64
+            v.extend_from_slice(&5u32.to_le_bytes()); // n_vectors
+            v
+        }),
+        // TVSB with overflowing payload size.
+        ("tvsb_oversize", {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"TVSB");
+            v.push(1);
+            v.extend_from_slice(&u32::MAX.to_le_bytes()); // dim
+            v.extend_from_slice(&u32::MAX.to_le_bytes()); // n_vectors
+            v
+        }),
+        // TVSB with truncated payload: header declares 8 docs * 128/64 =
+        // 16 qwords = 128 payload bytes but the file ends right after the
+        // header, so read_exact yields UnexpectedEof rather than a panic.
+        ("tvsb_truncated", {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"TVSB");
+            v.push(1);
+            v.extend_from_slice(&128u32.to_le_bytes()); // dim (valid)
+            v.extend_from_slice(&8u32.to_le_bytes()); // n_vectors
+                                                      // No payload bytes provided.
             v
         }),
     ];
@@ -223,6 +255,14 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
         let r3 = std::panic::catch_unwind(|| BitmapIndex::load(&p3));
         assert!(r3.is_ok(), "BitmapIndex::load panicked on {label}");
         assert!(r3.unwrap().is_err(), "BitmapIndex::load accepted {label}");
+
+        let p4 = p.clone();
+        let r4 = std::panic::catch_unwind(|| SignBitmapIndex::load(&p4));
+        assert!(r4.is_ok(), "SignBitmapIndex::load panicked on {label}");
+        assert!(
+            r4.unwrap().is_err(),
+            "SignBitmapIndex::load accepted {label}"
+        );
 
         paths.push(p);
     }
