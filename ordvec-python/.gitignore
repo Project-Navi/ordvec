@@ -1,0 +1,15 @@
+# Rust build output (in case anyone builds from this dir)
+/target
+
+# Built native extension (maturin develop drops it into the package dir)
+*.so
+*.pyd
+*.dll
+
+# Python build / cache artifacts
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.whl

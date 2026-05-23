@@ -44,11 +44,26 @@ use ordvec::{Rank, RankQuant, Bitmap, SignBitmap};
 `util.rs`, `rank_io.rs` (persistence), `lib.rs`. Tests: `tests/index/`, `tests/redteam_*.rs`,
 `tests/deprecated_aliases.rs`. `fuzz/` = cargo-fuzz loader targets.
 
+**Workspace (since the Python bindings):** the root manifest is a `[workspace]`
+(`resolver = "2"`, `members = ["ordvec-python"]`, `default-members = ["."]`, `exclude = ["fuzz"]`).
+`ordvec-python/` is the PyO3/maturin binding member (`publish = false`; ships to **PyPI** as
+`ordvec`, not crates.io): `src/lib.rs` (the `_ordvec` module wrapping Rank/RankQuant/Bitmap/SignBitmap
+via the `ordvec_core` alias, with `ensure_finite` + contiguity guards turning core panics into
+clean `ValueError`s), `python/ordvec/__init__.py` (re-exports the 4 + undocumented `*Index`
+back-compat aliases), `pyproject.toml`, `tests/` (pytest). `default-members = ["."]` keeps the
+bare core gates scoped to the crate; the binding is gated by `.github/workflows/python.yml`.
+
 ## Hard rules — DO NOT break
 - **PUBLISH HELD**: never `cargo publish` for real without Nelson's explicit go. CI only does
-  `cargo publish --dry-run --locked`.
-- **No system deps**: no blas/openblas/faer/ndarray/statrs. The `deps` CI job greps the dep
-  tree and fails on them.
+  `cargo publish -p ordvec --dry-run --locked`.
+- **PyPI PUBLISH HELD**: `ordvec-python` ships to PyPI as `ordvec` via **maturin**, separately
+  from the crate, and is `publish = false` (off crates.io). Never publish the wheel without
+  Nelson's explicit go — it's coordinated with the crate publish + the paper's Zenodo release
+  (the paper consumes the bindings for a final cold-repro run).
+- **No system deps (core crate)**: no blas/openblas/faer/ndarray/statrs in `ordvec`. The `deps`
+  CI job greps `cargo tree -p ordvec` (scoped to the core crate) and fails on them. NB: the
+  `ordvec-python` binding legitimately pulls rust-numpy→`ndarray`; that's fine for the PyPI
+  artifact and is exactly why the grep is `-p ordvec`-scoped, not workspace-wide.
 - **File magics** `.tvr` / `.tvrq` / `.tvbm` / `.tvsb` — never rename (persistence formats).
 - **Method names** (`new`/`add`/`search`/`search_asymmetric*`/`top_m_candidates*`/`write`/`load`)
   — stable; don't churn.
@@ -64,7 +79,7 @@ use ordvec::{Rank, RankQuant, Bitmap, SignBitmap};
 ```
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test                          # 80   +  --features experimental  # 87
+cargo test                          # 88   +  --features experimental  # 95
 cargo test --no-default-features
 cargo +1.89.0 build                 # MSRV
 cargo build --locked
@@ -77,11 +92,18 @@ x86-only items are `cfg(target_arch="x86_64")`-gated; the glue (`SimdTier`,
 clean on aarch64 (CI's `macos-latest` is ARM). CI's `avx512` job runs the suite under Intel
 SDE (Sapphire Rapids) so the AVX-512 kernels are actually exercised on hosted runners.
 
+**Binding gate** (if `ordvec-python/` changed): `cargo fmt -p ordvec-python --check` +
+`cargo clippy -p ordvec-python --all-targets -- -D warnings`, then build & test the wheel —
+`maturin develop` + `pytest ordvec-python/tests` in a venv. Mirrors `.github/workflows/python.yml`.
+
 ## Roadmap (next, in order)
 1. ~~Merge #7 (rebrand)~~ — **done** (main is v0.2.0).
 2. **Publish prep** → crates.io (`ordvec` is available). **Groundwork in progress**; the
    `cargo publish` itself stays **GATED on Nelson's explicit go**.
-3. **Python bindings** — `ordvec-python` (abi3), last. (Discipline: extract → rebrand → publish → python.)
+3. **Python bindings** — `ordvec-python` (abi3) **IN PROGRESS** (branch `feat/ordvec-python-bindings`):
+   workspace member added, the 4 classes ported to the ontology, pytest green (108 passed + 1 xfail).
+   Remaining: open the PR (bot/Codex loop). **PyPI publish stays GATED** — coordinated with the crate
+   publish + the paper's Zenodo release. (Discipline: extract → rebrand → publish → python.)
 
 ## Working conventions
 - Commits `<type>: <desc>`; branches `<type>/<slug>`; PRs against `Fieldnote-Echo/ordvec`

@@ -47,3 +47,17 @@ experimental = []
 lto = true
 codegen-units = 1
 opt-level = 3
+
+# Workspace: the `ordvec-python` member holds the PyO3/maturin bindings shipped to
+# PyPI as `ordvec`. It is `publish = false` and ships separately (never via
+# crates.io). `default-members = ["."]` keeps bare `cargo build/test/clippy` scoped
+# to the core crate, so the existing CI gates are unaffected; the bindings get their
+# own CI job. The single workspace `Cargo.lock` gains pyo3/numpy + transitives.
+[workspace]
+resolver = "2"
+members = ["ordvec-python"]
+default-members = ["."]
+# fuzz/ is a cargo-fuzz crate built only via `cargo +nightly fuzz`. Keep it out of
+# the workspace so it stays a standalone crate (its own Cargo.lock) and `cargo fuzz`
+# run from fuzz/ doesn't error on "wrong workspace".
+exclude = ["fuzz"]

@@ -112,9 +112,12 @@ jobs:
       - name: assert no BLAS/faer/ndarray/statrs in the tree
         run: |
           set -euo pipefail
-          # Inspect the whole graph, including the experimental feature and
-          # dev-dependencies, so nothing slips in behind a flag.
-          tree="$(cargo tree --all-features --edges normal,build,dev)"
+          # Inspect the CORE crate's graph (scoped with -p ordvec), including the
+          # experimental feature and dev-dependencies, so nothing slips in behind a
+          # flag. Scoping matters since the workspace gained the ordvec-python member:
+          # rust-numpy legitimately pulls in `ndarray` for the PyPI binding, which must
+          # NOT count against the core crate's zero-system-deps guarantee.
+          tree="$(cargo tree -p ordvec --all-features --edges normal,build,dev)"
           echo "$tree"
           # Boundaries exclude only alphanumerics, so hyphen/underscore variants
           # (blas-src, openblas-src, ndarray-linalg, faer-core, blas_sys) are
@@ -125,7 +128,10 @@ jobs:
           fi
           echo "OK: no forbidden dependencies"
       - name: cargo publish --dry-run
-        run: cargo publish --dry-run --locked
+        # Explicit -p ordvec: in a workspace, publish should never infer the package
+        # from the current directory. Only the core crate goes to crates.io
+        # (ordvec-python is publish = false and ships to PyPI via maturin).
+        run: cargo publish -p ordvec --dry-run --locked
 
   # ----------------------------------------------------------------------
   # AVX-512 coverage via Intel SDE. GitHub-hosted runners lack AVX-512, so we

@@ -1,0 +1,22 @@
+[package]
+name = "ordvec-python"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.89" # inherits ordvec's AVX-512 MSRV floor
+description = "Python bindings for ordvec — training-free ordinal & sign vector quantization"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Fieldnote-Echo/ordvec"
+# Ships to PyPI as `ordvec` via maturin — never to crates.io.
+publish = false
+
+[lib]
+# The native module is `_ordvec`; the `ordvec` Python package wraps it.
+name = "_ordvec"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Alias the core crate as `ordvec_core` so binding code is unambiguous and never
+# mixes `ordvec::` with the Python-facing `ordvec` package name.
+ordvec_core = { package = "ordvec", path = ".." }
+pyo3 = { version = "0.27.0", features = ["extension-module", "abi3-py39"] }
+numpy = "0.27.0"

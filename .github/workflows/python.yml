@@ -1,0 +1,72 @@
+name: python
+
+# Bindings CI: lint + build the ordvec-python extension with maturin and run the
+# pytest suite across OS and Python versions. Kept separate from ci.yml (the
+# core-crate gates) so the binding's pyo3/numpy/ndarray toolchain never entangles
+# the core checks, and so a green run proves the bindings build cold from a
+# checkout (the paper's reproducibility requirement).
+on:
+  push:
+    paths:
+      - "ordvec-python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python.yml"
+  pull_request:
+    paths:
+      - "ordvec-python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python.yml"
+
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: clippy + fmt (binding)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # The core ci.yml clippy is scoped to the core crate via default-members,
+      # so the binding gets its quality gate here instead.
+      - run: cargo fmt -p ordvec-python --check
+      - run: cargo clippy -p ordvec-python --all-targets -- -D warnings
+
+  test:
+    name: py${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # abi3-py39 means one wheel covers 3.9+; test the min and max we claim,
+        # on x86_64 (ubuntu) and aarch64 (macos, scalar SIMD fallback).
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install build + test deps
+        run: python -m pip install --upgrade pip maturin numpy pytest
+      - name: build the wheel (abi3, release)
+        working-directory: ordvec-python
+        run: maturin build --release --out dist
+      - name: install the built wheel
+        shell: bash
+        run: python -m pip install ordvec-python/dist/*.whl
+      - name: pytest
+        run: python -m pytest ordvec-python/tests -q
