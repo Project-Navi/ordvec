@@ -1,13 +1,13 @@
-//! Shared internals for the `rank_index` family.
+//! Shared internals for the ordvec index family.
 //!
 //! - [`TopK`] is the running top-`k` collector used by every search
 //!   path (full ranks, bucketed ranks, bitmap overlap).
 //! - [`l2_normalise`] returns the unit-norm copy of a query vector for
 //!   the asymmetric scoring path.
 //!
-//! Both items are `pub(crate)` so they are reachable from sibling
-//! modules (`index`, `quant`, `bitmap`, `multi_bucket`, `quant_kernels`)
-//! but not from outside `crate::rank_index`.
+//! Both items are `pub(crate)` so they are reachable from the sibling
+//! index modules (`rank`, `quant`, `bitmap`, `multi_bucket`, `fastscan`)
+//! but not from outside the crate.
 
 /// Result-buffer length `nq * k`, panicking loudly on usize overflow
 /// instead of silently wrapping to a too-small allocation.

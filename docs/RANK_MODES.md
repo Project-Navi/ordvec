@@ -340,8 +340,8 @@ latency, in priority order:
    largest restructuring.
 
 None of these are research questions; the AVX-512 kernel in
-`src/index/quant_kernels.rs` (and the block-32 layout in
-`src/index/fastscan.rs`) is a direct template.
+`src/quant_kernels.rs` (and the block-32 layout in
+`src/fastscan.rs`) is a direct template.
 
 The symmetric path is still scalar (lower-priority — asymmetric is
 the recommended mode and wins every recall comparison here).
@@ -416,7 +416,7 @@ precomputed candidate set — the rerank half of the two-stage pattern.
 `RankQuantFastscan` (re-exported `#[doc(hidden)]`) is an optional
 single-pass b=2 fast path; it supports `add`/`search` but not
 `swap_remove`/`write`/`load` (see its module docs in
-`src/index/fastscan.rs`). `MultiBucketBitmap` underwrites the
+`src/fastscan.rs`). `MultiBucketBitmap` underwrites the
 bilinear bucket-overlap decomposition and is reachable only behind the
 `experimental` feature.
 
