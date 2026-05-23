@@ -1,0 +1,89 @@
+# Publishes the `ordvec` Python bindings (distributed as the `ordvec` wheel) to
+# PyPI via Trusted Publishing (OIDC). abi3-py39 => one wheel per platform covers
+# CPython 3.9+, so the matrix varies by platform/arch only.
+#
+# maturin runs with working-directory: ordvec-python (matching python.yml) so the
+# binding's own pyproject.toml/Cargo.toml are the unambiguous build context.
+#
+# PUBLISH-HELD by design:
+#   * workflow_dispatch only.
+#   * the publish job is bound to the `pypi` GitHub Environment; add a Required
+#     reviewer there for a human approval gate (enforced once the repo is public,
+#     or now on a paid plan).
+#
+# Trusted publisher (already configured on PyPI):
+#   project=ordvec  owner=Fieldnote-Echo  repo=ordvec  workflow=release-python.yml  env=pypi
+name: release-python
+
+on:
+  workflow_dispatch:
+
+# Serialize releases; never cancel an in-flight publish.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    name: wheel ${{ matrix.platform.target }} (${{ matrix.platform.runner }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  target: x86_64,  manylinux: auto }
+          - { runner: ubuntu-latest,  target: aarch64, manylinux: auto }
+          - { runner: macos-13,       target: x86_64,  manylinux: auto }
+          - { runner: macos-latest,   target: aarch64, manylinux: auto }
+          - { runner: windows-latest, target: x64,     manylinux: auto }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build abi3 wheel (covers CPython 3.9+)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: ordvec-python
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist
+          sccache: 'true'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: ordvec-python/dist
+
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build the sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: ordvec-python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdist
+          path: ordvec-python/dist
+
+  publish:
+    name: publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ordvec
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI (Trusted Publishing; PEP 740 attestations on by default)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

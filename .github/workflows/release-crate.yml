@@ -1,0 +1,59 @@
+# Publishes the `ordvec` core crate to crates.io via Trusted Publishing (OIDC).
+#
+# PUBLISH-HELD by design:
+#   * workflow_dispatch only — nothing ships unless a maintainer runs it.
+#   * the publish job is bound to the `crates-io` GitHub Environment; add a
+#     Required reviewer there for a human approval gate (enforced once the repo
+#     is public, or now on a paid plan).
+#   * build + test + `cargo publish --dry-run` run first; publish only on success.
+#
+# Rust toolchain via dtolnay/rust-toolchain@stable (branch-pinned, matching
+# ci.yml; the crate's MSRV 1.89 stays gated by ci.yml's `msrv` job).
+#
+# One-time setup before the first OIDC publish:
+#   * crates.io: ordvec > Settings > Trusted Publishing > Add a GitHub publisher
+#       owner=Fieldnote-Echo  repo=ordvec  workflow=release-crate.yml  env=crates-io
+#   * GitHub: Settings > Environments > create `crates-io`.
+name: release-crate
+
+on:
+  workflow_dispatch:
+
+# Serialize releases; never cancel an in-flight publish.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build + test + publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test the core crate
+        run: cargo test -p ordvec --locked
+      - name: Dry-run the publish (packaging + metadata + verify build)
+        run: cargo publish -p ordvec --locked --dry-run
+
+  publish:
+    name: publish to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Mint a short-lived crates.io credential (OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+      - name: cargo publish
+        run: cargo publish -p ordvec --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
