@@ -266,11 +266,7 @@ fn sign_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores: &
     #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
-        let mut acc: u32 = 0;
-        for w in 0..qpv {
-            acc += (doc[w] ^ q[w]).count_ones();
-        }
-        scores[di] = acc;
+        scores[di] = crate::util::xor_popcount(doc, q);
     }
 }
 
@@ -336,16 +332,12 @@ fn sign_scan_collect_batched(
             return;
         }
     }
-    // Scalar fallback.
+    // Portable fallback (NEON on aarch64, scalar elsewhere).
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
         for bi in 0..batch {
             let q = &q_batch[bi * qpv..(bi + 1) * qpv];
-            let mut acc: u32 = 0;
-            for w in 0..qpv {
-                acc += (doc[w] ^ q[w]).count_ones();
-            }
-            scores[bi * n + di] = acc;
+            scores[bi * n + di] = crate::util::xor_popcount(doc, q);
         }
     }
 }

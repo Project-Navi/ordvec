@@ -161,9 +161,12 @@ fn check_n_vectors(n_vectors: usize) -> io::Result<()> {
 
 fn check_payload_bytes(payload_bytes: usize) -> io::Result<()> {
     // 128 GiB hard cap — refuses absurd allocations from a corrupt
-    // header even if dim and n_vectors individually pass.
-    const MAX_PAYLOAD: usize = 128 * 1024 * 1024 * 1024;
-    if payload_bytes > MAX_PAYLOAD {
+    // header even if dim and n_vectors individually pass. Typed `u64`
+    // (not `usize`) so the literal doesn't overflow const-eval on 32-bit
+    // targets (wasm32, armv7), where `usize::MAX` (~4 GiB) is already the
+    // ceiling and the widened comparison simply never trips.
+    const MAX_PAYLOAD: u64 = 128 * 1024 * 1024 * 1024;
+    if payload_bytes as u64 > MAX_PAYLOAD {
         return Err(invalid(format!(
             "payload {payload_bytes} B exceeds MAX_PAYLOAD={MAX_PAYLOAD}"
         )));

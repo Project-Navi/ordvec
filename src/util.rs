@@ -51,6 +51,214 @@ pub(crate) fn assert_all_finite(v: &[f32]) {
     );
 }
 
+// ---------------------------------------------------------------------
+// Portable per-row popcount reductions for the bitmap / sign-bitmap scan
+// fallbacks. On x86_64 these are the scalar path — the AVX-512 VPOPCNTDQ
+// kernels are the fast path and call `std::arch` directly. On aarch64 they
+// use NEON (VCNT over a `uint8x16_t`), giving the bitmap/sign scans SIMD
+// acceleration on Graviton / Apple silicon / Axion, which previously fell
+// through to scalar `u64::count_ones()`. The result is an exact integer, so
+// every path (scalar, NEON, AVX-512) returns a bit-identical count —
+// popcount has no summation-order sensitivity, so there is no cross-CPU
+// score drift to reconcile (unlike the float kernels).
+// ---------------------------------------------------------------------
+
+/// Sum of `popcount(doc[w] & q[w])` over two equal-length `u64` rows —
+/// bitmap top-bucket overlap.
+#[inline]
+pub(crate) fn and_popcount(doc: &[u64], q: &[u64]) -> u32 {
+    // Hard assert (not debug_assert): these are pub(crate) "safe" fns whose
+    // SIMD paths read `q` at offsets up to `doc.len()`, so a length mismatch
+    // would be a release-mode OOB read (the scalar path would silently
+    // truncate instead — the paths must not diverge). All callers pass equal
+    // `qpv` rows; this turns any future misuse into a clean panic, matching the
+    // crate's hard-assert-before-SIMD pattern (see `body_overlap_scores_subset`).
+    assert_eq!(
+        doc.len(),
+        q.len(),
+        "popcount: doc and query bitmap rows must be equal length"
+    );
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is part of the aarch64 baseline ABI, so these
+        // intrinsics are unconditionally available — no runtime detection.
+        unsafe { and_popcount_neon(doc, q) }
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        and_popcount_simd128(doc, q)
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
+    {
+        and_popcount_scalar(doc, q)
+    }
+}
+
+/// Sum of `popcount(doc[w] ^ q[w])` over two equal-length `u64` rows —
+/// sign-bitmap Hamming distance.
+#[inline]
+pub(crate) fn xor_popcount(doc: &[u64], q: &[u64]) -> u32 {
+    // Hard assert (not debug_assert): these are pub(crate) "safe" fns whose
+    // SIMD paths read `q` at offsets up to `doc.len()`, so a length mismatch
+    // would be a release-mode OOB read (the scalar path would silently
+    // truncate instead — the paths must not diverge). All callers pass equal
+    // `qpv` rows; this turns any future misuse into a clean panic, matching the
+    // crate's hard-assert-before-SIMD pattern (see `body_overlap_scores_subset`).
+    assert_eq!(
+        doc.len(),
+        q.len(),
+        "popcount: doc and query bitmap rows must be equal length"
+    );
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: as above — NEON is baseline on aarch64.
+        unsafe { xor_popcount_neon(doc, q) }
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        xor_popcount_simd128(doc, q)
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
+    {
+        xor_popcount_scalar(doc, q)
+    }
+}
+
+#[cfg(not(any(
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+)))]
+#[inline]
+fn and_popcount_scalar(doc: &[u64], q: &[u64]) -> u32 {
+    doc.iter().zip(q).map(|(d, qq)| (d & qq).count_ones()).sum()
+}
+
+#[cfg(not(any(
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+)))]
+#[inline]
+fn xor_popcount_scalar(doc: &[u64], q: &[u64]) -> u32 {
+    doc.iter().zip(q).map(|(d, qq)| (d ^ qq).count_ones()).sum()
+}
+
+/// NEON AND-popcount: 16 bytes (2×`u64`) per `vcntq_u8`, horizontally
+/// summed per 16-byte block (≤ 16×8 = 128, within the `u8` reduce) and
+/// accumulated into a `u32`. A trailing odd `u64` (e.g. `dim = 192` →
+/// `qpv = 3`) is handled scalar.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn and_popcount_neon(doc: &[u64], q: &[u64]) -> u32 {
+    use std::arch::aarch64::*;
+    let qpv = doc.len();
+    let dptr = doc.as_ptr() as *const u8;
+    let qptr = q.as_ptr() as *const u8;
+    let mut acc = 0u32;
+    let mut w = 0usize;
+    while w + 2 <= qpv {
+        let dv = vld1q_u8(dptr.add(w * 8));
+        let qv = vld1q_u8(qptr.add(w * 8));
+        acc += vaddvq_u8(vcntq_u8(vandq_u8(dv, qv))) as u32;
+        w += 2;
+    }
+    if w < qpv {
+        acc += (doc[w] & q[w]).count_ones();
+    }
+    acc
+}
+
+/// NEON XOR-popcount (sign-bitmap Hamming); see [`and_popcount_neon`].
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn xor_popcount_neon(doc: &[u64], q: &[u64]) -> u32 {
+    use std::arch::aarch64::*;
+    let qpv = doc.len();
+    let dptr = doc.as_ptr() as *const u8;
+    let qptr = q.as_ptr() as *const u8;
+    let mut acc = 0u32;
+    let mut w = 0usize;
+    while w + 2 <= qpv {
+        let dv = vld1q_u8(dptr.add(w * 8));
+        let qv = vld1q_u8(qptr.add(w * 8));
+        acc += vaddvq_u8(vcntq_u8(veorq_u8(dv, qv))) as u32;
+        w += 2;
+    }
+    if w < qpv {
+        acc += (doc[w] ^ q[w]).count_ones();
+    }
+    acc
+}
+
+/// WASM `simd128` AND-popcount: 16 bytes (2×`u64`) per `u8x16_popcnt`,
+/// pairwise-reduced (≤ 16×8 = 128) to a `u32` per block, accumulated
+/// across blocks; a trailing odd `u64` is handled scalar. Compile-time
+/// gated — `simd128` has no runtime detection on wasm, so this path is
+/// active only when built with `-C target-feature=+simd128`.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn and_popcount_simd128(doc: &[u64], q: &[u64]) -> u32 {
+    use std::arch::wasm32::*;
+    let qpv = doc.len();
+    let dptr = doc.as_ptr() as *const u8;
+    let qptr = q.as_ptr() as *const u8;
+    let mut acc = 0u32;
+    let mut w = 0usize;
+    while w + 2 <= qpv {
+        // SAFETY: w + 2 <= qpv, so the 16-byte load is in-bounds for both
+        // rows; `v128_load` is unaligned-safe.
+        let dv = unsafe { v128_load(dptr.add(w * 8) as *const v128) };
+        let qv = unsafe { v128_load(qptr.add(w * 8) as *const v128) };
+        let pc = u8x16_popcnt(v128_and(dv, qv));
+        let s16 = u16x8_extadd_pairwise_u8x16(pc);
+        let s32 = u32x4_extadd_pairwise_u16x8(s16);
+        acc += u32x4_extract_lane::<0>(s32)
+            + u32x4_extract_lane::<1>(s32)
+            + u32x4_extract_lane::<2>(s32)
+            + u32x4_extract_lane::<3>(s32);
+        w += 2;
+    }
+    if w < qpv {
+        acc += (doc[w] & q[w]).count_ones();
+    }
+    acc
+}
+
+/// WASM `simd128` XOR-popcount (sign-bitmap Hamming); see
+/// [`and_popcount_simd128`].
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn xor_popcount_simd128(doc: &[u64], q: &[u64]) -> u32 {
+    use std::arch::wasm32::*;
+    let qpv = doc.len();
+    let dptr = doc.as_ptr() as *const u8;
+    let qptr = q.as_ptr() as *const u8;
+    let mut acc = 0u32;
+    let mut w = 0usize;
+    while w + 2 <= qpv {
+        // SAFETY: see `and_popcount_simd128`.
+        let dv = unsafe { v128_load(dptr.add(w * 8) as *const v128) };
+        let qv = unsafe { v128_load(qptr.add(w * 8) as *const v128) };
+        let pc = u8x16_popcnt(v128_xor(dv, qv));
+        let s16 = u16x8_extadd_pairwise_u8x16(pc);
+        let s32 = u32x4_extadd_pairwise_u16x8(s16);
+        acc += u32x4_extract_lane::<0>(s32)
+            + u32x4_extract_lane::<1>(s32)
+            + u32x4_extract_lane::<2>(s32)
+            + u32x4_extract_lane::<3>(s32);
+        w += 2;
+    }
+    if w < qpv {
+        acc += (doc[w] ^ q[w]).count_ones();
+    }
+    acc
+}
+
 /// Running top-`k` collector.
 ///
 /// Maintains an unsorted array of the best `k` (score, index) pairs
@@ -168,9 +376,13 @@ impl TopK {
         // doc_id tie-break makes the final order deterministic when
         // scores are equal.
         pairs.sort_unstable_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.cmp(&b.1))
+            // `total_cmp` is a true total order (IEEE-754 `totalOrder`), so the
+            // sort stays well-defined even if a non-finite score ever slipped
+            // past the finite-input guards — `partial_cmp(..).unwrap_or(Equal)`
+            // is not a total order and can mis-sort around NaN. For the finite
+            // scores we actually have, the two agree. doc_id ascending breaks
+            // score ties (unchanged).
+            b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1))
         });
         for (slot, (s, i)) in pairs.into_iter().enumerate() {
             if slot >= out_scores.len() {
@@ -178,6 +390,40 @@ impl TopK {
             }
             out_scores[slot] = s;
             out_indices[slot] = i;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{and_popcount, xor_popcount};
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    fn naive_and(d: &[u64], q: &[u64]) -> u32 {
+        d.iter().zip(q).map(|(a, b)| (a & b).count_ones()).sum()
+    }
+    fn naive_xor(d: &[u64], q: &[u64]) -> u32 {
+        d.iter().zip(q).map(|(a, b)| (a ^ b).count_ones()).sum()
+    }
+
+    /// The portable popcount helpers must agree with a naive reference on
+    /// every target. This is the runtime correctness gate for the SIMD
+    /// kernels: it exercises whichever path is active — scalar on x86_64,
+    /// NEON on aarch64 (via the ARM CI runner), simd128 on wasm
+    /// (`-C target-feature=+simd128`, via the wasm CI lane). The `qpv`
+    /// sweep covers odd lengths (the scalar tail after the 2×u64 SIMD
+    /// stride) and exact multiples of the stride.
+    #[test]
+    fn popcount_helpers_match_naive() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xC0FFEE);
+        for qpv in [1usize, 2, 3, 4, 7, 8, 15, 16, 17, 31] {
+            for _ in 0..64 {
+                let d: Vec<u64> = (0..qpv).map(|_| rng.gen()).collect();
+                let q: Vec<u64> = (0..qpv).map(|_| rng.gen()).collect();
+                assert_eq!(and_popcount(&d, &q), naive_and(&d, &q), "AND qpv={qpv}");
+                assert_eq!(xor_popcount(&d, &q), naive_xor(&d, &q), "XOR qpv={qpv}");
+            }
         }
     }
 }

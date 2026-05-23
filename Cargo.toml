@@ -2,7 +2,7 @@
 name = "ordvec"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; verified builds + 80 tests pass
+rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; also clears the 1.87 floor from u64::is_multiple_of
 description = "Training-free ordinal & sign quantization for vector retrieval"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Fieldnote-Echo/ordvec"
@@ -38,9 +38,11 @@ rand = "0.8"
 rand_chacha = "0.3"
 
 [features]
-# SIMD is always compiled and dispatched at runtime via is_x86_feature_detected!
-# with a scalar fallback — no feature flag gates it. `experimental` exposes
-# MultiBucketBitmap (research scaffold), kept off the stable surface.
+# SIMD is always compiled, never feature-gated: x86_64 dispatches AVX-512/AVX2 at
+# runtime via is_x86_feature_detected!, aarch64 uses NEON (baseline, no detection),
+# wasm32 uses simd128 when built with -C target-feature=+simd128, and every other
+# target takes the scalar fallback. `experimental` exposes MultiBucketBitmap
+# (research scaffold), kept off the stable surface.
 experimental = []
 
 [profile.release]

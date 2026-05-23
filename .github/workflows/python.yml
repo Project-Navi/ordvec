@@ -6,7 +6,10 @@ name: python
 # the core checks, and so a green run proves the bindings build cold from a
 # checkout (the paper's reproducibility requirement).
 on:
+  # Push runs only on main (post-merge); feature branches are covered by the
+  # pull_request trigger below, so a branch with an open PR doesn't double-run.
   push:
+    branches: [main]
     paths:
       - "ordvec-python/**"
       - "src/**"
@@ -49,10 +52,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # abi3-py39 means one wheel covers 3.9+; test the min and max we claim,
-        # on x86_64 (ubuntu) and aarch64 (macos, scalar SIMD fallback).
-        os: [ubuntu-latest, macos-latest]
-        python: ["3.9", "3.13"]
+        # release-python.yml builds one wheel per platform; this matrix makes
+        # sure every one of those targets is *behaviourally* tested (build →
+        # install → pytest), not merely compiled. abi3 means a single wheel
+        # covers all CPython 3.9+, so the python axis only needs its 3.9↔3.13
+        # floor/ceiling checked once (linux/x86_64); the other targets exercise
+        # the native code on 3.13. The aarch64 runners (ubuntu-24.04-arm,
+        # macos-latest) are what exercise the NEON kernels through the bindings.
+        # NB: ubuntu-24.04-arm hosted runners are free on public repos / paid
+        # plans; until this repo is public the ARM leg may queue or bill.
+        # macOS-Intel (macos-13) is intentionally NOT tested here: that runner
+        # image is deprecated + scarce, so the jobs sit queued and block PRs. The
+        # Intel wheel is still built + shipped by release-python.yml, and its
+        # x86_64 code is covered by the linux-x86_64 legs (logic) + macos-arm64
+        # (Mach-O), so the lost test coverage is marginal.
+        include:
+          - { os: ubuntu-latest, python: "3.9" } # linux x86_64 — abi3 floor
+          - { os: ubuntu-latest, python: "3.13" } # linux x86_64 — abi3 ceiling
+          - { os: ubuntu-24.04-arm, python: "3.13" } # linux aarch64 — NEON
+          - { os: macos-latest, python: "3.13" } # macOS arm64 — NEON
+          - { os: windows-latest, python: "3.13" } # windows x64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -20,7 +20,7 @@
 use rayon::prelude::*;
 
 use crate::rank::rank_transform;
-use crate::util::{assert_all_finite, result_buffer_len, TopK};
+use crate::util::{and_popcount, assert_all_finite, result_buffer_len, TopK};
 use crate::SearchResults;
 
 /// Top-bucket bitmap index for constant-composition coarse scoring.
@@ -326,11 +326,7 @@ impl Bitmap {
         for (i, &di) in doc_ids.iter().enumerate() {
             let off = (di as usize) * qpv;
             let doc = &self.bitmaps[off..off + qpv];
-            let mut acc: u32 = 0;
-            for w in 0..qpv {
-                acc += (doc[w] & q_bitmap[w]).count_ones();
-            }
-            out[i] = acc;
+            out[i] = and_popcount(doc, q_bitmap);
         }
     }
 
@@ -389,8 +385,9 @@ impl Bitmap {
 
 /// Streaming bitmap scan: AND-popcount each doc bitmap against the
 /// query bitmap. Uses runtime feature detection for AVX-512 VPOPCNTDQ
-/// (one VPOPCNTQ over 8 u64 lanes), otherwise falls back to scalar
-/// `u64::count_ones()` which Zen 5 retires at 1/cycle.
+/// (one VPOPCNTQ over 8 u64 lanes), otherwise falls back to the portable
+/// [`crate::util::and_popcount`] (NEON on aarch64, scalar
+/// `u64::count_ones()` — which Zen 5 retires at 1/cycle — elsewhere).
 fn bitmap_scan(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     debug_assert_eq!(q.len(), qpv);
 
@@ -414,11 +411,7 @@ fn bitmap_scan(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK)
 fn bitmap_scan_scalar(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
-        let mut acc: u32 = 0;
-        for w in 0..qpv {
-            acc += (doc[w] & q[w]).count_ones();
-        }
-        top.maybe_insert(acc as f32, di);
+        top.maybe_insert(and_popcount(doc, q) as f32, di);
     }
 }
 
@@ -474,11 +467,7 @@ fn bitmap_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores:
     #[allow(clippy::needless_range_loop)] // indexed access is clearer / matches the kernel layout
     for di in 0..n {
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
-        let mut acc: u32 = 0;
-        for w in 0..qpv {
-            acc += (doc[w] & q[w]).count_ones();
-        }
-        scores[di] = acc;
+        scores[di] = and_popcount(doc, q);
     }
 }
 
@@ -546,11 +535,7 @@ fn bitmap_scan_collect_batched_scalar(
         let doc = &bitmaps[di * qpv..(di + 1) * qpv];
         for bi in 0..batch {
             let q = &q_batch[bi * qpv..(bi + 1) * qpv];
-            let mut acc: u32 = 0;
-            for w in 0..qpv {
-                acc += (doc[w] & q[w]).count_ones();
-            }
-            scores[bi * n + di] = acc;
+            scores[bi * n + di] = and_popcount(doc, q);
         }
     }
 }

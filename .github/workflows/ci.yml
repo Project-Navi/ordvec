@@ -207,3 +207,63 @@ jobs:
           set -euo pipefail
           cargo test
           cargo test --features experimental
+
+  # ----------------------------------------------------------------------
+  # WASM: the bitmap/sign popcount kernels have a `simd128` path
+  # (cfg(all(target_arch = "wasm32", target_feature = "simd128"))). Hosted
+  # runners can't execute wasm32-unknown-unknown directly, so we (a)
+  # compile-gate the browser/edge target with simd128 enabled, and (b) run
+  # the popcount equivalence test under wasmtime via wasm32-wasip1. rayon
+  # falls back to a single-threaded pool on wasm, so the search paths reach
+  # the same simd128 kernel. This is the runtime correctness gate for the
+  # simd128 path — the wasm analogue of the `avx512`-under-SDE job.
+  wasm:
+    name: wasm32 (simd128)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - name: install wasmtime (executes the wasip1 test binary)
+        run: |
+          set -euo pipefail
+          curl -sSfL https://wasmtime.dev/install.sh | bash
+          echo "${HOME}/.wasmtime/bin" >> "${GITHUB_PATH}"
+      # RUSTFLAGS is overridden here (dropping the workflow-level -D warnings)
+      # so a warning in rayon's wasm-only code path can't fail the build; the
+      # crate's own code is held to -D warnings by the lint/test jobs on the
+      # same source, and clippy covers the simd128 path locally.
+      - name: build wasm32-unknown-unknown + simd128 (browser / edge target)
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+        run: cargo build --lib --target wasm32-unknown-unknown
+      - name: run the simd128 popcount kernel test under wasmtime
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+        run: cargo test --lib --target wasm32-wasip1 popcount_helpers_match_naive
+
+  # ----------------------------------------------------------------------
+  # Benchmark visibility (not a pass/fail perf gate). Runs the self-contained
+  # seeded synthetic bench on x86_64 (AVX) and Linux/aarch64 (NEON) so the
+  # per-architecture SIMD numbers land in the CI log — bench_rank prints the
+  # detected arch + SIMD features. Apples-to-apples (same OS, different
+  # arch+SIMD) for the paper's cross-platform distribution story. The job
+  # fails only if the bench itself errors. (ubuntu-24.04-arm hosted runners
+  # are free on public repos / paid plans; the ARM leg may queue or bill
+  # while the repo is private.)
+  bench:
+    name: bench_rank (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: run bench_rank (scaled, seeded synthetic corpus)
+        run: cargo run --release --example bench_rank -- --n 10000 --queries 100
