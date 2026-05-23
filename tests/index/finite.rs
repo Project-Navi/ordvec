@@ -44,3 +44,33 @@ fn sign_bitmap_build_query_rejects_neg_inf() {
     q[1] = f32::NEG_INFINITY;
     let _ = idx.build_query_bitmap(&q);
 }
+
+// Directly-callable public primitives also self-validate (the guard is
+// not only on the type `add`/`search` boundaries).
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn rank_transform_rejects_nan() {
+    let mut v = vec![0.1f32; 16];
+    v[2] = f32::NAN;
+    let _ = ordvec::rank::rank_transform(&v);
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn search_asymmetric_byte_lut_rejects_inf() {
+    let mut idx = RankQuant::new(D, 2);
+    idx.add(&make_corpus(10));
+    let mut q = vec![0.1f32; D];
+    q[2] = f32::INFINITY;
+    let _ = ordvec::search_asymmetric_byte_lut(&idx, &q, 10);
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn bitmap_build_query_bitmap_fp32_rejects_nan() {
+    let idx = Bitmap::new(D, D / 4);
+    let mut q = vec![0.1f32; D];
+    q[0] = f32::NAN;
+    let _ = idx.build_query_bitmap_fp32(&q);
+}

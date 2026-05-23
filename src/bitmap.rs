@@ -79,6 +79,7 @@ impl Bitmap {
     /// the query side never gets rank-quantised.
     pub fn build_query_bitmap_fp32(&self, q: &[f32]) -> Vec<u64> {
         assert_eq!(q.len(), self.dim);
+        assert_all_finite(q);
         // Index the dim sorted by |q[j]| desc; alternative: by q[j] desc.
         // We use raw value desc so the top bits flag where the query
         // points positively, matching the doc-side semantics.

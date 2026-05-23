@@ -37,6 +37,7 @@ use crate::SearchResults;
 pub fn rank_transform(v: &[f32]) -> Vec<u16> {
     let d = v.len();
     assert!(d <= u16::MAX as usize, "dim must fit in u16");
+    assert_all_finite(v);
     let mut order: Vec<u16> = (0..d as u16).collect();
     order.sort_by_key(|&i| OrderedFloat(v[i as usize]));
     let mut ranks = vec![0u16; d];
@@ -53,6 +54,7 @@ pub fn rank_transform_into(v: &[f32], out: &mut [u16]) {
     let d = v.len();
     assert_eq!(d, out.len(), "out must have the same length as v");
     assert!(d <= u16::MAX as usize, "dim must fit in u16");
+    assert_all_finite(v);
     let mut order: Vec<u16> = (0..d as u16).collect();
     order.sort_by_key(|&i| OrderedFloat(v[i as usize]));
     for (rank, &orig_idx) in order.iter().enumerate() {

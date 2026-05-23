@@ -717,6 +717,7 @@ pub fn search_asymmetric_byte_lut(index: &RankQuant, queries: &[f32], k: usize) 
     let n = index.n_vectors;
     let nq = queries.len() / dim;
     assert_eq!(queries.len(), nq * dim);
+    assert_all_finite(queries);
     // Shadow `k` with the clamp so the clamped value flows into the
     // buffer sizing *and* the `par_chunks_mut(k)` row stride — matching
     // the other search methods. Previously only `k_eff` was clamped
