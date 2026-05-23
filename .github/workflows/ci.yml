@@ -1,0 +1,203 @@
+# ordvec — release gate CI.
+#
+# ordvec is a pure-Rust SIMD vector-retrieval crate (no BLAS / faer / ndarray).
+# Its AVX-512 / AVX2 kernels are dispatched at runtime via
+# `is_x86_feature_detected!`, with a scalar fallback. GitHub-hosted runners do
+# not expose AVX-512, so the `test` matrix only exercises the scalar/AVX2
+# paths; the `avx512` job runs the suite under Intel SDE (emulating Sapphire
+# Rapids) so the AVX-512 kernels are actually covered. MSRV is 1.89 (the
+# release where the AVX-512 intrinsics this crate uses were stabilized).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail the build on any compiler warning across every job.
+  RUSTFLAGS: -D warnings
+
+defaults:
+  run:
+    # Git Bash ships on the Windows runner, so a single shell keeps the
+    # multi-line `run:` blocks portable across the test matrix.
+    shell: bash
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Formatting + clippy. Lints `--all-features` so the experimental scaffold
+  # is held to the same bar as the stable surface.
+  # ----------------------------------------------------------------------
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ----------------------------------------------------------------------
+  # Test matrix across the three GitHub-hosted OSes. Covers the default
+  # surface, the experimental feature, the no-default-features build, and a
+  # release build of the bench example (the heaviest compile path).
+  # ----------------------------------------------------------------------
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (default features)
+        run: cargo test
+      - name: cargo test (experimental)
+        run: cargo test --features experimental
+      - name: cargo test (no default features)
+        run: cargo test --no-default-features
+      - name: cargo build --release --example bench_rank
+        run: cargo build --release --example bench_rank
+
+  # ----------------------------------------------------------------------
+  # Prove the declared MSRV (1.89.0) actually builds and tests. There is
+  # intentionally NO rust-toolchain.toml in the repo: dtolnay/rust-toolchain
+  # neither removes nor overrides one, so a committed toolchain file would take
+  # rustup directory-override precedence and silently change this floor. The
+  # MSRV is therefore pinned here, in the workflow, as the source of truth.
+  # ----------------------------------------------------------------------
+  msrv:
+    name: msrv (1.89.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build
+      - name: cargo test
+        run: cargo test
+
+  # ----------------------------------------------------------------------
+  # No-system-deps guarantee + packaging check. Fails if any forbidden
+  # numerical/BLAS crate has crept into the dependency tree, then dry-runs
+  # the publish to catch packaging problems before a real release.
+  # ----------------------------------------------------------------------
+  deps:
+    name: deps (no-system-deps + publish dry-run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: assert no BLAS/faer/ndarray/statrs in the tree
+        run: |
+          set -euo pipefail
+          # Inspect the whole graph, including the experimental feature and
+          # dev-dependencies, so nothing slips in behind a flag.
+          tree="$(cargo tree --all-features --edges normal,build,dev)"
+          echo "$tree"
+          # Boundaries exclude only alphanumerics, so hyphen/underscore variants
+          # (blas-src, openblas-src, ndarray-linalg, faer-core, blas_sys) are
+          # caught, while substrings (e.g. "myblaster") are not.
+          if echo "$tree" | grep -Eiq '(^|[^[:alnum:]])(blas|openblas|faer|ndarray|statrs)([^[:alnum:]]|$)'; then
+            echo "::error::forbidden system/numerical dependency found in the tree (blas|openblas|faer|ndarray|statrs)"
+            exit 1
+          fi
+          echo "OK: no forbidden dependencies"
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
+
+  # ----------------------------------------------------------------------
+  # AVX-512 coverage via Intel SDE. GitHub-hosted runners lack AVX-512, so we
+  # run the compiled test binaries under SDE emulating Sapphire Rapids (-spr:
+  # AVX-512 F/BW/VL/DQ + VPOPCNTDQ). Setting CARGO_TARGET_..._RUNNER makes
+  # `cargo test` launch each test executable through the SDE wrapper, so the
+  # crate's runtime is_x86_feature_detected! dispatch lights up the AVX-512
+  # kernels instead of the scalar/AVX2 fallback.
+  #
+  # Pattern adapted from microsoft/DiskANN's CI (also a vector-search crate).
+  # SDE pin is a fixed Intel downloadmirror build, SHA256-verified before it is
+  # unpacked or run; bump the version + checksum together when upgrading. If
+  # Intel ever moves the URL or the bytes change, this job fails loudly (the
+  # gate stays honest) rather than silently skipping AVX-512 coverage.
+  avx512:
+    name: avx512 (Intel SDE / Sapphire Rapids)
+    runs-on: ubuntu-latest
+    env:
+      SDE_VERSION: sde-external-10.7.0-2026-02-18-lin
+      SDE_URL_BASE: https://downloadmirror.intel.com/913594
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install Intel SDE
+        env:
+          # SHA256 of ${SDE_VERSION}.tar.xz — verified before the archive is
+          # unpacked and executed. Bump together with SDE_VERSION.
+          SDE_SHA256: ca3d4086de4acb3faedf9f57b541c6936b7d5e19ae2bf763b6ea933573a0a217
+        run: |
+          set -euo pipefail
+          wget -qO intel-sde.tar.xz "${SDE_URL_BASE}/${SDE_VERSION}.tar.xz"
+          echo "${SDE_SHA256}  intel-sde.tar.xz" | sha256sum -c -
+          mkdir -p "${GITHUB_WORKSPACE}/intel-sde"
+          tar xf intel-sde.tar.xz --strip-components=1 -C "${GITHUB_WORKSPACE}/intel-sde"
+          rm intel-sde.tar.xz
+          "${GITHUB_WORKSPACE}/intel-sde/sde64" --version
+      - name: sanity-check AVX-512 detection under SDE
+        run: |
+          set -euo pipefail
+          # Prove SDE genuinely exposes AVX-512 to the guest via the SAME
+          # mechanism the crate dispatches on: is_x86_feature_detected! reads
+          # CPUID, which SDE intercepts (a /proc/cpuinfo grep would only see
+          # the host and be misleading). If this prints `false` the kernels
+          # would never be reached and the coverage below would be a no-op,
+          # so fail the job hard in that case.
+          mkdir -p "${RUNNER_TEMP}/sde-probe/src"
+          cat > "${RUNNER_TEMP}/sde-probe/Cargo.toml" <<'EOF'
+          [package]
+          name = "sde-probe"
+          version = "0.0.0"
+          edition = "2021"
+          [[bin]]
+          name = "sde-probe"
+          path = "src/main.rs"
+          EOF
+          cat > "${RUNNER_TEMP}/sde-probe/src/main.rs" <<'EOF'
+          fn main() {
+              let f = is_x86_feature_detected!("avx512f");
+              let p = is_x86_feature_detected!("avx512vpopcntdq");
+              println!("avx512f={f} avx512vpopcntdq={p}");
+              assert!(f, "SDE did not expose avx512f to the guest");
+              assert!(p, "SDE did not expose avx512vpopcntdq to the guest");
+          }
+          EOF
+          cargo build --release --manifest-path "${RUNNER_TEMP}/sde-probe/Cargo.toml"
+          "${GITHUB_WORKSPACE}/intel-sde/sde64" -spr -- \
+            "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
+      - name: cargo test under SDE (AVX-512 kernels)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/intel-sde/sde64 -spr --
+        run: |
+          set -euo pipefail
+          cargo test
+          cargo test --features experimental

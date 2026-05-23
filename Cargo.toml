@@ -4,12 +4,21 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; verified builds + 80 tests pass
 description = "Training-free ordinal & sign quantization for vector retrieval"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/Fieldnote-Echo/ordvec"
 homepage = "https://github.com/Fieldnote-Echo/ordvec"
 readme = "README.md"
 keywords = ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"]
 categories = ["algorithms", "science", "compression"]
+
+# docs.rs build configuration. Build with default features only so the
+# experimental research scaffold (MultiBucketBitmapIndex) and the
+# `#[doc(hidden)]` FastScan path stay off the published docs surface.
+# `--cfg docsrs` lets the crate gate `#[doc(cfg(...))]` annotations on a
+# build flag docs.rs sets but a normal `cargo doc` does not.
+[package.metadata.docs.rs]
+all-features = false
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 rayon = "1.10"
