@@ -35,8 +35,9 @@ Wheels target CPython 3.9+ (abi3). Building from source needs a Rust toolchain
 ## Provenance & license
 
 The `ordvec` Python bindings are original work by **Nelson Spence**, developed
-within the [turbovec](https://github.com/RyanCodrai/turbovec) project (MIT, by
-Ryan Codrai) and factored out into this standalone package.
+within turbovec, factored out into this standalone package. turbovec
+([MIT](https://github.com/RyanCodrai/turbovec), by Ryan Codrai) is credited as
+the origin project.
 
 Dual-licensed under either of [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE) at your option.

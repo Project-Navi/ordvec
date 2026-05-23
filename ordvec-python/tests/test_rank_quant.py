@@ -73,17 +73,17 @@ def test_self_query_recall_at_1(bits):
 
 
 def test_invalid_bits_rejected():
-    # The Rust side panics with "bits must be 1, 2, or 4"; pyo3 surfaces
-    # the panic as a BaseException subclass.
-    with pytest.raises(BaseException):
+    # The binding validates bits in {1, 2, 4} and raises a clean ValueError
+    # (the core would otherwise panic and surface as a PanicException).
+    with pytest.raises(ValueError, match="bits"):
         RankQuant(dim=64, bits=3)
-    with pytest.raises(BaseException):
+    with pytest.raises(ValueError, match="bits"):
         RankQuant(dim=64, bits=8)
 
 
 def test_dim_not_multiple_of_two_pow_bits_rejected():
-    # dim must be a multiple of 2^bits — for bits=2 that's 4. 63 is not.
-    with pytest.raises(BaseException):
+    # dim must be a multiple of 8/bits and 2^bits — for bits=2 that's 4. 63 is not.
+    with pytest.raises(ValueError, match="multiple"):
         RankQuant(dim=63, bits=2)
 
 

@@ -100,10 +100,10 @@ def test_load_rejects_nonexistent_file():
 
 
 def test_invalid_n_top_rejected():
-    # `0 < n_top < dim` is asserted Rust-side; surfaces as PanicException.
-    with pytest.raises(BaseException):
+    # The binding validates 0 < n_top < dim and raises a clean ValueError.
+    with pytest.raises(ValueError, match="n_top"):
         Bitmap(dim=64, n_top=0)
-    with pytest.raises(BaseException):
+    with pytest.raises(ValueError, match="n_top"):
         Bitmap(dim=64, n_top=64)  # not strictly less than dim
 
 

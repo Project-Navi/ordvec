@@ -119,10 +119,10 @@ def test_empty_batch_against_empty_index_yields_zero_columns():
 
 
 def test_dim_not_multiple_of_64_rejected():
-    # The Rust side asserts `dim % 64 == 0` — surfaces as PanicException.
-    with pytest.raises(BaseException):
+    # The binding validates that dim is a positive multiple of 64 -> ValueError.
+    with pytest.raises(ValueError, match="multiple of 64"):
         SignBitmap(dim=65)
-    with pytest.raises(BaseException):
+    with pytest.raises(ValueError, match="multiple of 64"):
         SignBitmap(dim=0)
 
 

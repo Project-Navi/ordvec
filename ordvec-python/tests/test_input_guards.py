@@ -224,3 +224,82 @@ def test_subset_in_range_candidates_still_work():
     assert scores.shape == (3,)
     assert ids.shape == (3,)
     assert int(ids[0]) == 0  # self-query → self ranks first
+
+
+# -------------------------------------------------------------------
+# Wrong array width (ncols/len != dim) -> ValueError, not silent
+# misalignment or a reshape panic. The core derives n = len/dim and only
+# checks divisibility, so a wrong-but-divisible width would slip through.
+# -------------------------------------------------------------------
+
+
+def test_rank_add_wrong_width_raises_value_error():
+    # (4, 128) into a dim-64 index: total length divides by 64, so the core
+    # would silently treat it as 8 vectors. The width guard rejects it.
+    idx = Rank(dim=64)
+    bad = unit_vectors(4, 128)  # contiguous, but ncols 128 != dim 64
+    with pytest.raises(ValueError, match="dimension"):
+        idx.add(bad)
+
+
+def test_rank_search_wrong_width_raises_value_error():
+    idx = Rank(dim=64)
+    idx.add(unit_vectors(10, 64))
+    with pytest.raises(ValueError, match="dimension"):
+        idx.search(unit_vectors(2, 128), k=3)
+
+
+def test_rankquant_add_wrong_width_raises_value_error():
+    idx = RankQuant(dim=64, bits=2)
+    with pytest.raises(ValueError, match="dimension"):
+        idx.add(unit_vectors(4, 128))
+
+
+def test_rankquant_subset_wrong_width_query_raises_value_error():
+    idx = RankQuant(dim=64, bits=2)
+    idx.add(unit_vectors(10, 64))
+    bad_q = unit_vectors(1, 128)[0]  # length 128 != dim 64
+    candidates = np.array([0, 1, 2], dtype=np.uint32)
+    with pytest.raises(ValueError, match="dimension"):
+        idx.search_asymmetric_subset(bad_q, candidates, k=2)
+
+
+def test_bitmap_top_m_wrong_width_raises_value_error():
+    idx = Bitmap(dim=64, n_top=16)
+    idx.add(unit_vectors(10, 64))
+    with pytest.raises(ValueError, match="dimension"):
+        idx.top_m_candidates(unit_vectors(1, 128)[0], m=5)
+
+
+def test_signbitmap_batched_wrong_width_raises_value_error():
+    idx = SignBitmap(dim=64)
+    idx.add(unit_vectors(10, 64))
+    with pytest.raises(ValueError, match="dimension"):
+        idx.top_m_candidates_batched(unit_vectors(4, 128), m=5)
+
+
+# -------------------------------------------------------------------
+# swap_remove out-of-range -> IndexError (not PanicException).
+# -------------------------------------------------------------------
+
+
+def test_rank_swap_remove_out_of_range_raises_index_error():
+    idx = Rank(dim=64)
+    idx.add(unit_vectors(5, 64))
+    with pytest.raises(IndexError, match="out of range"):
+        idx.swap_remove(5)  # valid indices are 0..4
+
+
+def test_rankquant_swap_remove_out_of_range_raises_index_error():
+    idx = RankQuant(dim=64, bits=2)
+    idx.add(unit_vectors(5, 64))
+    with pytest.raises(IndexError, match="out of range"):
+        idx.swap_remove(99)
+
+
+def test_swap_remove_in_range_still_works():
+    idx = Rank(dim=64)
+    idx.add(unit_vectors(5, 64))
+    moved = idx.swap_remove(1)
+    assert moved == 4
+    assert len(idx) == 4

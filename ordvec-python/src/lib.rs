@@ -8,8 +8,14 @@
 //! The core crate is aliased as `ordvec_core` throughout, so the Rust namespace
 //! never collides with the `ordvec` Python package name.
 //!
-//! Provenance: original work by Nelson Spence, developed within the turbovec
-//! project (MIT, by Ryan Codrai) and factored out. Dual-licensed MIT OR Apache-2.0.
+//! Provenance: original work by Nelson Spence, developed within turbovec
+//! (MIT, by Ryan Codrai), factored out. Dual-licensed MIT OR Apache-2.0.
+//!
+//! Every FFI entry point validates its inputs at the boundary so the core's
+//! `assert!`/`assert_all_finite` panics surface as typed Python exceptions, not
+//! an opaque `PanicException`: constructors and `swap_remove` check their
+//! arguments, `check_width` rejects shape mismatches, `ensure_finite` rejects
+//! NaN/±Inf, and the inline guard rejects non-C-contiguous arrays.
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
@@ -35,6 +41,23 @@ fn ensure_finite(xs: &[f32]) -> PyResult<()> {
     Ok(())
 }
 
+/// Reject an array whose row width (2-D `ncols`) or length (1-D) does not match
+/// the index dimension.
+///
+/// The core derives `n = slice.len() / dim` and only asserts divisibility, so a
+/// wrong-but-divisible width (e.g. `(1, 128)` into a dim-64 index) would be
+/// silently reinterpreted as a different vector count — or panic when the result
+/// is reshaped to `(nrows, k)` via `from_shape_vec(...).unwrap()`. Validate the
+/// width up front so the caller gets a clean `ValueError`.
+fn check_width(got: usize, dim: usize) -> PyResult<()> {
+    if got != dim {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "array width {got} does not match index dimension {dim}"
+        )));
+    }
+    Ok(())
+}
+
 // =====================================================================
 // Rank-mode retrieval bindings: Rank, RankQuant, Bitmap, SignBitmap.
 //
@@ -52,14 +75,21 @@ struct Rank {
 #[pymethods]
 impl Rank {
     #[new]
-    fn new(dim: usize) -> Self {
-        Self {
-            inner: ordvec_core::Rank::new(dim),
+    fn new(dim: usize) -> PyResult<Self> {
+        if !(2..=u16::MAX as usize).contains(&dim) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dim must be in [2, {}]",
+                u16::MAX
+            )));
         }
+        Ok(Self {
+            inner: ordvec_core::Rank::new(dim),
+        })
     }
 
     fn add(&mut self, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
         let arr = vectors.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -79,6 +109,7 @@ impl Rank {
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
         let arr = queries.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -105,6 +136,7 @@ impl Rank {
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
         let arr = queries.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -139,8 +171,15 @@ impl Rank {
 
     /// Remove the vector at `idx` in O(1) by swapping with the last vector.
     /// Order is not preserved. Returns the old index of the moved vector.
-    fn swap_remove(&mut self, idx: usize) -> usize {
-        self.inner.swap_remove(idx)
+    /// Raises `IndexError` if `idx >= len(self)`.
+    fn swap_remove(&mut self, idx: usize) -> PyResult<usize> {
+        let n = self.inner.len();
+        if idx >= n {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "index {idx} out of range (index holds {n} vectors)"
+            )));
+        }
+        Ok(self.inner.swap_remove(idx))
     }
 
     fn __len__(&self) -> usize {
@@ -171,16 +210,40 @@ struct RankQuant {
 #[pymethods]
 impl RankQuant {
     /// Construct a RankQuant index at the given bit width.
-    /// Supported `bits` ∈ {1, 2, 4}; `dim` must be a multiple of 2^bits.
+    /// Supported `bits` ∈ {1, 2, 4}; `dim` must be a multiple of `8/bits` and
+    /// `2^bits`, in `[2, u16::MAX]`.
     #[new]
-    fn new(dim: usize, bits: u8) -> Self {
-        Self {
-            inner: ordvec_core::RankQuant::new(dim, bits),
+    fn new(dim: usize, bits: u8) -> PyResult<Self> {
+        if !matches!(bits, 1 | 2 | 4) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bits must be 1, 2, or 4",
+            ));
         }
+        if !(2..=u16::MAX as usize).contains(&dim) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dim must be in [2, {}]",
+                u16::MAX
+            )));
+        }
+        // Mirror the core asserts: dim must be a multiple of both 8/bits (codes
+        // per byte) and 2^bits (so every bucket receives equal rank entries —
+        // what keeps the analytical rankquant_norm exact per document).
+        let codes_per_byte = (8 / bits) as usize;
+        let n_buckets = 1usize << bits;
+        if !dim.is_multiple_of(codes_per_byte) || !dim.is_multiple_of(n_buckets) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dim {dim} must be a multiple of {} for bits = {bits}",
+                codes_per_byte.max(n_buckets)
+            )));
+        }
+        Ok(Self {
+            inner: ordvec_core::RankQuant::new(dim, bits),
+        })
     }
 
     fn add(&mut self, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
         let arr = vectors.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -198,6 +261,7 @@ impl RankQuant {
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
         let arr = queries.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -223,6 +287,7 @@ impl RankQuant {
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
         let arr = queries.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -253,8 +318,16 @@ impl RankQuant {
         Ok(Self { inner })
     }
 
-    fn swap_remove(&mut self, idx: usize) -> usize {
-        self.inner.swap_remove(idx)
+    /// Remove the vector at `idx` in O(1) by swapping with the last vector.
+    /// Raises `IndexError` if `idx >= len(self)`.
+    fn swap_remove(&mut self, idx: usize) -> PyResult<usize> {
+        let n = self.inner.len();
+        if idx >= n {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "index {idx} out of range (index holds {n} vectors)"
+            )));
+        }
+        Ok(self.inner.swap_remove(idx))
     }
 
     /// Asymmetric scoring restricted to a candidate subset (e.g. the top-M
@@ -271,6 +344,7 @@ impl RankQuant {
         k: usize,
     ) -> PyResult<SubsetArrays<'py>> {
         let q = query.as_array();
+        check_width(q.len(), self.inner.dim())?;
         let q_slice = q.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -330,17 +404,29 @@ struct Bitmap {
 
 #[pymethods]
 impl Bitmap {
-    /// Construct a top-bucket bitmap index. `n_top` sets how many coordinates per
-    /// document are flagged as "top" (e.g. dim/4 for the b=2-equivalent top quarter).
+    /// Construct a top-bucket bitmap index. `dim` must be a positive multiple of
+    /// 64; `n_top` (how many coordinates per document are flagged "top", e.g.
+    /// dim/4 for the b=2-equivalent top quarter) must satisfy `0 < n_top < dim`.
     #[new]
-    fn new(dim: usize, n_top: usize) -> Self {
-        Self {
-            inner: ordvec_core::Bitmap::new(dim, n_top),
+    fn new(dim: usize, n_top: usize) -> PyResult<Self> {
+        if dim == 0 || !dim.is_multiple_of(64) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "dim must be a positive multiple of 64",
+            ));
         }
+        if n_top == 0 || n_top >= dim {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_top must satisfy 0 < n_top < dim (got n_top = {n_top}, dim = {dim})"
+            )));
+        }
+        Ok(Self {
+            inner: ordvec_core::Bitmap::new(dim, n_top),
+        })
     }
 
     fn add(&mut self, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
         let arr = vectors.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -360,6 +446,7 @@ impl Bitmap {
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
         let arr = queries.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -387,6 +474,7 @@ impl Bitmap {
         m: usize,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
         let arr = query.as_array();
+        check_width(arr.len(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -443,17 +531,30 @@ struct SignBitmap {
 #[pymethods]
 impl SignBitmap {
     /// 1-bit-per-coord sign-cosine retrieval substrate. `dim` must be a positive
-    /// multiple of 64. No `n_top` parameter — the threshold is data-independent
-    /// (bit set iff coord > 0). Storage: `dim / 8` bytes per doc (128 B at D = 1024).
+    /// multiple of 64, at most `MAX_SIGN_BITMAP_DIM`. No `n_top` parameter — the
+    /// threshold is data-independent (bit set iff coord > 0). Storage: `dim / 8`
+    /// bytes per doc (128 B at D = 1024).
     #[new]
-    fn new(dim: usize) -> Self {
-        Self {
-            inner: ordvec_core::SignBitmap::new(dim),
+    fn new(dim: usize) -> PyResult<Self> {
+        if dim == 0 || !dim.is_multiple_of(64) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "dim must be a positive multiple of 64",
+            ));
         }
+        if dim > ordvec_core::rank_io::MAX_SIGN_BITMAP_DIM {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "dim {dim} exceeds the maximum sign-bitmap dimension {}",
+                ordvec_core::rank_io::MAX_SIGN_BITMAP_DIM
+            )));
+        }
+        Ok(Self {
+            inner: ordvec_core::SignBitmap::new(dim),
+        })
     }
 
     fn add(&mut self, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
         let arr = vectors.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -474,6 +575,7 @@ impl SignBitmap {
         m: usize,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
         let arr = query.as_array();
+        check_width(arr.len(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
                 "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -497,6 +599,7 @@ impl SignBitmap {
         m: usize,
     ) -> PyResult<Bound<'py, PyArray2<u32>>> {
         let arr = queries.as_array();
+        check_width(arr.ncols(), self.inner.dim())?;
         let batch = arr.nrows();
         let slice = arr.as_slice().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
