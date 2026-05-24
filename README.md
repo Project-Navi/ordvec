@@ -114,6 +114,11 @@ zero-system-dependency crate.
 is credited as the project it grew within, with thanks; ordvec's
 development history is in this repository's git log.
 
+## Acknowledgements
+
+Thanks to [@toadkicker](https://github.com/toadkicker) for the sign-cosine
+intuition and engineering polish.
+
 ## Contributing
 
 Contributions to the code, the docs, and the accompanying paper are all
