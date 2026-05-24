@@ -64,8 +64,7 @@ generation → `RankQuant` rerank) and the full mode comparison, see
   [`docs/RANK_MODES.md`](docs/RANK_MODES.md)
 - **API docs:** <https://docs.rs/ordvec> *(available after the first
   crates.io release)*
-- **Paper (OrdVec / RankQuant):** _link TBD — framing ordinal retrieval as
-  a third category peer to dense and sparse. Collaborators welcome (see
+- **Paper (OrdVec / RankQuant):** _link TBD. Collaborators welcome (see
   [Contributing](#contributing))._
 
 ## Reproducible benchmark

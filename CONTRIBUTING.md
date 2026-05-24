@@ -1,8 +1,7 @@
 # Contributing to ordvec
 
 Thanks for your interest! `ordvec` is a training-free ordinal & sign
-vector-quantization crate, and it underpins the OrdVec / RankQuant paper
-(ordinal retrieval as a third category peer to dense and sparse).
+vector-quantization crate, and it underpins the OrdVec / RankQuant paper.
 Contributions to the code, the docs, and the paper are all welcome.
 
 ## Ground rules
