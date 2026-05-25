@@ -135,30 +135,28 @@ def test_two_stage_rerank_recovers_top_neighbours():
         assert local_self in sub_indices[0].tolist()
 
 
-@pytest.mark.xfail(
-    reason="tie-break determinism — see docs/FOLLOWUP_BODY_KERNEL_TIE_BREAK.md"
-)
 def test_top_m_candidates_deterministic_across_repeated_calls():
-    # The body-kernel candidate selection uses `select_nth_unstable_by`
-    # on overlap score alone; ties at the cutoff can produce different
-    # selections across runs/dispatch paths. The fix is composite-key
-    # ordering (score desc, doc_id asc) — out of scope for this PR.
-    #
-    # The repeat-call form below currently surfaces stable results on
-    # the seeded data we have; the test exists to document the
-    # invariant we intend to guarantee post-fix and to fail loudly if
-    # cross-dispatch nondeterminism is introduced.
+    # Composite-key (score desc, doc_id asc) ordering makes candidate selection
+    # fully deterministic even when many docs tie on bitmap-overlap score. The
+    # fix landed in core (src/bitmap.rs) and is Rust-tested in
+    # tests/index/bitmap.rs::bitmap_top_m_candidates_deterministic_at_ties; this
+    # is the FFI-level regression guard. Small dim + small n_top so overlap
+    # scores collide heavily and the tie-break is actually exercised.
     idx = Bitmap(dim=64, n_top=8)
     idx.add(unit_vectors(500, 64, seed=0))
     q = unit_vectors(1, 64, seed=1)[0]
 
+    # Order-sensitive tuples: identical across repeated calls ⇒ deterministic
+    # *ordering*, not merely a deterministic set.
     runs = [tuple(idx.top_m_candidates(q, m=20).tolist()) for _ in range(5)]
-    # Forced to fail until the followup lands — composite-key ordering
-    # is the real invariant; equal across runs is a necessary subset.
-    assert len(set(runs)) == 1
-    # Stronger property — composite-key ordering — is what the fix
-    # actually guarantees. Until then, mark as expected failure.
-    raise AssertionError("composite-key ordering not yet implemented")
+    assert len(set(runs)) == 1, (
+        "repeated calls must return identical ordered candidates"
+    )
+
+    # Cross-check membership against search()'s top-m: both rank by the same
+    # composite key over the same overlap scores, so the sets must agree.
+    _, indices = idx.search(q.reshape(1, 64), k=20)
+    assert set(runs[0]) == {int(i) for i in indices[0].tolist()}
 
 
 def test_add_float64_is_rejected():
@@ -166,3 +164,120 @@ def test_add_float64_is_rejected():
     v64 = np.random.default_rng(0).standard_normal((4, 64)).astype(np.float64)
     with pytest.raises(TypeError):
         idx.add(v64)
+
+
+def test_dim_above_u16_max_rejected():
+    # dim = 65536 is a multiple of 64 but exceeds u16::MAX; the binding must
+    # reject it with a clean ValueError (mirrors the core Bitmap::new guard and
+    # the .tvbm loader cap) rather than defer to a Rust panic on add/search.
+    with pytest.raises(ValueError, match="u16 rank invariant"):
+        Bitmap(dim=65_536, n_top=256)
+
+
+def test_is_empty():
+    idx = Bitmap(dim=128, n_top=32)
+    assert idx.is_empty()
+    idx.add(unit_vectors(3, 128))
+    assert not idx.is_empty()
+
+
+def test_build_query_bitmap_fp32_shape_and_popcount():
+    idx = Bitmap(dim=128, n_top=32)
+    q = unit_vectors(1, 128, seed=5)[0]
+    qb = idx.build_query_bitmap_fp32(q)
+    assert qb.dtype == np.uint64
+    assert qb.shape == (128 // 64,)
+    # The query bitmap flags exactly n_top top coordinates.
+    assert sum(bin(int(w)).count("1") for w in qb) == 32
+
+
+def test_top_m_candidates_batched_matches_single_query():
+    vectors = unit_vectors(60, 128, seed=11)
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(vectors)
+    queries = unit_vectors(5, 128, seed=12)
+    batched = idx.top_m_candidates_batched(queries, m=10)
+    assert batched.shape == (5, 10)
+    assert batched.dtype == np.uint32
+    for bi in range(5):
+        np.testing.assert_array_equal(
+            batched[bi], idx.top_m_candidates(queries[bi], m=10)
+        )
+
+
+def test_top_m_candidates_batched_empty_keeps_column_count():
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(unit_vectors(20, 128))
+    empty = np.empty((0, 128), dtype=np.float32)
+    out = idx.top_m_candidates_batched(empty, m=10)
+    assert out.shape == (0, 10)
+    assert out.dtype == np.uint32
+
+
+def test_top_m_candidates_batched_chunked_matches_single_query():
+    vectors = unit_vectors(60, 128, seed=13)
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(vectors)
+    queries = unit_vectors(7, 128, seed=14)  # 7 rows, chunk 3 → non-aligned tail
+    chunked = idx.top_m_candidates_batched_chunked(queries, m=10, batch_size=3)
+    assert chunked.shape == (7, 10)
+    for bi in range(7):
+        np.testing.assert_array_equal(
+            chunked[bi], idx.top_m_candidates(queries[bi], m=10)
+        )
+
+
+def test_top_m_candidates_batched_chunked_rejects_zero_batch_size():
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(unit_vectors(20, 128))
+    q = unit_vectors(2, 128)
+    with pytest.raises(ValueError, match="batch_size"):
+        idx.top_m_candidates_batched_chunked(q, m=10, batch_size=0)
+
+
+def test_top_m_candidates_batched_chunked_huge_batch_size_does_not_panic():
+    # A batch_size far larger than the query count must not overflow
+    # batch_size*dim in the core; the binding clamps it to one chunk
+    # (result-transparent), so the output equals the unchunked batched call.
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(unit_vectors(30, 128))
+    queries = unit_vectors(4, 128, seed=21)
+    huge = idx.top_m_candidates_batched_chunked(queries, m=10, batch_size=10**18)
+    ref = idx.top_m_candidates_batched(queries, m=10)
+    np.testing.assert_array_equal(huge, ref)
+
+
+def test_body_overlap_scores_subset_matches_search_scores():
+    vectors = unit_vectors(50, 128, seed=15)
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(vectors)
+    q = unit_vectors(1, 128, seed=16)[0]
+    qb = idx.build_query_bitmap_fp32(q)
+    doc_ids = np.array([0, 5, 10, 42, 49], dtype=np.uint32)  # ascending, in range
+    scores = idx.body_overlap_scores_subset(qb, doc_ids)
+    assert scores.dtype == np.uint32
+    assert scores.shape == (5,)
+    # search() reports popcount(Q AND D) as the f32 score using the *same*
+    # query bitmap; the subset scan must reproduce that overlap exactly.
+    s_all, i_all = idx.search(q.reshape(1, 128), k=50)
+    score_by_doc = {int(d): float(s) for s, d in zip(s_all[0], i_all[0])}
+    for di, sc in zip(doc_ids.tolist(), scores.tolist()):
+        assert float(sc) == score_by_doc[di]
+
+
+def test_body_overlap_scores_subset_validates_inputs():
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(unit_vectors(10, 128))
+    q = unit_vectors(1, 128, seed=1)[0]
+    qb = idx.build_query_bitmap_fp32(q)
+    # Out-of-range doc id → IndexError.
+    with pytest.raises(IndexError):
+        idx.body_overlap_scores_subset(qb, np.array([0, 99], dtype=np.uint32))
+    # Non-ascending doc ids → ValueError.
+    with pytest.raises(ValueError, match="ascending"):
+        idx.body_overlap_scores_subset(qb, np.array([5, 1], dtype=np.uint32))
+    # Wrong q_bitmap length → ValueError.
+    with pytest.raises(ValueError, match="dim/64"):
+        idx.body_overlap_scores_subset(
+            np.zeros(1, dtype=np.uint64), np.array([0], dtype=np.uint32)
+        )

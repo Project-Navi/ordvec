@@ -36,6 +36,13 @@ def test_add_updates_length():
     assert idx.byte_size == 20 * idx.bytes_per_vec
 
 
+def test_is_empty():
+    idx = Rank(dim=64)
+    assert idx.is_empty()
+    idx.add(unit_vectors(3, 64))
+    assert not idx.is_empty()
+
+
 def test_add_is_incremental():
     idx = Rank(dim=64)
     idx.add(unit_vectors(10, 64, seed=1))

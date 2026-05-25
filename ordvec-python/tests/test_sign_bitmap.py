@@ -167,3 +167,21 @@ def test_various_dims_supported(dim):
     idx.add(unit_vectors(10, dim))
     assert idx.dim == dim
     assert idx.bytes_per_vec == dim // 8
+
+
+def test_is_empty():
+    idx = SignBitmap(dim=128)
+    assert idx.is_empty()
+    idx.add(unit_vectors(2, 128))
+    assert not idx.is_empty()
+
+
+def test_build_query_bitmap_shape_and_semantics():
+    # Parity with Rust SignBitmap::build_query_bitmap: bit j is set iff q[j] > 0.
+    idx = SignBitmap(dim=128)
+    q = np.arange(128, dtype=np.float32) - 64.0  # q[j] = j - 64
+    qb = idx.build_query_bitmap(q)
+    assert qb.dtype == np.uint64
+    assert qb.shape == (128 // 64,)
+    bits_set = sum(bin(int(w)).count("1") for w in qb)
+    assert bits_set == int((q > 0.0).sum())

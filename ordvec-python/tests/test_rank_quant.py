@@ -41,6 +41,13 @@ def test_add_updates_length(bits):
     assert idx.byte_size == 20 * idx.bytes_per_vec
 
 
+def test_is_empty():
+    idx = RankQuant(dim=128, bits=2)
+    assert idx.is_empty()
+    idx.add(unit_vectors(3, 128))
+    assert not idx.is_empty()
+
+
 @pytest.mark.parametrize("bits", [1, 2, 4])
 def test_search_shape(bits):
     idx = RankQuant(dim=128, bits=bits)
