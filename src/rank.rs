@@ -180,14 +180,17 @@ pub fn rankquant_bytes_per_vec(d: usize, bits: u8) -> usize {
 ///
 /// # Panics
 /// Panics if `bits > 7` (`1 << bits` would overflow the `u32` bin count
-/// and silently wrap in release). In debug builds also asserts
-/// `bucket < 1 << bits`; an out-of-range bucket yields a centre outside
-/// the symmetric range — a caller error rather than a hazard — so it is
-/// a `debug_assert` to keep the hot LUT-build loop branch-free in release.
+/// and silently wrap in release) or if `bucket >= 1 << bits`. The bucket
+/// guard fails loud in *every* build — like the sibling [`pack_buckets`]
+/// check — so a direct caller cannot silently receive a centre outside
+/// the symmetric range. The internal LUT builders only ever pass
+/// `bucket ∈ [0, 1 << bits)` (the loop bound *is* `1 << bits`), so the
+/// assert never trips on the hot path and is dominated by the doc scan
+/// regardless.
 #[inline]
 pub fn bucket_centre(bucket: u8, bits: u8) -> f32 {
     assert!(bits <= 7, "bits too large");
-    debug_assert!(
+    assert!(
         (bucket as u32) < (1u32 << bits),
         "bucket {bucket} out of range for bits = {bits}",
     );
@@ -616,6 +619,15 @@ mod tests {
         // bits >= 32 overflows `1 << bits`; the guard caps at 7 (the u8
         // bucket domain), matching `rank_to_bucket`.
         let _ = bucket_centre(0, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range for bits")]
+    fn bucket_centre_rejects_out_of_range_bucket() {
+        // bucket 4 at bits=2 is outside [0, 4). The guard now fails loud in
+        // release too (was debug-only), matching pack_buckets and the Python
+        // wrapper — otherwise the caller silently gets a centre of +2.5.
+        let _ = bucket_centre(4, 2);
     }
 
     #[test]

@@ -1076,6 +1076,16 @@ fn rankquant_bytes_per_vec(d: usize, bits: u8) -> PyResult<usize> {
 #[pyfunction]
 fn bucket_centre(bucket: u8, bits: u8) -> PyResult<f32> {
     check_bits_max7(bits)?;
+    // Mirror the core's bucket-range guard as a typed ValueError. The core
+    // hard-asserts `bucket < 1 << bits` in every build, so without this
+    // pre-check a Python caller would get a PanicException instead of a clean
+    // error. Matches the analogous out-of-range guard in `pack_buckets`.
+    let n_buckets = 1u16 << bits;
+    if (bucket as u16) >= n_buckets {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "bucket {bucket} out of range [0, {n_buckets}) for bits = {bits}"
+        )));
+    }
     Ok(ordvec_core::rank::bucket_centre(bucket, bits))
 }
 
