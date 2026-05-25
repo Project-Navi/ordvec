@@ -978,6 +978,15 @@ fn bucket_ranks<'py>(
             "array must be C-contiguous; call np.ascontiguousarray() first",
         )
     })?;
+    // Empty input maps to empty output. The core `bucket_ranks` already returns
+    // an empty Vec here (its `map` never invokes `rank_to_bucket`, so the latter's
+    // `d > 0` assert is unreachable on empty input), but make the empty -> empty
+    // contract explicit at the boundary: the d == 0 case never reaches the core,
+    // so the no-panic guarantee is local and obvious rather than relying on the
+    // core's iterator short-circuit.
+    if slice.is_empty() {
+        return Ok(Vec::<u8>::new().into_pyarray(py));
+    }
     Ok(ordvec_core::rank::bucket_ranks(slice, bits).into_pyarray(py))
 }
 
