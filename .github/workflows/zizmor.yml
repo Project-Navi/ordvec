@@ -1,0 +1,34 @@
+name: zizmor
+
+# Static security audit of the GitHub Actions workflows themselves — action
+# pinning, token permissions, template injection, credential persistence. This
+# locks in the supply-chain hardening: a future PR that adds an unpinned action,
+# a broad GITHUB_TOKEN, or a credential-persisting checkout fails here. Run
+# offline + version-pinned so the gate is deterministic.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: zizmor (workflow security audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Install zizmor (pinned)
+        run: pip install zizmor==1.25.2
+      - name: Audit workflows
+        run: zizmor --offline --persona=regular .github/workflows/
