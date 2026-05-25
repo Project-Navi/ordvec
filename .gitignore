@@ -18,3 +18,24 @@
 # in CONTRIBUTING.md.
 /CLAUDE.md
 /.claude/
+
+# Coverage output (cargo-llvm-cov / Codecov).
+lcov.info
+*.profraw
+*.profdata
+
+# Browser-automation session artifacts (Playwright MCP).
+/.playwright-mcp/
+
+# Python build/test artifacts (ordvec-python).
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Editor / OS cruft.
+.DS_Store
+.idea/
+.vscode/

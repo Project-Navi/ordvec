@@ -5,6 +5,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](#minimum-supported-rust-version)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Fieldnote-Echo/ordvec/badge)](https://scorecard.dev/viewer/?uri=github.com/Fieldnote-Echo/ordvec)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12977/badge)](https://www.bestpractices.dev/projects/12977)
+[![codecov](https://codecov.io/gh/Fieldnote-Echo/ordvec/graph/badge.svg)](https://codecov.io/gh/Fieldnote-Echo/ordvec)
 
 <!-- Add at the first crates.io release:
 [![Crates.io](https://img.shields.io/crates/v/ordvec.svg)](https://crates.io/crates/ordvec)
