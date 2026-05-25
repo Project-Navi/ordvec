@@ -124,7 +124,7 @@ jobs:
         # `-p`; package scoping is via --manifest-path against the root manifest,
         # which is the `ordvec` package.
         run: |
-          cargo install cargo-cyclonedx --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --manifest-path Cargo.toml --format json
       - name: Attest build provenance for the .crate
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0

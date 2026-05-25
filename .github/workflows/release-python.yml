@@ -123,7 +123,7 @@ jobs:
       # provides cargo.
       - name: Install cargo-cyclonedx
         shell: bash
-        run: cargo install cargo-cyclonedx --locked
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
       - name: Generate CycloneDX SBOM for the binding crate
         shell: bash
         run: cargo cyclonedx --manifest-path ordvec-python/Cargo.toml --format json
@@ -132,6 +132,7 @@ jobs:
         with:
           name: sbom-python
           path: ordvec-python/ordvec-python.cdx.json
+          if-no-files-found: error
 
   require-ci-green:
     # The wheel must not ship from a commit whose core (`ci.yml`) or binding
