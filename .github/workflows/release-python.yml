@@ -88,9 +88,39 @@ jobs:
           name: sdist
           path: ordvec-python/dist
 
+  require-ci-green:
+    # The wheel must not ship from a commit whose core (`ci.yml`) or binding
+    # (`python.yml`) matrices have not gone green. The build-wheels job above
+    # builds + pytest-checks each platform wheel, but it does not cover the core
+    # crate's gates or the binding's full OS/Python matrix and lint. Require
+    # both workflows to have concluded `success` for this exact SHA.
+    name: require core + binding CI green for this commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: assert ci.yml and python.yml are green for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for wf in ci.yml python.yml; do
+            conclusion="$(gh api \
+              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&per_page=1" \
+              --jq '.workflow_runs[0].conclusion // "missing"')"
+            echo "${wf} conclusion for ${SHA}: ${conclusion}"
+            if [ "${conclusion}" != "success" ]; then
+              echo "::error::${wf} is not green for ${SHA} (got: ${conclusion}). Push to main, let CI pass, then re-run this release."
+              exit 1
+            fi
+          done
+
   publish:
     name: publish to PyPI
-    needs: [build-wheels, build-sdist]
+    needs: [build-wheels, build-sdist, require-ci-green]
     runs-on: ubuntu-latest
     environment:
       name: pypi

@@ -39,9 +39,39 @@ jobs:
       - name: Dry-run the publish (packaging + metadata + verify build)
         run: cargo publish -p ordvec --locked --dry-run
 
+  require-ci-green:
+    # A manual release dispatch must not ship a commit whose full CI matrix has
+    # not gone green. The `verify` job above re-runs tests + the publish
+    # dry-run, but it does NOT cover lint, the no-default/experimental configs,
+    # MSRV 1.89, the deps + cargo-deny supply-chain gates, or the AVX-512-SDE /
+    # wasm-simd128 runtime coverage. Rather than duplicate (and drift from) all
+    # of ci.yml, require that the `ci` workflow concluded `success` for this
+    # exact SHA before publish runs.
+    name: require full CI green for this commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: assert ci.yml is green for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          conclusion="$(gh api \
+            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "missing"')"
+          echo "ci.yml conclusion for ${SHA}: ${conclusion}"
+          if [ "${conclusion}" != "success" ]; then
+            echo "::error::ci.yml is not green for ${SHA} (got: ${conclusion}). Push to main, let CI pass, then re-run this release."
+            exit 1
+          fi
+
   publish:
     name: publish to crates.io
-    needs: verify
+    needs: [verify, require-ci-green]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:

@@ -134,6 +134,23 @@ jobs:
         run: cargo publish -p ordvec --dry-run --locked
 
   # ----------------------------------------------------------------------
+  # Supply-chain policy gate. The `deps` job's cargo-tree grep is a coarse
+  # "no BLAS/ndarray/faer" guard; this job enforces the fine-grained, auditable
+  # policy in deny.toml — RUSTSEC advisories, the license allow-list, banned /
+  # wildcard / duplicate crates, and the crates.io-only source allow-list —
+  # over the whole workspace graph (the binding's pyo3/numpy/ndarray deps
+  # included). Fails the build on a new advisory or a non-allow-listed license.
+  # ----------------------------------------------------------------------
+  deny:
+    name: cargo-deny (advisories + licenses + bans + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # ----------------------------------------------------------------------
   # AVX-512 coverage via Intel SDE. GitHub-hosted runners lack AVX-512, so we
   # run the compiled test binaries under SDE emulating Sapphire Rapids (-spr:
   # AVX-512 F/BW/VL/DQ + VPOPCNTDQ). Setting CARGO_TARGET_..._RUNNER makes
