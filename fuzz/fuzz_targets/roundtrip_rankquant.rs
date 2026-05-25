@@ -6,8 +6,11 @@
 //! via `RankQuant::write`). It exercises the write path the loader targets
 //! cannot reach.
 //!
-//! Contract: `write` then `load` must succeed and round-trip; failing to reload
-//! self-produced output is a crash.
+//! Contract: `write` of a validly-built index, then `load`, must succeed and
+//! round-trip; a write failure OR a failure to reload self-produced output is a
+//! crash. The index is written to a fresh path inside a tempdir — not an
+//! already-open `NamedTempFile` handle, which a reopen-by-path write can fail to
+//! overwrite on some platforms.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -39,14 +42,13 @@ fuzz_target!(|data: &[u8]| {
     let mut idx = RankQuant::new(DIM, bits);
     idx.add(&vecs);
 
-    let tmp = match tempfile::NamedTempFile::new() {
-        Ok(t) => t,
+    let dir = match tempfile::tempdir() {
+        Ok(d) => d,
         Err(_) => return,
     };
-    if idx.write(tmp.path()).is_err() {
-        return;
-    }
-    let reloaded = RankQuant::load(tmp.path()).expect("write output must reload (round-trip)");
+    let path = dir.path().join("roundtrip.tvrq");
+    idx.write(&path).expect("write of a validly-built index must succeed");
+    let reloaded = RankQuant::load(&path).expect("write output must reload (round-trip)");
     assert_eq!(reloaded.dim(), idx.dim());
     assert_eq!(reloaded.len(), idx.len());
 });
