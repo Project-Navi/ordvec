@@ -52,10 +52,14 @@ pub const MAX_DIM: usize = u16::MAX as usize;
 /// `1 << 24 = 16_777_216` — comfortably above any realistic embedding
 /// dimensionality while bounded well within usize math.
 pub const MAX_SIGN_BITMAP_DIM: usize = 1 << 24;
-/// Largest accepted `n_vectors` from a loaded file. 64 M docs at
-/// `dim=u16::MAX` (128 KiB / vec for u16 ranks) tops out at ~8 TiB,
-/// well past any sane on-disk index. Chosen to fail loud before
-/// allocation panics.
+/// Largest accepted `n_vectors` — a document *count* cap. 64 M docs at
+/// `dim=u16::MAX` (128 KiB / vec for u16 ranks) tops out at ~8 TiB, well
+/// past any sane on-disk index. Chosen to fail loud before allocation
+/// panics. The total *byte payload* is bounded independently by the 128 GiB
+/// `MAX_PAYLOAD` cap (see `check_payload_bytes`), enforced symmetrically on
+/// both the load and write paths — so an index whose `dim * n_vectors`
+/// payload exceeds it cannot be persisted even when `n_vectors` is within
+/// this cap.
 pub const MAX_VECTORS: usize = 64 * 1024 * 1024;
 
 fn invalid<S: Into<String>>(msg: S) -> io::Error {
@@ -175,10 +179,13 @@ fn check_n_vectors(n_vectors: usize) -> io::Result<()> {
 
 fn check_payload_bytes(payload_bytes: usize) -> io::Result<()> {
     // 128 GiB hard cap — refuses absurd allocations from a corrupt
-    // header even if dim and n_vectors individually pass. Typed `u64`
-    // (not `usize`) so the literal doesn't overflow const-eval on 32-bit
-    // targets (wasm32, armv7), where `usize::MAX` (~4 GiB) is already the
-    // ceiling and the widened comparison simply never trips.
+    // header even if dim and n_vectors individually pass. Called on BOTH
+    // paths: on load (against a possibly-forged header) and on write (so the
+    // library never emits a file it would then refuse to load — write/load
+    // symmetry, cf. `check_sign_bitmap_dim`). Typed `u64` (not `usize`) so the
+    // literal doesn't overflow const-eval on 32-bit targets (wasm32, armv7),
+    // where `usize::MAX` (~4 GiB) is already the ceiling and the widened
+    // comparison simply never trips.
     const MAX_PAYLOAD: u64 = 128 * 1024 * 1024 * 1024;
     if payload_bytes as u64 > MAX_PAYLOAD {
         return Err(invalid(format!(
@@ -200,7 +207,15 @@ pub fn write_rank(
     n_vectors: usize,
     ranks: &[u16],
 ) -> io::Result<()> {
-    assert_eq!(ranks.len(), n_vectors * dim);
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create: write/load
+    // must be symmetric (never emit a file load_rank would reject), and the
+    // check must not truncate an existing file on failure. Mirrors load_rank.
+    let payload_bytes = n_vectors
+        .checked_mul(dim)
+        .and_then(|x| x.checked_mul(2))
+        .ok_or_else(|| invalid("payload size overflows usize"))?;
+    check_payload_bytes(payload_bytes)?;
+    assert_eq!(ranks.len(), payload_bytes / 2);
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TVR_MAGIC)?;
     f.write_all(&[VERSION])?;
@@ -295,8 +310,16 @@ pub fn write_rankquant(
     n_vectors: usize,
     packed: &[u8],
 ) -> io::Result<()> {
-    let expected = n_vectors * dim * bits as usize / 8;
-    assert_eq!(packed.len(), expected);
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (symmetric
+    // write/load; no truncation on a rejected write). Mirrors load_rankquant:
+    // checked multiply before the /8 divide.
+    let payload_bytes = n_vectors
+        .checked_mul(dim)
+        .and_then(|x| x.checked_mul(bits as usize))
+        .map(|x| x / 8)
+        .ok_or_else(|| invalid("payload size overflows usize"))?;
+    check_payload_bytes(payload_bytes)?;
+    assert_eq!(packed.len(), payload_bytes);
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TVRQ_MAGIC)?;
     f.write_all(&[VERSION])?;
@@ -412,7 +435,14 @@ pub fn write_bitmap(
     bitmaps: &[u64],
 ) -> io::Result<()> {
     let qpv = dim / 64;
-    assert_eq!(bitmaps.len(), n_vectors * qpv);
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (symmetric
+    // write/load; no truncation on a rejected write). Mirrors load_bitmap.
+    let payload_bytes = n_vectors
+        .checked_mul(qpv)
+        .and_then(|x| x.checked_mul(8))
+        .ok_or_else(|| invalid("payload size overflows usize"))?;
+    check_payload_bytes(payload_bytes)?;
+    assert_eq!(bitmaps.len(), payload_bytes / 8);
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TVBM_MAGIC)?;
     f.write_all(&[VERSION])?;
@@ -507,7 +537,14 @@ pub fn write_sign_bitmap(
     bitmaps: &[u64],
 ) -> io::Result<()> {
     let qpv = dim / 64;
-    assert_eq!(bitmaps.len(), n_vectors * qpv);
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (symmetric
+    // write/load; no truncation on a rejected write). Mirrors load_sign_bitmap.
+    let payload_bytes = n_vectors
+        .checked_mul(qpv)
+        .and_then(|x| x.checked_mul(8))
+        .ok_or_else(|| invalid("payload size overflows usize"))?;
+    check_payload_bytes(payload_bytes)?;
+    assert_eq!(bitmaps.len(), payload_bytes / 8);
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(TVSB_MAGIC)?;
     f.write_all(&[VERSION])?;

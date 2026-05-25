@@ -68,7 +68,8 @@ impl Bitmap {
     /// Panics if the index would grow beyond `rank_io::MAX_VECTORS` documents
     /// — the supported capacity. Candidate APIs materialise document IDs as
     /// `u32`; `MAX_VECTORS` sits well below `u32::MAX` and matches the on-disk
-    /// loader cap, so a built index always round-trips through `write`/`load`.
+    /// loader's `n_vectors` ceiling. (Bounds the count, not the byte payload —
+    /// see the loaders' separate `MAX_PAYLOAD` cap.)
     pub fn add(&mut self, vectors: &[f32]) {
         let n = vectors.len() / self.dim;
         assert_eq!(vectors.len(), n * self.dim);

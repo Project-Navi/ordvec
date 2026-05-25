@@ -30,12 +30,14 @@ pub(crate) fn result_buffer_len(nq: usize, k: usize) -> usize {
 ///
 /// The on-disk loaders cap `n_vectors` at `MAX_VECTORS` (64 Mi); the four
 /// in-memory growth paths (`Rank` / `RankQuant` / `Bitmap` / `SignBitmap`
-/// `add`) share this guard so a built index always round-trips through
-/// `write` / `load`. Candidate APIs also materialise document IDs as `u32`,
-/// and `MAX_VECTORS` sits well below `u32::MAX`, so every emitted ID stays
-/// representable. Fails loud (panic) on overflow — matching `add`'s other
-/// contract asserts — rather than silently wrapping into a truncated ID
-/// space (issue #25).
+/// `add`) share this guard so the in-memory count never exceeds the loaders'
+/// `n_vectors` ceiling. Candidate APIs also materialise document IDs as
+/// `u32`, and `MAX_VECTORS` sits well below `u32::MAX`, so every emitted ID
+/// stays representable. Fails loud (panic) on overflow — matching `add`'s
+/// other contract asserts — rather than silently wrapping into a truncated
+/// ID space (issue #25). Note: this bounds the document *count*, not the
+/// total payload — the loaders' separate `MAX_PAYLOAD` byte cap is an
+/// independent (load-side) defence.
 #[inline]
 pub(crate) fn checked_new_len(current: usize, adding: usize) -> usize {
     let new_n = current
