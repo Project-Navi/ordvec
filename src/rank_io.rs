@@ -233,15 +233,37 @@ pub fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u16>)>
     // intermediate was an infallible (abort-on-OOM) allocation that also
     // doubled peak memory.
     let ranks = read_le_vec(&mut f, payload_bytes / 2, u16::from_le_bytes)?;
-    // Every stored rank must be a valid coordinate index in `[0, dim)`.
-    // An out-of-range value is not an OOB read here (it indexes a
-    // per-query LUT sized to `dim` downstream) but silently corrupts the
-    // Spearman score, so reject it at the loader boundary rather than
-    // surfacing as a wrong-but-not-crashing result.
-    if ranks.iter().any(|&r| (r as usize) >= dim) {
-        return Err(invalid(format!(
-            "TVR1 rank value >= dim ({dim}); ranks must be a permutation of [0, dim)"
-        )));
+    // Each stored document must be a *permutation* of `[0, dim)`, not merely
+    // bounded by `dim`. The scoring math (`rank_norm`) assumes a permutation:
+    // a non-permutation row (all-zero, or with repeats) passes a bound check
+    // but silently corrupts the Spearman score. Verify each row is a bijection
+    // of `[0, dim)` at the loader boundary so a forged or corrupted file fails
+    // loud instead of returning a wrong-but-not-crashing result.
+    //
+    // O(dim) per row with a reusable O(dim) stamp buffer: `seen[v]` holds the
+    // 1-based index of the row that last wrote `v`, so `v` is a duplicate
+    // within the current row iff `seen[v] == stamp` — no per-row re-zeroing.
+    // `n_vectors <= MAX_VECTORS` (<< u32::MAX), so the stamp never overflows or
+    // collides with the `0 = unseen` sentinel. A row of exactly `dim` values
+    // that are all `< dim` and all distinct is necessarily a permutation
+    // (pigeonhole), so the bound + duplicate checks together prove it.
+    let mut seen = vec![0u32; dim];
+    for (row_idx, row) in ranks.chunks_exact(dim).enumerate() {
+        let stamp = row_idx as u32 + 1;
+        for &r in row {
+            let ri = r as usize;
+            if ri >= dim {
+                return Err(invalid(format!(
+                    "TVR1 rank value {r} >= dim ({dim}); ranks must be a permutation of [0, dim)"
+                )));
+            }
+            if seen[ri] == stamp {
+                return Err(invalid(format!(
+                    "TVR1 row {row_idx} is not a permutation of [0, dim): value {r} repeats"
+                )));
+            }
+            seen[ri] = stamp;
+        }
     }
     Ok((dim, n_vectors, ranks))
 }
@@ -331,6 +353,34 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
     check_payload_fits_file(&mut f, file_len, payload_bytes)?;
     let mut packed = try_alloc_zeroed(payload_bytes)?;
     f.read_exact(&mut packed)?;
+    // Constant-composition invariant: every document must place exactly
+    // `dim / 2^bits` coordinates in each of the `2^bits` buckets. The
+    // analytical `rankquant_norm` depends on this exact composition, so a
+    // forged buffer with valid shape and in-range codes but skewed bucket
+    // counts would silently corrupt every score. Histogram the unpacked codes
+    // per row (MSB-first packing, matching `rank::pack_buckets`) and reject any
+    // document whose composition is not uniform.
+    let bytes_per_row = dim / codes_per_byte;
+    let expected_per_bucket = dim / n_buckets;
+    let mask = (1u8 << bits) - 1;
+    let bits_u = bits as usize;
+    for (row_idx, row) in packed.chunks_exact(bytes_per_row).enumerate() {
+        let mut hist = [0usize; 16]; // n_buckets <= 2^4 = 16
+        for &byte in row {
+            for slot in 0..codes_per_byte {
+                let shift = (codes_per_byte - 1 - slot) * bits_u;
+                hist[((byte >> shift) & mask) as usize] += 1;
+            }
+        }
+        for (bucket, &count) in hist[..n_buckets].iter().enumerate() {
+            if count != expected_per_bucket {
+                return Err(invalid(format!(
+                    "TVRQ row {row_idx} violates constant composition: bucket {bucket} \
+                     has {count} codes, expected {expected_per_bucket} (= dim / 2^bits)"
+                )));
+            }
+        }
+    }
     Ok((bits, dim, n_vectors, packed))
 }
 
@@ -406,6 +456,19 @@ pub fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, V
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.
     let bitmaps = read_le_vec(&mut f, payload_bytes / 8, u64::from_le_bytes)?;
+    // Constant-composition invariant: every document bitmap must have exactly
+    // `n_top` bits set (it flags the document's top `n_top` coordinates). The
+    // hypergeometric null model and the documented `[0, n_top]` score range
+    // both assume this, so a forged row with valid shape but a different
+    // popcount would break both. Verify per-row popcount at the boundary.
+    for (row_idx, row) in bitmaps.chunks_exact(qpv).enumerate() {
+        let pop: u32 = row.iter().map(|w| w.count_ones()).sum();
+        if pop as usize != n_top {
+            return Err(invalid(format!(
+                "TVBM row {row_idx} has {pop} bits set, expected n_top = {n_top}"
+            )));
+        }
+    }
     Ok((dim, n_top, n_vectors, bitmaps))
 }
 
@@ -490,5 +553,10 @@ pub fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.
     let bitmaps = read_le_vec(&mut f, payload_bytes / 8, u64::from_le_bytes)?;
+    // No per-row composition invariant exists for sign bitmaps: a document is
+    // `bit j = (coord_j > 0)`, so *any* bit pattern is a valid document (unlike
+    // Rank's permutation or Bitmap/RankQuant's constant-composition rules). The
+    // structural validation above (magic, version, dim, n_vectors, payload
+    // length) is therefore complete for this format — nothing further to verify.
     Ok((dim, n_vectors, bitmaps))
 }
