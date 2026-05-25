@@ -62,9 +62,9 @@ clean_line="$(printf '%s\n' "$job" | awk '
   { is_comment = ($0 ~ /^[[:space:]]*#/) }
   in_block {
     if ($0 ~ /^[[:space:]]*$/) next                  # blank line stays in block
-    if (indent($0) > block_indent && !is_comment) {  # block content
-      if ($0 ~ del) { print NR; exit }
-      next
+    if (indent($0) > block_indent) {                 # block content (incl. shell # lines,
+      if (!is_comment && $0 ~ del) { print NR; exit } # which are literal text here, not
+      next                                            # YAML comments — stay in the block)
     }
     in_block = 0                                      # dedent ends block; re-test line
   }
