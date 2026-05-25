@@ -30,7 +30,7 @@ all-features = false
 
 [dependencies]
 rayon = "1.10"
-ordered-float = "4"
+ordered-float = "5"
 
 [dev-dependencies]
 # Test/bench corpora are seeded with these; not needed by the library.
