@@ -81,3 +81,25 @@ Changelog and release notes are generated with
 
 By contributing, you agree that your contributions are dual-licensed under
 **MIT OR Apache-2.0**, matching the project.
+
+## Developer Certificate of Origin (DCO)
+
+All contributions must be signed off under the
+[Developer Certificate of Origin](./DCO) (DCO 1.1) — signing off certifies that
+you wrote the change, or otherwise have the right to submit it under the
+project's license. Add a sign-off line to every commit with:
+
+```sh
+git commit -s
+```
+
+which appends a trailer using your `git config` identity:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+A DCO check runs on every pull request, so commits missing a valid
+`Signed-off-by` will be flagged. To fix a commit you already made, use
+`git commit --amend -s`; to sign off a range, `git rebase --signoff <base>`.
+(This is separate from commit *signing* — `git commit -s -S` does both.)
