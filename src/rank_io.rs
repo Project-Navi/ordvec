@@ -20,11 +20,12 @@
 //!
 //! All loaders validate header fields *before* allocating the payload
 //! buffer:
-//! * `dim` and `n_vectors` are bounded by [`MAX_DIM`] and [`MAX_VECTORS`]
-//!   (chosen so a worst-case index fits in 128 GiB).
+//! * `dim` and `n_vectors` are bounded by [`MAX_DIM`] and [`MAX_VECTORS`].
 //! * `bits` is checked against `{1, 2, 4}` before any multiplication.
 //! * Total payload size is computed via [`usize::checked_mul`] and
-//!   rejected if it overflows.
+//!   rejected if it overflows or exceeds the 128 GiB `MAX_PAYLOAD` cap.
+//!   (`MAX_DIM * MAX_VECTORS` alone is ~8 TiB, so `MAX_PAYLOAD` is the
+//!   binding byte ceiling, not the `dim` / `n_vectors` caps.)
 //! * The declared payload must match the file's remaining bytes
 //!   *exactly* — a structurally-valid file with trailing bytes is
 //!   rejected (v1 formats have no footer or reserved trailing section).
@@ -32,6 +33,23 @@
 //!   are returned as `Err(InvalidData)`, never `assert!`'d.
 //!
 //! Any malformed input returns `io::Error` rather than panicking.
+//!
+//! # Round-trip contract
+//!
+//! Write/load round-trip is a guarantee of the **index types**, not of the
+//! raw `write_*` functions. [`Rank`](crate::Rank) /
+//! [`RankQuant`](crate::RankQuant) / [`Bitmap`](crate::Bitmap) /
+//! [`SignBitmap`](crate::SignBitmap) validate their parameters at
+//! construction (matching the loaders' `dim` / `n_top` / `bits` /
+//! divisibility bounds), cap `n_vectors` at [`MAX_VECTORS`] on `add`, and
+//! emit only loader-valid data — so anything `T::write` produces, `T::load`
+//! reloads. The low-level `write_*` free functions are **trusted
+//! serializers**: they assume the caller passes loader-valid inputs (as the
+//! index types do) and do *not* independently re-validate `dim` /
+//! `n_vectors` / structure / data semantics. The 128 GiB `MAX_PAYLOAD` cap
+//! is the one loader bound they also enforce (checked before `File::create`,
+//! so a rejected oversized write never truncates an existing file) —
+//! defense-in-depth, not a substitute for constructing via the index types.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
@@ -56,10 +74,9 @@ pub const MAX_SIGN_BITMAP_DIM: usize = 1 << 24;
 /// `dim=u16::MAX` (128 KiB / vec for u16 ranks) tops out at ~8 TiB, well
 /// past any sane on-disk index. Chosen to fail loud before allocation
 /// panics. The total *byte payload* is bounded independently by the 128 GiB
-/// `MAX_PAYLOAD` cap (see `check_payload_bytes`), enforced symmetrically on
-/// both the load and write paths — so an index whose `dim * n_vectors`
-/// payload exceeds it cannot be persisted even when `n_vectors` is within
-/// this cap.
+/// `MAX_PAYLOAD` cap (see `check_payload_bytes`), which both the load and
+/// write paths enforce — so an index whose `dim * n_vectors` payload exceeds
+/// it cannot be persisted even when `n_vectors` is within this cap.
 pub const MAX_VECTORS: usize = 64 * 1024 * 1024;
 
 fn invalid<S: Into<String>>(msg: S) -> io::Error {
@@ -180,12 +197,14 @@ fn check_n_vectors(n_vectors: usize) -> io::Result<()> {
 fn check_payload_bytes(payload_bytes: usize) -> io::Result<()> {
     // 128 GiB hard cap — refuses absurd allocations from a corrupt
     // header even if dim and n_vectors individually pass. Called on BOTH
-    // paths: on load (against a possibly-forged header) and on write (so the
-    // library never emits a file it would then refuse to load — write/load
-    // symmetry, cf. `check_sign_bitmap_dim`). Typed `u64` (not `usize`) so the
-    // literal doesn't overflow const-eval on 32-bit targets (wasm32, armv7),
-    // where `usize::MAX` (~4 GiB) is already the ceiling and the widened
-    // comparison simply never trips.
+    // paths: on load (against a possibly-forged header) and on write as
+    // defense-in-depth (the catastrophic unloadable-file case is an oversized
+    // payload; checking before File::create also avoids truncating an existing
+    // file). This is the only loader bound the raw `write_*` share — full
+    // round-trip is a type-level guarantee (see module docs). Typed `u64` (not
+    // `usize`) so the literal doesn't overflow const-eval on 32-bit targets
+    // (wasm32, armv7), where `usize::MAX` (~4 GiB) is already the ceiling and
+    // the widened comparison simply never trips.
     const MAX_PAYLOAD: u64 = 128 * 1024 * 1024 * 1024;
     if payload_bytes as u64 > MAX_PAYLOAD {
         return Err(invalid(format!(
@@ -207,9 +226,9 @@ pub fn write_rank(
     n_vectors: usize,
     ranks: &[u16],
 ) -> io::Result<()> {
-    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create: write/load
-    // must be symmetric (never emit a file load_rank would reject), and the
-    // check must not truncate an existing file on failure. Mirrors load_rank.
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create so a rejected
+    // oversized write never truncates an existing file. Defense-in-depth; the
+    // round-trip guarantee is type-level (see module docs). Mirrors load_rank.
     let payload_bytes = n_vectors
         .checked_mul(dim)
         .and_then(|x| x.checked_mul(2))
@@ -310,9 +329,9 @@ pub fn write_rankquant(
     n_vectors: usize,
     packed: &[u8],
 ) -> io::Result<()> {
-    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (symmetric
-    // write/load; no truncation on a rejected write). Mirrors load_rankquant:
-    // checked multiply before the /8 divide.
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
+    // depth; a rejected write must not truncate an existing file). Mirrors
+    // load_rankquant: checked multiply before the /8 divide.
     let payload_bytes = n_vectors
         .checked_mul(dim)
         .and_then(|x| x.checked_mul(bits as usize))
@@ -435,8 +454,9 @@ pub fn write_bitmap(
     bitmaps: &[u64],
 ) -> io::Result<()> {
     let qpv = dim / 64;
-    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (symmetric
-    // write/load; no truncation on a rejected write). Mirrors load_bitmap.
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
+    // depth; a rejected write must not truncate an existing file). Mirrors
+    // load_bitmap.
     let payload_bytes = n_vectors
         .checked_mul(qpv)
         .and_then(|x| x.checked_mul(8))
@@ -537,8 +557,9 @@ pub fn write_sign_bitmap(
     bitmaps: &[u64],
 ) -> io::Result<()> {
     let qpv = dim / 64;
-    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (symmetric
-    // write/load; no truncation on a rejected write). Mirrors load_sign_bitmap.
+    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
+    // depth; a rejected write must not truncate an existing file). Mirrors
+    // load_sign_bitmap.
     let payload_bytes = n_vectors
         .checked_mul(qpv)
         .and_then(|x| x.checked_mul(8))
