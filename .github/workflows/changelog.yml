@@ -10,17 +10,19 @@ name: changelog
 # check before they go public (this repo holds a fiction-free, publishable-grade
 # bar). Drop `--draft` below once you trust the output.
 #
-# Pre-release tags (e.g. v0.3.0-rc.1) intentionally do NOT match the filter.
+# The `v*.*.*` trigger matches any 3-part v-tag (multi-digit included); the
+# job-level `if` guard below then skips pre-release tags (e.g. v0.3.0-rc.1), so
+# only stable vMAJOR.MINOR.PATCH releases produce notes.
 #
 # Injection-safety: the only external value used in a run: step is the tag name,
-# consumed as the quoted runner env var "$GITHUB_REF_NAME" (never via a
-# ${{ ... }} expansion), and the trigger filter is anchored to a numeric SemVer
-# shape so a crafted tag name cannot match.
+# bound to the `TAG_NAME` env var from `github.ref_name` and used as the quoted
+# "$TAG_NAME" (never interpolated into the run: script), so a crafted tag name
+# cannot break out of the command.
 
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v*.*.*"
 
 concurrency:
   group: changelog-${{ github.ref }}
@@ -33,6 +35,9 @@ jobs:
   release-notes:
     name: release notes (git-cliff)
     runs-on: ubuntu-latest
+    # The `v*.*.*` trigger also matches pre-release tags; skip anything with a
+    # hyphen (v0.3.0-rc.1, ...) so only stable releases get release notes.
+    if: ${{ !contains(github.ref_name, '-') }}
     steps:
       # actions/checkout v4.3.1, SHA-pinned — a contents:write job pins ALL
       # tooling to immutable refs (no mutable tags), git-cliff-action included.
