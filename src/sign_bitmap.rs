@@ -444,14 +444,14 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     const D: usize = 256;
 
     fn make_corpus(seed: u64, n: usize) -> Vec<f32> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        (0..n * D).map(|_| rng.gen_range(-1.0..1.0)).collect()
+        (0..n * D).map(|_| rng.random_range(-1.0..1.0)).collect()
     }
 
     fn scalar_hamming(q: &[u64], d: &[u64]) -> u32 {
@@ -498,7 +498,7 @@ mod tests {
         let mut idx = SignBitmap::new(D);
         idx.add(&corpus);
         let mut rng = ChaCha8Rng::seed_from_u64(11);
-        let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
         let candidates = idx.top_m_candidates(&query, 10);
         assert_eq!(candidates.len(), 10);
         // Recompute Hamming distance for each returned candidate and
@@ -525,7 +525,9 @@ mod tests {
         idx.add(&corpus);
         let mut rng = ChaCha8Rng::seed_from_u64(99);
         let batch: usize = 5;
-        let queries: Vec<f32> = (0..batch * D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let queries: Vec<f32> = (0..batch * D)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
         for m in [10usize, 30, 100] {
             let single: Vec<Vec<u32>> = (0..batch)
                 .map(|bi| idx.top_m_candidates(&queries[bi * D..(bi + 1) * D], m))
@@ -552,7 +554,9 @@ mod tests {
         const BIG_D: usize = 65_536; // u16::MAX + 1 — the smallest dim above the old cap
         let n = 4;
         let mut rng = ChaCha8Rng::seed_from_u64(41);
-        let corpus: Vec<f32> = (0..n * BIG_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let corpus: Vec<f32> = (0..n * BIG_D)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
         let mut original = SignBitmap::new(BIG_D);
         original.add(&corpus);
 
@@ -586,7 +590,7 @@ mod tests {
 
         // Sanity: same query produces same top-M.
         let mut rng = ChaCha8Rng::seed_from_u64(23);
-        let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
         let orig_top = original.top_m_candidates(&query, 10);
         let loaded_top = loaded.top_m_candidates(&query, 10);
         assert_eq!(orig_top, loaded_top);
@@ -616,10 +620,14 @@ mod tests {
         const PROD_D: usize = 1024;
         let n = 256;
         let mut rng = ChaCha8Rng::seed_from_u64(31);
-        let corpus: Vec<f32> = (0..n * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let corpus: Vec<f32> = (0..n * PROD_D)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
         let mut idx = SignBitmap::new(PROD_D);
         idx.add(&corpus);
-        let queries: Vec<f32> = (0..3 * PROD_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let queries: Vec<f32> = (0..3 * PROD_D)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
         // Batched (AVX-512 dispatched at qpv=16) must agree with scalar
         // reference computed via simple Hamming.
         let batched = idx.top_m_candidates_batched(&queries, 32);

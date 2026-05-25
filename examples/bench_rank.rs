@@ -37,7 +37,7 @@
 //! downstream tooling.
 
 use ordvec::search_asymmetric_byte_lut;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 // `RankQuantFastscan` is `#[doc(hidden)]` (optional b=2 scan path);
@@ -232,8 +232,8 @@ fn load_npy_f32(path: &str) -> (Vec<f32>, usize, usize) {
 
 /// Sample a single standard-normal value.
 fn gauss(rng: &mut ChaCha8Rng) -> f32 {
-    let u1: f32 = rng.gen_range(1e-9..1.0);
-    let u2: f32 = rng.gen_range(0.0..1.0);
+    let u1: f32 = rng.random_range(1e-9..1.0);
+    let u2: f32 = rng.random_range(0.0..1.0);
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 
@@ -293,14 +293,14 @@ fn make_clustered_corpus(cfg: &Config, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<us
 
     let mut corpus = Vec::with_capacity(cfg.n * d);
     for _ in 0..cfg.n {
-        let c = rng.gen_range(0..cfg.n_clusters);
+        let c = rng.random_range(0..cfg.n_clusters);
         let proto = &protos[c * l..(c + 1) * l];
         corpus.extend_from_slice(&make_embedding(proto, noise_doc, &mut rng));
     }
     let mut queries = Vec::with_capacity(cfg.n_queries * d);
     let mut q_clusters = Vec::with_capacity(cfg.n_queries);
     for _ in 0..cfg.n_queries {
-        let c = rng.gen_range(0..cfg.n_clusters);
+        let c = rng.random_range(0..cfg.n_clusters);
         q_clusters.push(c);
         let proto = &protos[c * l..(c + 1) * l];
         queries.extend_from_slice(&make_embedding(proto, noise_q, &mut rng));

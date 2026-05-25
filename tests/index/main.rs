@@ -21,7 +21,7 @@ use std::io::Write;
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_norm, rank_transform, rankquant_norm};
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 mod bitmap;
@@ -41,7 +41,7 @@ pub fn make_corpus(seed: u64) -> Vec<f32> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut v = vec![0.0f32; N * D];
     for x in v.iter_mut() {
-        *x = rng.gen_range(-1.0..1.0);
+        *x = rng.random_range(-1.0..1.0);
     }
     v
 }

@@ -4,7 +4,7 @@
 
 use ordvec::rank::rank_transform;
 use ordvec::{Bitmap, RankQuant};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
@@ -24,7 +24,7 @@ fn rank_io_round_trip_bitmap_index() {
     assert_eq!(loaded.n_top(), idx.n_top());
 
     let mut rng = ChaCha8Rng::seed_from_u64(142);
-    let q: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let q: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let r1 = idx.search(&q, 10);
     let r2 = loaded.search(&q, 10);
     assert_eq!(r1.indices_for_query(0), r2.indices_for_query(0));
@@ -61,7 +61,7 @@ fn bitmap_then_subset_recovers_exact_when_m_eq_n() {
     rq.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(99_999);
-    let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Stage 1 with M = N: candidate set is every doc.
     let cands = bitmap.top_m_candidates(&query, N);
@@ -130,7 +130,7 @@ fn bitmap_top_m_candidates_uses_no_ground_truth() {
     let mut bitmap = Bitmap::new(D, n_top);
     bitmap.add(&corpus);
     let mut rng = ChaCha8Rng::seed_from_u64(50);
-    let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let a = bitmap.top_m_candidates(&query, 50);
     let b = bitmap.top_m_candidates(&query, 50);
     assert_eq!(a, b, "candidate selection must be deterministic");
@@ -150,21 +150,21 @@ fn bitmap_top_m_candidates_deterministic_at_ties() {
     // First 150 docs are exact duplicates → all score identically
     // against any query. Remaining 50 are random.
     let mut rng = ChaCha8Rng::seed_from_u64(404);
-    let duplicate_vec: Vec<f32> = (0..TIE_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let duplicate_vec: Vec<f32> = (0..TIE_D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let mut corpus: Vec<f32> = Vec::with_capacity(TIE_N * TIE_D);
     for _ in 0..150 {
         corpus.extend_from_slice(&duplicate_vec);
     }
     for _ in 0..50 {
         for _ in 0..TIE_D {
-            corpus.push(rng.gen_range(-1.0..1.0));
+            corpus.push(rng.random_range(-1.0..1.0));
         }
     }
     let _ = rank_transform(&duplicate_vec); // assert symbol is in scope
     let n_top = TIE_D / 4;
     let mut bitmap = Bitmap::new(TIE_D, n_top);
     bitmap.add(&corpus);
-    let query: Vec<f32> = (0..TIE_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..TIE_D).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Repeated calls must produce identical candidate sets — the
     // composite key forces a unique partition even when 150 docs
@@ -180,7 +180,9 @@ fn bitmap_top_m_candidates_deterministic_at_ties() {
     // Batched path agrees with single-query (the batched-equivalence
     // guarantee from `bitmap_batched_matches_single_query` extended
     // to the high-tie regime).
-    let queries: Vec<f32> = (0..3 * TIE_D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..3 * TIE_D)
+        .map(|_| rng.random_range(-1.0..1.0))
+        .collect();
     for q in [
         &queries[..TIE_D],
         &queries[TIE_D..2 * TIE_D],
@@ -211,10 +213,10 @@ fn bitmap_batched_avx512_production_dim() {
     const BATCH: usize = 5;
     let mut rng = ChaCha8Rng::seed_from_u64(7);
     let corpus: Vec<f32> = (0..N_DOCS * PROD_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let queries: Vec<f32> = (0..BATCH * PROD_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let n_top = PROD_D / 4;
     let mut bitmap = Bitmap::new(PROD_D, n_top);
@@ -247,10 +249,10 @@ fn bitmap_batched_hot_plus_tail_split() {
     const BATCH: usize = 11;
     let mut rng = ChaCha8Rng::seed_from_u64(101);
     let corpus: Vec<f32> = (0..N_DOCS * PROD_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let queries: Vec<f32> = (0..BATCH * PROD_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let n_top = PROD_D / 4;
     let mut bitmap = Bitmap::new(PROD_D, n_top);
@@ -286,7 +288,7 @@ fn bitmap_batched_edge_cases() {
 
     // m == 0: each per-query slot is an empty Vec.
     let mut rng = ChaCha8Rng::seed_from_u64(202);
-    let queries: Vec<f32> = (0..3 * D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..3 * D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let res = bitmap.top_m_candidates_batched(&queries, 0);
     assert_eq!(res.len(), 3);
     for c in &res {
@@ -333,10 +335,10 @@ fn bitmap_batched_avx512_high_qpv_no_panic() {
     const BATCH: usize = 3;
     let mut rng = ChaCha8Rng::seed_from_u64(123);
     let corpus: Vec<f32> = (0..N_DOCS * HIGH_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let queries: Vec<f32> = (0..BATCH * HIGH_D)
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let n_top = HIGH_D / 4;
     let mut bitmap = Bitmap::new(HIGH_D, n_top);
@@ -367,7 +369,9 @@ fn bitmap_batched_matches_single_query() {
     bitmap.add(&corpus);
     let mut rng = ChaCha8Rng::seed_from_u64(99);
     let batch: usize = 7; // intentionally non-power-of-2
-    let queries: Vec<f32> = (0..batch * D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..batch * D)
+        .map(|_| rng.random_range(-1.0..1.0))
+        .collect();
     for m in [10usize, 50, 100] {
         let single: Vec<Vec<u32>> = (0..batch)
             .map(|bi| bitmap.top_m_candidates(&queries[bi * D..(bi + 1) * D], m))
