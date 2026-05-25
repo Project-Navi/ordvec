@@ -61,13 +61,18 @@ jobs:
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       # One shell: the cargo-llvm-cov env from show-env must stay live across the
       # instrumented maturin build, the pytest run, and the report, so they share
-      # a single step. The venv isolates maturin's editable install.
+      # a single step. shell: bash is pinned explicitly (the step uses bash), and
+      # show-env is written to a file first so that a failure aborts the step
+      # under `set -e` instead of letting pytest/report run uninstrumented and
+      # upload misleading coverage. The venv isolates maturin's editable install.
       - name: Build instrumented extension, run pytest, collect coverage
+        shell: bash
         run: |
           python -m venv .venv
           . .venv/bin/activate
           pip install --require-hashes -r ordvec-python/requirements-dev.txt
-          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov show-env --sh > "$RUNNER_TEMP/llvm-cov-env.sh"
+          source "$RUNNER_TEMP/llvm-cov-env.sh"
           cargo llvm-cov clean --workspace
           ( cd ordvec-python && maturin develop )
           python -m pytest ordvec-python/tests -q
