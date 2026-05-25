@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread;
 
 use ordvec::{RankQuant, RankQuantFastscan};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
@@ -30,8 +30,8 @@ fn fastscan_b2_top10_matches_avx512_kernel() {
     const FN: usize = 100;
     let mut rng = ChaCha8Rng::seed_from_u64(31337);
 
-    let docs: Vec<f32> = (0..FN * FD).map(|_| rng.gen_range(-1.0..1.0)).collect();
-    let queries: Vec<f32> = (0..3 * FD).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let docs: Vec<f32> = (0..FN * FD).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..3 * FD).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Reference: the production RankQuant asym kernel.
     let mut idx = RankQuant::new(FD, 2);
@@ -74,7 +74,7 @@ fn fastscan_handles_k_zero() {
     // parallel scan (Codex stop-hook regression, source c4fd4d6).
     let corpus = make_corpus(250);
     let mut rng = ChaCha8Rng::seed_from_u64(251);
-    let queries: Vec<f32> = (0..(2 * D)).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..(2 * D)).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
@@ -116,7 +116,7 @@ fn fastscan_handles_k_greater_than_n_vectors() {
     const N_SMALL: usize = 5;
     let mut rng = ChaCha8Rng::seed_from_u64(261);
     let corpus: Vec<f32> = (0..(N_SMALL * D))
-        .map(|_| rng.gen_range(-1.0..1.0))
+        .map(|_| rng.random_range(-1.0..1.0))
         .collect();
     let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
@@ -140,7 +140,7 @@ fn fastscan_handles_k_greater_than_n_vectors() {
 fn fastscan_search_is_thread_safe() {
     let corpus = make_corpus(262);
     let mut rng = ChaCha8Rng::seed_from_u64(263);
-    let queries: Vec<f32> = (0..(4 * D)).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..(4 * D)).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let mut fs = RankQuantFastscan::new(D);
     fs.add(&corpus);
@@ -174,7 +174,7 @@ fn fastscan_dim_boundary_matrix() {
         const N_SMALL: usize = 16;
         let mut rng = ChaCha8Rng::seed_from_u64(270 + dim as u64);
         let corpus: Vec<f32> = (0..(N_SMALL * dim))
-            .map(|_| rng.gen_range(-1.0..1.0))
+            .map(|_| rng.random_range(-1.0..1.0))
             .collect();
         let mut fs = RankQuantFastscan::new(dim);
         fs.add(&corpus);

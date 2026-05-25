@@ -3,7 +3,7 @@
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_transform};
 use ordvec::MultiBucketBitmap;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
@@ -21,7 +21,7 @@ fn multi_bucket_bilinear_equals_symmetric_rankquant_inner(bits: u8) {
     let w = mb.outer_product_weights();
 
     let mut rng = ChaCha8Rng::seed_from_u64(700 + bits as u64);
-    let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let q_bitmaps = mb.query_bitmaps_from_ranks(&query);
 
     let q_ranks = rank_transform(&query);

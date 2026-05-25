@@ -23,7 +23,7 @@
 //!   end-to-end (routed away from the {2,4}-only byte-LUT path) and
 //!   match a scalar reference.
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use ordvec::rank::{bucket_centre, bucket_ranks, rank_transform, rankquant_norm};
@@ -32,7 +32,7 @@ use ordvec::{Rank, RankQuant, SearchResults, SignBitmap};
 
 fn make_corpus(seed: u64, n: usize, dim: usize) -> Vec<f32> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    (0..n * dim).map(|_| rng.gen_range(-1.0..1.0)).collect()
+    (0..n * dim).map(|_| rng.random_range(-1.0..1.0)).collect()
 }
 
 /// Scalar reference for asymmetric RankQuant scoring of one query
@@ -78,7 +78,7 @@ fn assert_asym_matches_byte_lut(dim: usize, bits: u8, seed: u64) {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(7));
-    let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let k = 10;
     let prod = idx.search_asymmetric(&query, k);
@@ -162,7 +162,7 @@ fn subset_rejects_out_of_range_candidate() {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(202);
-    let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // n_vectors == 32, so id 999 is out of range.
     let candidates: Vec<u32> = vec![0, 1, 999];
@@ -179,7 +179,7 @@ fn subset_accepts_in_range_candidates() {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(204);
-    let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let candidates: Vec<u32> = vec![0, 5, (n - 1) as u32];
     let (scores, global) = idx.search_asymmetric_subset(&query, &candidates, 3);
@@ -351,7 +351,7 @@ fn rankquant_b1_asymmetric_works_and_matches_reference() {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(402);
-    let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let k = 10;
     let res = idx.search_asymmetric(&query, k);

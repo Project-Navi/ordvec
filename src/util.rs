@@ -454,7 +454,7 @@ impl TopK {
 #[cfg(test)]
 mod tests {
     use super::{and_popcount, checked_new_len, xor_popcount, TopK};
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     fn naive_and(d: &[u64], q: &[u64]) -> u32 {
@@ -476,8 +476,8 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0xC0FFEE);
         for qpv in [1usize, 2, 3, 4, 7, 8, 15, 16, 17, 31] {
             for _ in 0..64 {
-                let d: Vec<u64> = (0..qpv).map(|_| rng.gen()).collect();
-                let q: Vec<u64> = (0..qpv).map(|_| rng.gen()).collect();
+                let d: Vec<u64> = (0..qpv).map(|_| rng.random()).collect();
+                let q: Vec<u64> = (0..qpv).map(|_| rng.random()).collect();
                 assert_eq!(and_popcount(&d, &q), naive_and(&d, &q), "AND qpv={qpv}");
                 assert_eq!(xor_popcount(&d, &q), naive_xor(&d, &q), "XOR qpv={qpv}");
             }

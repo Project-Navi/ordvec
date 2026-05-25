@@ -34,8 +34,8 @@ ordered-float = "5"
 
 [dev-dependencies]
 # Test/bench corpora are seeded with these; not needed by the library.
-rand = "0.8"
-rand_chacha = "0.3"
+rand = "0.10"
+rand_chacha = "0.10"
 
 [features]
 # SIMD is always compiled, never feature-gated: x86_64 dispatches AVX-512/AVX2 at

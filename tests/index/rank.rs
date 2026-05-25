@@ -1,7 +1,7 @@
 //! Rank (full-precision u16 ranks) integration tests.
 
 use ordvec::Rank;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, ref_asymmetric, ref_rank_cosine, D, N};
@@ -13,7 +13,7 @@ fn rank_index_symmetric_matches_reference() {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(99);
-    let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let res = idx.search(&query, 10);
     assert_eq!(res.nq, 1);
@@ -54,7 +54,7 @@ fn rank_index_asymmetric_matches_reference() {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(100);
-    let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let res = idx.search_asymmetric(&query, 10);
 
@@ -98,7 +98,7 @@ fn rank_index_recall_at_10_matches_fp32() {
     let mut rng = ChaCha8Rng::seed_from_u64(8);
     let mut queries = Vec::with_capacity(20 * D);
     for _ in 0..(20 * D) {
-        queries.push(rng.gen_range(-1.0..1.0));
+        queries.push(rng.random_range(-1.0..1.0));
     }
     let res = idx.search(&queries, 10);
 
@@ -163,7 +163,7 @@ fn rank_io_round_trip_rank_index() {
     assert_eq!(loaded.dim(), idx.dim());
 
     let mut rng = ChaCha8Rng::seed_from_u64(140);
-    let q: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let q: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let r1 = idx.search(&q, 10);
     let r2 = loaded.search(&q, 10);
     assert_eq!(r1.indices_for_query(0), r2.indices_for_query(0));

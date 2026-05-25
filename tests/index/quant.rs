@@ -1,7 +1,7 @@
 //! RankQuant (B-bit bucket-packed) integration tests.
 
 use ordvec::RankQuant;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, ref_rankquant_asymmetric, D, N};
@@ -27,7 +27,7 @@ fn rankquant_asymmetric_matches_reference(bits: u8) {
     idx.add(&corpus);
 
     let mut rng = ChaCha8Rng::seed_from_u64(200 + bits as u64);
-    let query: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     let res = idx.search_asymmetric(&query, 10);
 
@@ -82,11 +82,11 @@ fn rankquant_b2_recovers_planted_neighbour_in_top_10() {
     let mut queries = Vec::with_capacity(n_q * D);
     let mut planted = Vec::with_capacity(n_q);
     for _ in 0..n_q {
-        let target = rng.gen_range(0..N);
+        let target = rng.random_range(0..N);
         planted.push(target);
         let src = &corpus[target * D..(target + 1) * D];
         for &v in src.iter() {
-            queries.push(v + rng.gen_range(-0.05..0.05));
+            queries.push(v + rng.random_range(-0.05..0.05));
         }
     }
     // Re-encode the corpus *after* sampling targets so the targets are
@@ -142,7 +142,7 @@ fn rank_io_round_trip_rankquant_index() {
     assert_eq!(loaded.bits(), idx.bits());
 
     let mut rng = ChaCha8Rng::seed_from_u64(141);
-    let q: Vec<f32> = (0..D).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let q: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
     let r1 = idx.search_asymmetric(&q, 10);
     let r2 = loaded.search_asymmetric(&q, 10);
     assert_eq!(r1.indices_for_query(0), r2.indices_for_query(0));
@@ -160,11 +160,11 @@ fn rankquant_asymmetric_correct_on_simd_invalid_dims() {
     for &(dim, bits) in &[(48usize, 4u8), (80, 2), (20, 2), (36, 2)] {
         let n = 40usize;
         let mut rng = ChaCha8Rng::seed_from_u64(900 + dim as u64 * 8 + bits as u64);
-        let corpus: Vec<f32> = (0..n * dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let corpus: Vec<f32> = (0..n * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
         let mut idx = RankQuant::new(dim, bits);
         idx.add(&corpus);
 
-        let query: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
         let res = idx.search_asymmetric(&query, 10);
 
         let ref_scores: Vec<f32> = (0..n)
