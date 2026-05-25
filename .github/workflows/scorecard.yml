@@ -18,6 +18,10 @@ jobs:
     name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:
+      # Job-level permissions REPLACE the workflow-level set (omitted scopes
+      # become none), so contents: read must be explicit here — checkout and
+      # Scorecard need it to read the repo.
+      contents: read
       security-events: write # upload the SARIF result to code scanning
       id-token: write # OIDC to publish results to the OpenSSF API
     steps:
