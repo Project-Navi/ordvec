@@ -157,6 +157,11 @@ jobs:
   release-guard:
     name: release-publish invariants
     runs-on: ubuntu-latest
+    # Least-privilege: the guard only runs git check-ignore + grep on the
+    # checked-out tree, so a read-only token is all it needs (explicit here even
+    # though the workflow default is already contents: read).
+    permissions:
+      contents: read
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
