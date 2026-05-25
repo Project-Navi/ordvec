@@ -33,12 +33,14 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write # create the GitHub Release
+  contents: read
 
 jobs:
   release-notes:
     name: release notes (git-cliff)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft GitHub Release
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
