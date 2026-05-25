@@ -45,9 +45,19 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
-pub use quant::{search_asymmetric_byte_lut, RankQuant};
+pub use quant::RankQuant;
 pub use rank::Rank;
 pub use sign_bitmap::SignBitmap;
+
+// `search_asymmetric_byte_lut` is a bench-only scoring reference: it
+// panics on b=1 and exists so `examples/bench_rank` can compare the
+// byte-LUT path against the production AVX kernels on the same data.
+// Re-exported `#[doc(hidden)]` — reachable for the example and the
+// red-team parity tests, but not part of the headline API. Production
+// callers use `RankQuant::search_asymmetric`, whose dispatch routes
+// every supported bit width to a non-panicking kernel.
+#[doc(hidden)]
+pub use quant::search_asymmetric_byte_lut;
 
 // `MultiBucketBitmap` underwrites the bilinear bucket-overlap
 // decomposition but is not stable public API. It is reachable only with
