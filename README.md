@@ -122,6 +122,8 @@ development history is in this repository's git log.
 Thanks to [@toadkicker](https://github.com/toadkicker) for the sign-cosine
 intuition and engineering polish.
 
+Thanks to Mike Singleton for mathematical assistance and mentorship.
+
 ## Contributing
 
 Contributions to the code, the docs, and the accompanying paper are all
