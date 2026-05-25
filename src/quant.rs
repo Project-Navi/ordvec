@@ -152,7 +152,9 @@ impl RankQuant {
     /// — the supported capacity. Candidate APIs materialise document IDs as
     /// `u32`; `MAX_VECTORS` sits well below `u32::MAX` and matches the on-disk
     /// loader's `n_vectors` ceiling. (Bounds the count, not the byte payload —
-    /// see the loaders' separate `MAX_PAYLOAD` cap.)
+    /// see the loaders' separate `MAX_PAYLOAD` cap.) Also panics if the
+    /// resulting row-major buffer length would overflow `usize` (reachable only
+    /// on 32-bit targets — see `util::checked_new_len`).
     pub fn add(&mut self, vectors: &[f32]) {
         let n = vectors.len() / self.dim;
         assert_eq!(

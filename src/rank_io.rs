@@ -824,9 +824,10 @@ mod tests {
             "write_rankquant created a file despite rejecting the payload"
         );
 
-        // Bitmap/SignBitmap dims must be multiples of 64; 65536/64 = 1024
-        // qwords/doc → 1024 * 8 * 64Mi = 512 GiB > 128 GiB.
-        let bm_dim = 65536;
+        // Bitmap/SignBitmap dims must be a multiple of 64 and within MAX_DIM
+        // (65535); 32768/64 = 512 qwords/doc → 512 * 8 * 64Mi = 256 GiB > 128
+        // GiB, so the payload guard fires on a loader-valid dim.
+        let bm_dim = 32768;
         let pbm = path("bitmap");
         let e = write_bitmap(&pbm, bm_dim, 1, big_n, &[]).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::InvalidData);

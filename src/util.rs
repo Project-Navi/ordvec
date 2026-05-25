@@ -473,8 +473,14 @@ mod tests {
         assert_eq!(checked_new_len(MAX_VECTORS - 1, 1, 1), MAX_VECTORS);
         // An empty add never trips the guard.
         assert_eq!(checked_new_len(MAX_VECTORS, 0, 1), MAX_VECTORS);
-        // A realistic dim still fits on 64-bit (MAX_VECTORS * 4096 << usize::MAX).
-        assert_eq!(checked_new_len(0, MAX_VECTORS, 4096), MAX_VECTORS);
+        // MAX_VECTORS * 4096 = 2^38 fits usize on 64-bit; on 32-bit it overflows,
+        // which the guard correctly panics on (see
+        // `checked_new_len_rejects_buffer_overflow`). Gate the success assertion
+        // to 64-bit so the suite stays portable (wasm32 / armv7).
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(checked_new_len(0, MAX_VECTORS, 4096), MAX_VECTORS);
+        }
     }
 
     #[test]
