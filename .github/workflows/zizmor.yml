@@ -29,6 +29,6 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install zizmor (pinned)
-        run: pip install zizmor==1.25.2
+        run: pip install --require-hashes -r .github/zizmor-requirements.txt
       - name: Audit workflows
         run: zizmor --offline --persona=regular .github/workflows/

@@ -316,10 +316,23 @@ jobs:
           targets: wasm32-unknown-unknown, wasm32-wasip1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: install wasmtime (executes the wasip1 test binary)
+        # Pinned release + sha256 verification, instead of `curl | bash` of an
+        # unpinned install script (Scorecard Pinned-Dependencies / supply chain).
+        # Arch-derived so the job survives a switch to an ARM Ubuntu runner.
+        env:
+          WASMTIME_VERSION: v45.0.0
         run: |
           set -euo pipefail
-          curl -sSfL https://wasmtime.dev/install.sh | bash
-          echo "${HOME}/.wasmtime/bin" >> "${GITHUB_PATH}"
+          case "$(uname -m)" in
+            x86_64)  arch=x86_64;  sha256=9d92e6dc04630f617e0e5d532327a5a917ac4898587e07f4fb7a5fc7fffef760 ;;
+            aarch64) arch=aarch64; sha256=4a27083ba8d3c64526b2d469f50e6539cb4c1dd9d08336e0d8953bca616737e3 ;;
+            *) echo "::error::unsupported runner architecture: $(uname -m)"; exit 1 ;;
+          esac
+          tarball="wasmtime-${WASMTIME_VERSION}-${arch}-linux.tar.xz"
+          curl -sSfLO "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${tarball}"
+          echo "${sha256}  ${tarball}" | sha256sum -c -
+          tar xJf "${tarball}"
+          echo "${PWD}/wasmtime-${WASMTIME_VERSION}-${arch}-linux" >> "${GITHUB_PATH}"
       # RUSTFLAGS is overridden here (dropping the workflow-level -D warnings)
       # so a warning in rayon's wasm-only code path can't fail the build; the
       # crate's own code is held to -D warnings by the lint/test jobs on the
