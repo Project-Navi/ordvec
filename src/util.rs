@@ -25,6 +25,30 @@ pub(crate) fn result_buffer_len(nq: usize, k: usize) -> usize {
         .expect("search result buffer length (nq * k) overflows usize")
 }
 
+/// Validate that an `add` would not grow an index past
+/// `rank_io::MAX_VECTORS`, returning the new length.
+///
+/// The on-disk loaders cap `n_vectors` at `MAX_VECTORS` (64 Mi); the four
+/// in-memory growth paths (`Rank` / `RankQuant` / `Bitmap` / `SignBitmap`
+/// `add`) share this guard so a built index always round-trips through
+/// `write` / `load`. Candidate APIs also materialise document IDs as `u32`,
+/// and `MAX_VECTORS` sits well below `u32::MAX`, so every emitted ID stays
+/// representable. Fails loud (panic) on overflow — matching `add`'s other
+/// contract asserts — rather than silently wrapping into a truncated ID
+/// space (issue #25).
+#[inline]
+pub(crate) fn checked_new_len(current: usize, adding: usize) -> usize {
+    let new_n = current
+        .checked_add(adding)
+        .expect("ordvec: n_vectors overflows usize");
+    assert!(
+        new_n <= crate::rank_io::MAX_VECTORS,
+        "ordvec: index would exceed MAX_VECTORS ({}); had {current}, adding {adding}",
+        crate::rank_io::MAX_VECTORS,
+    );
+    new_n
+}
+
 pub(crate) fn l2_normalise(v: &[f32]) -> Vec<f32> {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm <= 1e-12 {
@@ -396,7 +420,7 @@ impl TopK {
 
 #[cfg(test)]
 mod tests {
-    use super::{and_popcount, xor_popcount};
+    use super::{and_popcount, checked_new_len, xor_popcount};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -425,5 +449,32 @@ mod tests {
                 assert_eq!(xor_popcount(&d, &q), naive_xor(&d, &q), "XOR qpv={qpv}");
             }
         }
+    }
+
+    #[test]
+    fn checked_new_len_accepts_up_to_max() {
+        use crate::rank_io::MAX_VECTORS;
+        // Exactly MAX_VECTORS is allowed — the loaders accept the same ceiling,
+        // so a freshly grown index stays write/load round-trippable.
+        assert_eq!(checked_new_len(0, MAX_VECTORS), MAX_VECTORS);
+        assert_eq!(checked_new_len(MAX_VECTORS - 1, 1), MAX_VECTORS);
+        // An empty add never trips the guard.
+        assert_eq!(checked_new_len(MAX_VECTORS, 0), MAX_VECTORS);
+    }
+
+    #[test]
+    #[should_panic(expected = "MAX_VECTORS")]
+    fn checked_new_len_rejects_one_past_max() {
+        use crate::rank_io::MAX_VECTORS;
+        // One past the loader ceiling must fail loud rather than build an index
+        // that write/load would refuse to round-trip.
+        let _ = checked_new_len(MAX_VECTORS, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflows usize")]
+    fn checked_new_len_rejects_usize_overflow() {
+        // The running total itself must not wrap before the cap is checked.
+        let _ = checked_new_len(usize::MAX, 1);
     }
 }

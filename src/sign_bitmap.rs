@@ -73,10 +73,17 @@ impl SignBitmap {
     /// bit j is set iff `vectors[di*dim + j] > 0.0`. The sign of
     /// exactly zero (rare in practice for trained embeddings) is
     /// treated as negative (bit unset).
+    ///
+    /// # Panics
+    /// Panics if the index would grow beyond `rank_io::MAX_VECTORS` documents
+    /// — the supported capacity. Candidate APIs materialise document IDs as
+    /// `u32`; `MAX_VECTORS` sits well below `u32::MAX` and matches the on-disk
+    /// loader cap, so a built index always round-trips through `write`/`load`.
     pub fn add(&mut self, vectors: &[f32]) {
         crate::util::assert_all_finite(vectors);
         let n = vectors.len() / self.dim;
         assert_eq!(vectors.len(), n * self.dim);
+        let new_n = crate::util::checked_new_len(self.n_vectors, n);
         let qpv = self.qwords_per_vec;
         let dim = self.dim;
         let start = self.bitmaps.len();
@@ -91,7 +98,7 @@ impl SignBitmap {
                     }
                 }
             });
-        self.n_vectors += n;
+        self.n_vectors = new_n;
     }
 
     /// Build the query-side sign bitmap. Same threshold semantics as
