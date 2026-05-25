@@ -35,14 +35,9 @@ updates:
           - "minor"
           - "patch"
 
-  # ordvec-python's only runtime dep is numpy, and its floor is a DELIBERATE
-  # broad/legacy-compatibility choice: ordvec is dep-light + abi3-py39, and
-  # rust-numpy 0.27 supports numpy 1.x AND 2.x at runtime, so we keep numpy
-  # >=1.20 (usable on Python 3.9 + numpy 1.x legacy stacks). Raising the floor to
-  # 2.x would drop those users (numpy 2.1+ also dropped Python 3.9) for zero gain
-  # — ordvec's speed is its Rust kernels; numpy is just the zero-copy array
-  # container. So `ignore` numpy to stop Dependabot re-proposing the floor bump.
-  # maturin (build dep) updates and security advisories still flow.
+  # ordvec-python's only runtime dep is numpy (floor >=2.0, matching abi3-py310 /
+  # Python >=3.10); maturin is the build dep. Group minor+patch into one PR;
+  # majors stay separate for manual review.
   - package-ecosystem: "pip"
     directory: "/ordvec-python"
     schedule:
@@ -55,9 +50,6 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    ignore:
-      # Hold the broad numpy floor (see above); do not auto-raise it.
-      - dependency-name: "numpy"
 
   # fuzz/ is a workspace-EXCLUDED standalone crate (own Cargo.lock), nightly-only
   # cargo-fuzz tooling. Dev-only surface, low priority — group all, tight PR limit.

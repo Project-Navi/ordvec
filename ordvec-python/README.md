@@ -30,7 +30,7 @@ scores, ids = q.search_asymmetric(np.random.randn(8, 1024).astype(np.float32), k
 pip install ordvec
 ```
 
-Wheels target CPython 3.9+ (abi3). Building from source needs a Rust toolchain
+Wheels target CPython 3.10+ (abi3). Building from source needs a Rust toolchain
 (MSRV 1.89) and [maturin](https://www.maturin.rs/).
 
 ## Provenance & license

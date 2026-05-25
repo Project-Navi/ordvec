@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Changed
+
+- **Python bindings (`ordvec-python`):** raised the floor to **Python 3.10** and
+  **numpy 2.0**; the abi3 wheel target moves to `abi3-py310`. Python 3.9 reached
+  end-of-life (October 2025) and pytest's CVE-2025-71176 fix dropped 3.9 support.
+
+### Security
+
+- Remediated **GHSA-6w46-j5rx-g56g** / CVE-2025-71176 (pytest vulnerable tmpdir
+  handling) by moving the dev/test toolchain to pytest 9.0.3 on Python ≥3.10.
 
 ## [0.2.0] - 2026-05-22
 

@@ -61,7 +61,7 @@ jobs:
         # release-python.yml builds one wheel per platform; this matrix makes
         # sure every one of those targets is *behaviourally* tested (build →
         # install → pytest), not merely compiled. abi3 means a single wheel
-        # covers all CPython 3.9+, so the python axis only needs its 3.9↔3.13
+        # covers all CPython 3.10+, so the python axis only needs its 3.10↔3.13
         # floor/ceiling checked once (linux/x86_64); the other targets exercise
         # the native code on 3.13. The aarch64 runners (ubuntu-24.04-arm,
         # macos-latest) are what exercise the NEON kernels through the bindings.
@@ -73,7 +73,7 @@ jobs:
         # x86_64 code is covered by the linux-x86_64 legs (logic) + macos-arm64
         # (Mach-O), so the lost test coverage is marginal.
         include:
-          - { os: ubuntu-latest, python: "3.9" } # linux x86_64 — abi3 floor
+          - { os: ubuntu-latest, python: "3.10" } # linux x86_64 — abi3 floor
           - { os: ubuntu-latest, python: "3.13" } # linux x86_64 — abi3 ceiling
           - { os: ubuntu-24.04-arm, python: "3.13" } # linux aarch64 — NEON
           - { os: macos-latest, python: "3.13" } # macOS arm64 — NEON

@@ -7,7 +7,7 @@ name = "ordvec"
 version = "0.2.0"
 description = "Training-free ordinal & sign quantization for compressed vector retrieval"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }
 authors = [
     { name = "Nelson Spence" },
@@ -32,7 +32,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -43,7 +42,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "numpy>=1.20",
+    "numpy>=2.0",
 ]
 
 [project.urls]
