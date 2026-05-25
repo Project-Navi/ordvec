@@ -461,15 +461,21 @@ impl RankQuant {
         // `checked_mul` (not `saturating`): on a 32-bit target the byte count
         // `n_vectors * dim * bits / 8` can overflow `usize`; treat overflow as
         // malformed rather than letting a saturated `usize::MAX` pass as a
-        // plausible length.
-        let expected_bytes = n_vectors
-            .checked_mul(dim)
-            .and_then(|x| x.checked_mul(bits as usize))
+        // plausible length. Two steps with distinct messages so a report names
+        // which product wrapped (`n_vectors * dim` vs the subsequent `* bits`).
+        let nv_dim = n_vectors.checked_mul(dim).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TVRQ n_vectors * dim overflows usize",
+            )
+        })?;
+        let expected_bytes = nv_dim
+            .checked_mul(bits as usize)
             .map(|x| x / 8)
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "TVRQ n_vectors * dim * bits overflows usize",
+                    "TVRQ (n_vectors * dim) * bits overflows usize",
                 )
             })?;
         if packed.len() != expected_bytes {

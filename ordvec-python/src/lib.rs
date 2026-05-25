@@ -130,6 +130,13 @@ impl Rank {
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        //
+        // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
+        // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
+        // runtime borrow flag for the whole call, so another thread that
+        // re-acquires the GIL and tries to touch the SAME object gets a clean
+        // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
+        // objects run freely, which is the point of releasing the GIL.
         py.detach(|| self.inner.add(slice));
         Ok(())
     }
@@ -300,6 +307,13 @@ impl RankQuant {
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        //
+        // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
+        // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
+        // runtime borrow flag for the whole call, so another thread that
+        // re-acquires the GIL and tries to touch the SAME object gets a clean
+        // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
+        // objects run freely, which is the point of releasing the GIL.
         py.detach(|| self.inner.add(slice));
         Ok(())
     }
@@ -509,6 +523,13 @@ impl Bitmap {
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        //
+        // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
+        // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
+        // runtime borrow flag for the whole call, so another thread that
+        // re-acquires the GIL and tries to touch the SAME object gets a clean
+        // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
+        // objects run freely, which is the point of releasing the GIL.
         py.detach(|| self.inner.add(slice));
         Ok(())
     }
@@ -842,6 +863,13 @@ impl SignBitmap {
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        //
+        // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
+        // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
+        // runtime borrow flag for the whole call, so another thread that
+        // re-acquires the GIL and tries to touch the SAME object gets a clean
+        // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
+        // objects run freely, which is the point of releasing the GIL.
         py.detach(|| self.inner.add(slice));
         Ok(())
     }
