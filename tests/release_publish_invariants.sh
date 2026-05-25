@@ -30,10 +30,10 @@ done
 #     twine rejects a stray .cdx.json in dist/, so the cleanup must run AFTER the
 #     download (otherwise it is a no-op for the downloaded SBOM) and BEFORE the
 #     upload. The search is scoped to the `publish` job body, so a download step
-#     in another job cannot satisfy the ordering; the delete is matched on its own
-#     line, so it works for both `run: ... -delete` and a multi-line `run: |` block;
-#     comment lines are skipped; and the publish step keys on the pinned action
-#     name (not the bare string `pypi-publish`, which could match a job name).
+#     in another job cannot satisfy the ordering; the delete is matched only in an
+#     executing `run:` context (single-line or a `run: |` block), so a step name or
+#     other non-executing text cannot satisfy it; comment lines are skipped; and the
+#     publish step keys on the pinned action name (not the bare string `pypi-publish`).
 wf=".github/workflows/release-python.yml"
 [ -f "$wf" ] || fail "$wf: workflow file not found"
 
@@ -50,10 +50,27 @@ job="$(sed -n "${pub_start},${pub_end}p" "$wf")"
 in_job() { printf '%s\n' "$job" | grep -nE "$1" | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1; }
 
 dl_line="$(in_job 'uses:[[:space:]]*actions/download-artifact' || true)"
-# Match the deletion command itself (not the `run:` key), so a multi-line
-# `run: |` block works too. Still requires a real delete — `find ... -delete` or
-# `rm ... *.cdx.json` — not a bare reference that would leave the SBOM in dist/.
-clean_line="$(in_job '(find.*cdx\.json.*-delete|rm[[:space:]].*cdx\.json)' || true)"
+# The cleanup must be a real delete in an EXECUTING `run:` context — either a
+# single-line `run: ... -delete` or a line inside that step's `run: |`/`run: >`
+# block. Matching the command text anywhere would also accept NON-executing text
+# (a step `name:`, an `env:`/`with:` value, prose), so the delete only counts on
+# a `run:` line or within a run block scalar. Still requires a real delete
+# (`find ... -delete` or `rm ... *.cdx.json`), not a bare mention.
+clean_line="$(printf '%s\n' "$job" | awk '
+  function indent(s,  i){ i = match(s, /[^ ]/); return (i ? i - 1 : length(s)) }
+  BEGIN { del = "find.*cdx\\.json.*-delete|rm[[:space:]].*cdx\\.json" }
+  { is_comment = ($0 ~ /^[[:space:]]*#/) }
+  in_block {
+    if ($0 ~ /^[[:space:]]*$/) next                  # blank line stays in block
+    if (indent($0) > block_indent && !is_comment) {  # block content
+      if ($0 ~ del) { print NR; exit }
+      next
+    }
+    in_block = 0                                      # dedent ends block; re-test line
+  }
+  /^[[:space:]]*run:[[:space:]]*[|>]/ { in_block = 1; block_indent = indent($0); next }
+  /^[[:space:]]*run:[[:space:]]/ && !is_comment { if ($0 ~ del) { print NR; exit } }
+' || true)"
 pub_line="$(in_job 'uses:[[:space:]]*pypa/gh-action-pypi-publish' || true)"
 
 [ -n "$dl_line" ]    || fail "$wf (publish job): no actions/download-artifact step found"
