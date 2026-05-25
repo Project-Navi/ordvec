@@ -230,7 +230,15 @@ impl Bitmap {
         // sorted indices is asymptotically O(D + n_top log n_top), but
         // for D=1024 the existing full-sort path is fine — the wall
         // is dominated by the doc scan below.
-        let mut q_batch = vec![0u64; batch * qpv];
+        //
+        // `batch * qpv` and `batch * n` (below) are checked: on a 32-bit
+        // target (wasm32) a moderate corpus and large query batch can overflow
+        // `usize`, which would silently under-size these buffers and then index
+        // out of bounds. Fail loud instead.
+        let q_batch_len = batch
+            .checked_mul(qpv)
+            .expect("batched query-bitmap buffer length (batch * qpv) overflows usize");
+        let mut q_batch = vec![0u64; q_batch_len];
         for bi in 0..batch {
             let qb = self.build_query_bitmap_fp32(&queries[bi * dim..(bi + 1) * dim]);
             q_batch[bi * qpv..(bi + 1) * qpv].copy_from_slice(&qb);
@@ -242,7 +250,10 @@ impl Bitmap {
         // streams one query's ~828 KiB score slice per worker; it backs
         // from L3, but the selection is a single linear pass, so it stays
         // bandwidth-bound rather than thrashing a small cache.
-        let mut scores = vec![0u32; batch * n];
+        let scores_len = batch
+            .checked_mul(n)
+            .expect("batched candidate score buffer length (batch * n) overflows usize");
+        let mut scores = vec![0u32; scores_len];
         bitmap_scan_collect_batched(&self.bitmaps, n, qpv, &q_batch, batch, &mut scores);
 
         // Per-query select_nth on contiguous score slices, in

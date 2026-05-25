@@ -158,13 +158,22 @@ impl SignBitmap {
         let n = self.n_vectors;
         let qpv = self.qwords_per_vec;
 
-        let mut q_batch = vec![0u64; batch * qpv];
+        // `batch * qpv` and `batch * n` (below) are checked: on a 32-bit target
+        // (wasm32) a moderate corpus and large query batch can overflow `usize`,
+        // silently under-sizing these buffers and then indexing out of bounds.
+        let q_batch_len = batch
+            .checked_mul(qpv)
+            .expect("batched query-bitmap buffer length (batch * qpv) overflows usize");
+        let mut q_batch = vec![0u64; q_batch_len];
         for bi in 0..batch {
             let qb = self.build_query_bitmap(&queries[bi * dim..(bi + 1) * dim]);
             q_batch[bi * qpv..(bi + 1) * qpv].copy_from_slice(&qb);
         }
 
-        let mut scores = vec![0u32; batch * n];
+        let scores_len = batch
+            .checked_mul(n)
+            .expect("batched candidate score buffer length (batch * n) overflows usize");
+        let mut scores = vec![0u32; scores_len];
         sign_scan_collect_batched(&self.bitmaps, n, qpv, &q_batch, batch, &mut scores);
 
         let n_eff = n;
