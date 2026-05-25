@@ -42,6 +42,12 @@ jobs:
   analyze:
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    # Skip CodeQL on PRs from forks: a forked PR gets a read-only GITHUB_TOKEN,
+    # so the SARIF upload (needs security-events: write) can't succeed and would
+    # fail noisily. push-to-main + the weekly schedule still scan everything that
+    # lands, and same-repo PRs still get PR-time scanning. (CodeQL is also not a
+    # required status check, so a fork PR is never blocked either way.)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     permissions:
       security-events: write # upload SARIF / publish code-scanning alerts
       contents: read # checkout source
