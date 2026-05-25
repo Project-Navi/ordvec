@@ -1,0 +1,67 @@
+# git-cliff — changelog / release-note generator (https://git-cliff.org).
+#
+# git-cliff is itself a Rust tool, and a dev/CI utility only — NOT a crate
+# dependency. It never appears in `cargo tree -p ordvec`, so it does not affect
+# the no-system-deps gate.
+#
+# Used two ways:
+#   * .github/workflows/changelog.yml runs `git cliff --latest` when a vX.Y.Z
+#     tag is pushed, to author that release's GitHub Release notes.
+#   * Locally, to draft the next CHANGELOG.md section during release prep:
+#       git cliff --unreleased --tag vX.Y.Z
+# Output mirrors the repo's Keep a Changelog 1.1.0 + SemVer layout.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+{% if commit.breaking %}[**breaking**] {% endif %}\
+{{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+# Turn "(#NN)" PR references into links in the public release notes.
+commit_preprocessors = [
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/Fieldnote-Echo/ordvec/pull/${1}))" },
+]
+# Conventional Commit type -> Keep a Changelog section. Housekeeping and merge
+# commits are dropped so the notes stay user-facing.
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^(chore|ci|test|build|style)", skip = true },
+  { message = "^Merge ", skip = true },
+  { message = ".*", group = "Changed" },
+]
+protect_breaking_commits = true
+filter_commits = false
+# Only real SemVer tags count as releases — ignores the repo's archive/* and
+# backup/* tags.
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+'
+topo_order = false
+sort_commits = "newest"

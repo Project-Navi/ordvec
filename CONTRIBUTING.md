@@ -57,6 +57,26 @@ maturin develop && pytest ordvec-python/tests   # in a virtualenv
 - For larger changes, open an issue (or a Discussion) first so we can agree
   the approach before you invest time.
 
+## Releases
+
+Changelog and release notes are generated with
+[git-cliff](https://git-cliff.org) from Conventional Commit history
+(`cliff.toml`).
+
+- **GitHub Release notes are automated.** Pushing a `vMAJOR.MINOR.PATCH` tag
+  triggers `.github/workflows/changelog.yml`, which runs git-cliff and opens a
+  **draft** GitHub Release with the generated notes — review, then publish.
+  Pre-release tags (e.g. `v0.3.0-rc.1`) do not trigger it.
+- **`CHANGELOG.md` is curated by hand** — it is not auto-committed, because
+  `main` is branch-protected. Keep adding entries under `[Unreleased]`; at
+  release time promote that block to `## [X.Y.Z] - YYYY-MM-DD`. To draft the
+  section from commits instead:
+
+  ```sh
+  cargo install git-cliff           # once
+  git cliff --unreleased --tag vX.Y.Z   # preview the next section
+  ```
+
 ## Licensing
 
 By contributing, you agree that your contributions are dual-licensed under

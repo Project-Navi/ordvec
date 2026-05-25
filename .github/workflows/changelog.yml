@@ -1,0 +1,58 @@
+name: changelog
+
+# Cut a GitHub Release with git-cliff-generated notes when a vX.Y.Z tag is
+# pushed. This job does NOT write to `main` — `main` is branch-protected
+# (no direct pushes, signed commits, required reviews), so the in-repo
+# CHANGELOG.md is curated via the release PR (see CONTRIBUTING.md "Releases").
+# git-cliff authors only the public GitHub Release notes here.
+#
+# The Release is created as a DRAFT so the generated notes get a final human
+# check before they go public (this repo holds a fiction-free, publishable-grade
+# bar). Drop `--draft` below once you trust the output.
+#
+# Pre-release tags (e.g. v0.3.0-rc.1) intentionally do NOT match the filter.
+#
+# Injection-safety: the only external value used in a run: step is the tag name,
+# consumed as the quoted runner env var "$GITHUB_REF_NAME" (never via a
+# ${{ ... }} expansion), and the trigger filter is anchored to a numeric SemVer
+# shape so a crafted tag name cannot match.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub Release
+
+jobs:
+  release-notes:
+    name: release notes (git-cliff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for git-cliff
+      - name: Generate release notes
+        # orhun/git-cliff-action v4.8.0, SHA-pinned (supply-chain hygiene for a
+        # workflow holding a contents:write token).
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" \
+            --draft \
+            --verify-tag \
+            --title "$TAG_NAME" \
+            --notes-file RELEASE_NOTES.md
