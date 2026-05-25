@@ -1,0 +1,64 @@
+# Dependabot version updates. Docs: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+# Every ecosystem carries a 7-day cooldown: no dependency is bumped same-day, so a
+# freshly-published malicious release (the "mini shai-hulud" npm-worm class of
+# supply-chain attack) has a week to be flagged/yanked before we'd auto-PR it.
+version: 2
+updates:
+  # PRIMARY TARGET: actions are SHA-pinned in .github/workflows; Dependabot keeps
+  # those pins current (and re-pins to the new SHA), just delayed 7 days. One
+  # grouped PR keeps the action bumps from flooding the queue.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Cargo workspace root: core `ordvec` + the `ordvec-python` binding member
+  # (single workspace Cargo.lock). Group minor+patch into one PR; majors stay
+  # separate for manual review.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ordvec-python declared Python deps (numpy). Grouped; no-op if nothing parseable.
+  - package-ecosystem: "pip"
+    directory: "/ordvec-python"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      pip-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # fuzz/ is a workspace-EXCLUDED standalone crate (own Cargo.lock), nightly-only
+  # cargo-fuzz tooling. Dev-only surface, low priority — group all, tight PR limit.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      fuzz-deps:
+        patterns:
+          - "*"

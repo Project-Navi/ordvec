@@ -43,7 +43,12 @@ jobs:
     name: lint (fmt + clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Establish an egress baseline (audit-only: logs outbound traffic
+      # without blocking it). A later PR can switch to block + allowlist.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -66,7 +71,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (default features)
@@ -89,7 +97,10 @@ jobs:
     name: msrv (1.89.0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: cargo build
@@ -106,7 +117,10 @@ jobs:
     name: deps (no-system-deps + publish dry-run)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: assert no BLAS/faer/ndarray/statrs in the tree
@@ -145,7 +159,10 @@ jobs:
     name: cargo-deny (advisories + licenses + bans + sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -170,7 +187,10 @@ jobs:
       SDE_VERSION: sde-external-10.7.0-2026-02-18-lin
       SDE_URL_BASE: https://downloadmirror.intel.com/913594
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install Intel SDE
@@ -238,7 +258,10 @@ jobs:
     name: wasm32 (simd128)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown, wasm32-wasip1
@@ -279,7 +302,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: run bench_rank (scaled, seeded synthetic corpus)
