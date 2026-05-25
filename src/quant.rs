@@ -144,6 +144,17 @@ impl RankQuant {
         }
     }
 
+    /// Add documents. Each vector is rank-transformed, bucketed to `bits`
+    /// bits/coord, and bit-packed row-major.
+    ///
+    /// # Panics
+    /// Panics if the index would grow beyond `rank_io::MAX_VECTORS` documents
+    /// — the supported capacity. Candidate APIs materialise document IDs as
+    /// `u32`; `MAX_VECTORS` sits well below `u32::MAX` and matches the on-disk
+    /// loader's `n_vectors` ceiling. (Bounds the count, not the byte payload —
+    /// see the loaders' separate `MAX_PAYLOAD` cap.) Also panics if the
+    /// resulting row-major buffer length would overflow `usize` (reachable only
+    /// on 32-bit targets — see `util::checked_new_len`).
     pub fn add(&mut self, vectors: &[f32]) {
         let n = vectors.len() / self.dim;
         assert_eq!(
@@ -153,6 +164,7 @@ impl RankQuant {
         );
         assert_all_finite(vectors);
         let bytes_per_vec = rankquant_bytes_per_vec(self.dim, self.bits);
+        let new_n = crate::util::checked_new_len(self.n_vectors, n, bytes_per_vec);
         let start = self.packed.len();
         self.packed.resize(start + n * bytes_per_vec, 0);
         let dim = self.dim;
@@ -166,7 +178,7 @@ impl RankQuant {
                 let packed = pack_buckets(&buckets, bits);
                 out.copy_from_slice(&packed);
             });
-        self.n_vectors += n;
+        self.n_vectors = new_n;
     }
 
     /// Symmetric search: bucket the query and score against bucketed

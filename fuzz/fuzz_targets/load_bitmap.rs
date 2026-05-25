@@ -1,9 +1,10 @@
-//! libFuzzer target for [`ordvec::rank_io::load_bitmap`] (the `.tvbm` /
-//! `TVBM` loader for [`ordvec::BitmapIndex`]).
+//! libFuzzer target for the `.tvbm` / `TVBM` loader, driven through the
+//! public `ordvec::Bitmap::load` entry point.
 //!
-//! `rank_io` is `pub` in the crate root, so we drive the loader directly
-//! rather than through `BitmapIndex::load` — same loader code, one fewer
-//! wrapper. The loader takes a `&Path`, so each iteration writes the
+//! The low-level `rank_io::load_bitmap` parser is crate-internal
+//! (`pub(crate)`), so the fuzzer exercises it through `Bitmap::load` — which
+//! runs that exact loader and then the type's post-load checks (the full
+//! public load path). `load` takes a `&Path`, so each iteration writes the
 //! arbitrary input to a unique temp file (auto-cleaned by `tempfile`).
 //!
 //! Contract: on arbitrary bytes the loader must return `Ok(..)` or
@@ -29,5 +30,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let _ = ordvec::rank_io::load_bitmap(tmp.path());
+    let _ = ordvec::Bitmap::load(tmp.path());
 });

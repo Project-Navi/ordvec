@@ -1,9 +1,10 @@
-//! libFuzzer target for [`ordvec::rank_io::load_rankquant`] (the `.tvrq`
-//! / `TVRQ` loader for [`ordvec::RankQuantIndex`]).
+//! libFuzzer target for the `.tvrq` / `TVRQ` loader, driven through the
+//! public `ordvec::RankQuant::load` entry point.
 //!
-//! `rank_io` is `pub` in the crate root, so we drive the loader directly
-//! rather than through `RankQuantIndex::load` — same loader code, one
-//! fewer wrapper. The loader takes a `&Path`, so each iteration writes
+//! The low-level `rank_io::load_rankquant` parser is crate-internal
+//! (`pub(crate)`), so the fuzzer exercises it through `RankQuant::load` —
+//! which runs that exact loader and then the type's post-load checks (the
+//! full public load path). `load` takes a `&Path`, so each iteration writes
 //! the arbitrary input to a unique temp file (auto-cleaned by `tempfile`).
 //!
 //! Contract: on arbitrary bytes the loader must return `Ok(..)` or
@@ -31,5 +32,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let _ = ordvec::rank_io::load_rankquant(tmp.path());
+    let _ = ordvec::RankQuant::load(tmp.path());
 });

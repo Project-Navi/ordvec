@@ -7,8 +7,10 @@
 #     is public, or now on a paid plan).
 #   * build + test + `cargo publish --dry-run` run first; publish only on success.
 #
-# Rust toolchain via dtolnay/rust-toolchain@stable (branch-pinned, matching
-# ci.yml; the crate's MSRV 1.89 stays gated by ci.yml's `msrv` job).
+# Rust toolchain via dtolnay/rust-toolchain, SHA-pinned to the stable branch
+# (immutable action code; supply-chain hygiene for the publish pipeline —
+# `with: toolchain: stable` selects the compiler). MSRV 1.89 stays gated by
+# ci.yml's `msrv` job.
 #
 # One-time setup before the first OIDC publish:
 #   * crates.io: ordvec > Settings > Trusted Publishing > Add a GitHub publisher
@@ -33,7 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
+        with:
+          toolchain: stable
       - name: Test the core crate
         run: cargo test -p ordvec --locked
       - name: Dry-run the publish (packaging + metadata + verify build)
@@ -82,7 +86,9 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
+        with:
+          toolchain: stable
       - name: Mint a short-lived crates.io credential (OIDC)
         id: auth
         uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4

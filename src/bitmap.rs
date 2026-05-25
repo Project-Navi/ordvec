@@ -63,10 +63,20 @@ impl Bitmap {
     /// document's bitmap is set iff coordinate j has rank ≥
     /// `dim - n_top` (equivalently: it is among the `n_top` largest
     /// coordinates of the document).
+    ///
+    /// # Panics
+    /// Panics if the index would grow beyond `rank_io::MAX_VECTORS` documents
+    /// — the supported capacity. Candidate APIs materialise document IDs as
+    /// `u32`; `MAX_VECTORS` sits well below `u32::MAX` and matches the on-disk
+    /// loader's `n_vectors` ceiling. (Bounds the count, not the byte payload —
+    /// see the loaders' separate `MAX_PAYLOAD` cap.) Also panics if the
+    /// resulting row-major buffer length would overflow `usize` (reachable only
+    /// on 32-bit targets — see `util::checked_new_len`).
     pub fn add(&mut self, vectors: &[f32]) {
         let n = vectors.len() / self.dim;
         assert_eq!(vectors.len(), n * self.dim);
         assert_all_finite(vectors);
+        let new_n = crate::util::checked_new_len(self.n_vectors, n, self.qwords_per_vec);
         let qpv = self.qwords_per_vec;
         let cutoff = (self.dim - self.n_top) as u16;
         let start = self.bitmaps.len();
@@ -83,7 +93,7 @@ impl Bitmap {
                     }
                 }
             });
-        self.n_vectors += n;
+        self.n_vectors = new_n;
     }
 
     /// Build the query-side bitmap from the *FP32 query directly*

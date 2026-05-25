@@ -270,6 +270,16 @@ impl Rank {
         }
     }
 
+    /// Add documents. Each vector is rank-transformed and stored row-major.
+    ///
+    /// # Panics
+    /// Panics if the index would grow beyond `rank_io::MAX_VECTORS` documents
+    /// — the supported capacity. Candidate APIs materialise document IDs as
+    /// `u32`; `MAX_VECTORS` sits well below `u32::MAX` and matches the on-disk
+    /// loader's `n_vectors` ceiling. (Bounds the count, not the byte payload —
+    /// see the loaders' separate `MAX_PAYLOAD` cap.) Also panics if the
+    /// resulting row-major buffer length would overflow `usize` (reachable only
+    /// on 32-bit targets — see `util::checked_new_len`).
     pub fn add(&mut self, vectors: &[f32]) {
         let n = vectors.len() / self.dim;
         assert_eq!(
@@ -278,6 +288,7 @@ impl Rank {
             "vectors length must be a multiple of dim",
         );
         assert_all_finite(vectors);
+        let new_n = crate::util::checked_new_len(self.n_vectors, n, self.dim);
         let start = self.ranks.len();
         self.ranks.resize(start + n * self.dim, 0);
         let dim = self.dim;
@@ -285,7 +296,7 @@ impl Rank {
             .par_chunks_mut(dim)
             .zip(vectors.par_chunks(dim))
             .for_each(|(out, v)| rank_transform_into(v, out));
-        self.n_vectors += n;
+        self.n_vectors = new_n;
     }
 
     /// Symmetric rank-cosine search: rank-transform the query, then

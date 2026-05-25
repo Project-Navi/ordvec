@@ -1,9 +1,10 @@
-//! libFuzzer target for [`ordvec::rank_io::load_sign_bitmap`] (the
-//! `.tvsb` / `TVSB` loader for [`ordvec::SignBitmapIndex`]).
+//! libFuzzer target for the `.tvsb` / `TVSB` loader, driven through the
+//! public `ordvec::SignBitmap::load` entry point.
 //!
-//! `rank_io` is `pub` in the crate root, so we drive the loader directly
-//! rather than through `SignBitmapIndex::load` — same loader code, one
-//! fewer wrapper. The loader takes a `&Path`, so each iteration writes
+//! The low-level `rank_io::load_sign_bitmap` parser is crate-internal
+//! (`pub(crate)`), so the fuzzer exercises it through `SignBitmap::load` —
+//! which runs that exact loader and then the type's post-load checks (the
+//! full public load path). `load` takes a `&Path`, so each iteration writes
 //! the arbitrary input to a unique temp file (auto-cleaned by `tempfile`).
 //!
 //! Contract: on arbitrary bytes the loader must return `Ok(..)` or
@@ -31,5 +32,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let _ = ordvec::rank_io::load_sign_bitmap(tmp.path());
+    let _ = ordvec::SignBitmap::load(tmp.path());
 });
