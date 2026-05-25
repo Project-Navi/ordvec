@@ -34,6 +34,10 @@ jobs:
     name: build + test + publish dry-run
     runs-on: ubuntu-latest
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
         with:
@@ -57,6 +61,10 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - name: assert ci.yml is green for this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,11 +92,51 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      # Required by actions/attest-build-provenance to write the SLSA
+      # provenance attestation for the published .crate.
+      attestations: write
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
         with:
           toolchain: stable
+      # Supply-chain attestation + SBOM, run BEFORE the publish so a failed
+      # attestation fails the release closed (the .crate is never pushed if we
+      # can't attest it). crates.io does not host SBOMs, so the CycloneDX SBOM
+      # is uploaded as a build artifact rather than shipped with the crate; the
+      # attestation below is GitHub-issued SLSA build provenance bound to the
+      # exact published .crate.
+      - name: Package the crate (produces the artifact to attest)
+        # Emits target/package/ordvec-<version>.crate — the precise byte-for-byte
+        # tarball that `cargo publish` uploads, so the provenance covers the
+        # published artifact.
+        run: cargo package -p ordvec --locked
+      - name: Generate CycloneDX SBOM for the crate
+        # cargo-cyclonedx writes ordvec.cdx.json (named <package>.cdx.json) at the
+        # repo root for the core crate. Verified locally: the command rejects
+        # `-p`; package scoping is via --manifest-path against the root manifest,
+        # which is the `ordvec` package.
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --manifest-path Cargo.toml --format json
+      - name: Attest build provenance for the .crate
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: target/package/*.crate
+      - name: Upload SBOM as a build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-crate
+          path: ordvec.cdx.json
+          if-no-files-found: error
+      # Mint the crates.io OIDC credential LAST — only here, immediately before
+      # publish, so the short-lived token is never live during the
+      # `cargo install cargo-cyclonedx` step (third-party code) or the
+      # attestation/upload steps. Minimises the token's exposure window.
       - name: Mint a short-lived crates.io credential (OIDC)
         id: auth
         uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
