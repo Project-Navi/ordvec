@@ -1014,7 +1014,7 @@ def test_write_to_nonexistent_directory_io_error(tmp_path):
     idx = Rank(dim=64)
     idx.add(unit_vectors(3, 64))
     with pytest.raises(IOError):
-        idx.write("/nonexistent_dir_ordvec_xyz/idx.tvr")
+        idx.write(str(tmp_path / "nonexistent_dir" / "idx.tvr"))
 
 
 # =====================================================================

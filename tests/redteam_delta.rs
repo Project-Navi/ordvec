@@ -45,8 +45,6 @@
 //! result). All tests below are passing assertions of correct behaviour;
 //! none are `#[ignore]`d.
 
-use std::io::Write;
-
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -110,7 +108,7 @@ fn forge(suffix: &str, bytes: &[u8]) -> TempFile {
         nonce,
         suffix
     ));
-    std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
+    std::fs::write(&p, bytes).unwrap();
     TempFile(p)
 }
 

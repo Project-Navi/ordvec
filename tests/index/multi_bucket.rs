@@ -140,7 +140,7 @@ fn multi_bucket_bilinear_diagonal_weights_skip_zeros() {
     let q_bitmaps = mb.query_bitmaps_from_ranks(&query);
 
     let q_buckets = bucket_ranks(&rank_transform(&query), 2);
-    for di in 0..8 {
+    for di in 0..std::cmp::min(8, N) {
         let doc = &corpus[di * D..(di + 1) * D];
         let d_buckets = bucket_ranks(&rank_transform(doc), 2);
         // Exact integer count (≤ D), representable in f32 with weight 1.0.
