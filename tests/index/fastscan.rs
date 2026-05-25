@@ -228,3 +228,37 @@ fn fastscan_construct_then_metadata_roundtrips() {
     // here N = 256 = 8 * 32 so no padding overhead.
     assert_eq!(fs.byte_size(), N * (D / 2));
 }
+
+// ---------------------------------------------------------------------------
+// Constructor domain: `RankQuantFastscan::new` must accept exactly the same
+// `dim` domain as `RankQuant::new(dim, 2)` — `dim % 4 == 0` (b=2 constant
+// composition) and `dim <= u16::MAX` (the u16 rank-transform invariant).
+// Without the tighter guard, a too-loose `dim` constructs successfully but
+// then either skews the analytical norm (dim % 4 != 0) or panics on the
+// first `add()` inside `rank_transform` (dim > u16::MAX) — a latent bug the
+// constructor should reject up front.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "divisible by 4")]
+fn fastscan_new_rejects_dim_2_not_multiple_of_4() {
+    // dim = 2 passes the old `dim % 2 == 0` guard but violates b=2's
+    // constant-composition (4 buckets can't each hold dim/4 = 0.5 ranks).
+    let _ = RankQuantFastscan::new(2);
+}
+
+#[test]
+#[should_panic(expected = "divisible by 4")]
+fn fastscan_new_rejects_dim_6_not_multiple_of_4() {
+    // dim = 6 is even but 6 % 4 == 2: buckets would be [2, 2, 1, 1], skewing
+    // the analytical rankquant_norm. `RankQuant::new(6, 2)` rejects it too.
+    let _ = RankQuantFastscan::new(6);
+}
+
+#[test]
+#[should_panic(expected = "fit in u16")]
+fn fastscan_new_rejects_dim_above_u16_max() {
+    // 65_536 satisfies `% 4 == 0` but exceeds u16::MAX, so it must be caught
+    // by the u16 bound — not deferred to a panic on the first add().
+    let _ = RankQuantFastscan::new(65_536);
+}
