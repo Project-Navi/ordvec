@@ -60,12 +60,15 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          conclusion="$(gh api \
-            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=1" \
-            --jq '.workflow_runs[0].conclusion // "missing"')"
-          echo "ci.yml conclusion for ${SHA}: ${conclusion}"
-          if [ "${conclusion}" != "success" ]; then
-            echo "::error::ci.yml is not green for ${SHA} (got: ${conclusion}). Push to main, let CI pass, then re-run this release."
+          # Require a SUCCESSFUL ci.yml run for this SHA *on main*. Filtering on
+          # the branch as well as head_sha stops a green run for the same commit
+          # on an unrelated branch from satisfying the gate.
+          ok="$(gh api \
+            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&branch=main&per_page=20" \
+            --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"
+          echo "successful ci.yml runs for ${SHA} on main: ${ok}"
+          if [ "${ok}" -lt 1 ]; then
+            echo "::error::no successful ci.yml run for ${SHA} on main. Push to main, let CI pass, then re-run this release."
             exit 1
           fi
 
