@@ -7,9 +7,11 @@ name: audit
 # freshly published advisory surfaces as a failing run rather than going unseen
 # between PRs — standard hygiene for a crate published to crates.io + PyPI.
 #
-# Read-only token, no `run:` steps (no injection surface); mirrors the action +
-# pinning convention of ci.yml's `deny` job (EmbarkStudios/cargo-deny-action@v2),
-# scoped here to `check advisories`.
+# Read-only token, no `run:` steps (no injection surface). Because this runs
+# UNATTENDED on a cron schedule, the third-party actions are SHA-pinned (not the
+# mutable @v4/@v2 tags ci.yml uses on human-triggered push/PR) so a compromised
+# tag update cannot auto-execute on a scheduled runner. Scoped to
+# `check advisories`.
 
 on:
   schedule:
@@ -28,7 +30,7 @@ jobs:
     name: cargo-deny advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: EmbarkStudios/cargo-deny-action@a531616d8ce3b9177443e48a1159bc945a099823 # v2.0.19
         with:
           command: check advisories
