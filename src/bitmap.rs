@@ -36,6 +36,19 @@ pub struct Bitmap {
 impl Bitmap {
     pub fn new(dim: usize, n_top: usize) -> Self {
         assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
+        // Bitmap rank-transforms each document (u16 ranks) and indexes the
+        // query side by u16 coordinate id, so `dim` must honour the same
+        // `dim <= u16::MAX` invariant as `Rank`/`RankQuant`. Without this cap a
+        // `dim > u16::MAX` index would construct here but then panic on the
+        // first `add` (rank_transform asserts `d <= u16::MAX`) or `search`
+        // (build_query_bitmap_fp32's `dim as u16` would truncate). The cap also
+        // keeps the constructor consistent with `load` (rank_io::check_dim caps
+        // at MAX_DIM), so any constructed index round-trips through persistence.
+        assert!(
+            dim <= crate::rank_io::MAX_DIM,
+            "dim must be <= {} (u16 rank invariant)",
+            crate::rank_io::MAX_DIM,
+        );
         assert!(n_top > 0 && n_top < dim, "0 < n_top < dim");
         Self {
             dim,
@@ -266,13 +279,20 @@ impl Bitmap {
         m: usize,
         batch_size: usize,
     ) -> Vec<Vec<u32>> {
+        assert!(batch_size > 0, "batch_size must be > 0");
         let dim = self.dim;
         let n_queries = queries.len() / dim;
         assert_eq!(queries.len(), n_queries * dim);
         if n_queries == 0 {
             return Vec::new();
         }
-        let chunk_floats = batch_size * dim;
+        // `batch_size * dim` is the per-chunk float count handed to
+        // `par_chunks`, which panics on a zero chunk size (guarded above) and
+        // must not wrap: a hostile `batch_size` near `usize::MAX` would
+        // silently truncate the chunk length in release. Fail loud instead.
+        let chunk_floats = batch_size
+            .checked_mul(dim)
+            .expect("batch_size * dim overflows usize");
         queries
             .par_chunks(chunk_floats)
             .flat_map_iter(|chunk| self.top_m_candidates_batched(chunk, m).into_iter())

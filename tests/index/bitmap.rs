@@ -345,3 +345,26 @@ fn bitmap_batched_matches_single_query() {
         .collect();
     assert_eq!(chunked, reference);
 }
+
+#[test]
+#[should_panic(expected = "u16 rank invariant")]
+fn bitmap_new_rejects_dim_above_u16_max() {
+    // dim = 65536 is a multiple of 64 but exceeds u16::MAX, so the rank
+    // transform (u16 ranks) and the query-side u16 coordinate indexing cannot
+    // represent it. The constructor must reject it loudly rather than construct
+    // an index that panics later in `add`/`search`, and stay consistent with
+    // the `.tvbm` loader (which caps dim at MAX_DIM).
+    let _ = Bitmap::new(65_536, 256);
+}
+
+#[test]
+#[should_panic(expected = "batch_size must be > 0")]
+fn bitmap_batched_chunked_rejects_zero_batch_size() {
+    // `batch_size = 0` makes the per-chunk float count zero, which would panic
+    // deep inside `par_chunks(0)`; the public method guards it up front.
+    let corpus = make_corpus(77);
+    let mut idx = Bitmap::new(D, D / 4);
+    idx.add(&corpus);
+    let q = corpus[..D].to_vec();
+    let _ = idx.top_m_candidates_batched_chunked(&q, 10, 0);
+}

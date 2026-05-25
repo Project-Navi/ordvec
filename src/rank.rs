@@ -74,8 +74,13 @@ pub fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> u8 {
     assert!(bits <= 7, "bits too large");
     assert!(d > 0, "d must be positive");
     let n_buckets = 1u32 << bits;
-    let b = (rank as u32 * n_buckets) / (d as u32);
-    b.min(n_buckets - 1) as u8
+    // u64 math: `d` is a `usize` and reaches this from the Python binding as a
+    // free argument, so `d as u32` could truncate a `d >= 2^32` (e.g. to 0,
+    // which would divide by zero and panic). rank ≤ u16::MAX and n_buckets ≤
+    // 128, so the product fits u64 comfortably; over the realistic d ≤ u16::MAX
+    // domain this is bit-identical to the previous u32 form.
+    let b = (rank as u64 * n_buckets as u64) / d as u64;
+    b.min(n_buckets as u64 - 1) as u8
 }
 
 /// Bucket every entry of a full rank vector.
@@ -475,6 +480,17 @@ mod tests {
         for c in counts {
             assert_eq!(c, d / 4);
         }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn rank_to_bucket_large_d_does_not_divide_by_zero() {
+        // `d` reaches this from the Python binding as a free `usize`; a `d`
+        // above `u32::MAX` must not truncate through `d as u32` to 0 and panic.
+        // 64-bit only: 2^40 isn't representable on a 32-bit usize.
+        let huge_d = 1usize << 40;
+        assert_eq!(rank_to_bucket(0, huge_d, 2), 0);
+        assert!(rank_to_bucket(u16::MAX, huge_d, 2) < 4);
     }
 
     #[test]
