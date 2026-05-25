@@ -153,6 +153,16 @@ pub(crate) unsafe fn scan_b2_asym_avx2(
 ) {
     use std::arch::x86_64::*;
 
+    // SAFETY: a `pub(crate) unsafe fn` reachable only via `quant.rs`'s
+    // runtime-detected dispatch, which upholds the invariants the raw
+    // `packed.as_ptr().add(di * bytes_per_vec)` doc reads and `q.as_ptr().add(..)`
+    // query loads below depend on:
+    //   * `packed.len() == n * bytes_per_vec` (all packed codes present),
+    //   * `q.len() >= dim` (per-chunk query loads stay in bounds),
+    //   * `dim % K == 0` (asserted immediately below).
+    // `RankQuant::{new,add}` pack exactly `bytes_per_vec` bytes/doc and
+    // `load_rankquant` re-validates the shape, so this holds on every path here.
+
     // Hard backstop: the dispatch in `quant.rs` must only route here
     // when `dim % 16 == 0`. Kept as a real `assert!` (not debug-only)
     // so a mis-dispatch fails loudly in release instead of silently
@@ -221,6 +231,16 @@ pub(crate) unsafe fn scan_b4_asym_avx2(
     top: &mut TopK,
 ) {
     use std::arch::x86_64::*;
+
+    // SAFETY: a `pub(crate) unsafe fn` reachable only via `quant.rs`'s
+    // runtime-detected dispatch, which upholds the invariants the raw
+    // `packed.as_ptr().add(di * bytes_per_vec)` doc reads and `q.as_ptr().add(..)`
+    // query loads below depend on:
+    //   * `packed.len() == n * bytes_per_vec` (all packed codes present),
+    //   * `q.len() >= dim` (per-chunk query loads stay in bounds),
+    //   * `dim % K == 0` (asserted immediately below).
+    // `RankQuant::{new,add}` pack exactly `bytes_per_vec` bytes/doc and
+    // `load_rankquant` re-validates the shape, so this holds on every path here.
 
     // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
     // loudly in release, not silently drop the trailing chunk.
@@ -303,6 +323,16 @@ pub(crate) unsafe fn scan_b2_asym_avx512(
 ) {
     use std::arch::x86_64::*;
 
+    // SAFETY: a `pub(crate) unsafe fn` reachable only via `quant.rs`'s
+    // runtime-detected dispatch, which upholds the invariants the raw
+    // `packed.as_ptr().add(di * bytes_per_vec)` doc reads and `q.as_ptr().add(..)`
+    // query loads below depend on:
+    //   * `packed.len() == n * bytes_per_vec` (all packed codes present),
+    //   * `q.len() >= dim` (per-chunk query loads stay in bounds),
+    //   * `dim % K == 0` (asserted immediately below).
+    // `RankQuant::{new,add}` pack exactly `bytes_per_vec` bytes/doc and
+    // `load_rankquant` re-validates the shape, so this holds on every path here.
+
     // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
     // loudly in release, not silently drop the trailing 64-code block.
     assert_eq!(
@@ -378,6 +408,16 @@ pub(crate) unsafe fn scan_b4_asym_avx512(
 ) {
     use std::arch::x86_64::*;
 
+    // SAFETY: a `pub(crate) unsafe fn` reachable only via `quant.rs`'s
+    // runtime-detected dispatch, which upholds the invariants the raw
+    // `packed.as_ptr().add(di * bytes_per_vec)` doc reads and `q.as_ptr().add(..)`
+    // query loads below depend on:
+    //   * `packed.len() == n * bytes_per_vec` (all packed codes present),
+    //   * `q.len() >= dim` (per-chunk query loads stay in bounds),
+    //   * `dim % K == 0` (asserted immediately below).
+    // `RankQuant::{new,add}` pack exactly `bytes_per_vec` bytes/doc and
+    // `load_rankquant` re-validates the shape, so this holds on every path here.
+
     // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
     // loudly in release, not silently drop the trailing 64-code block.
     assert_eq!(
@@ -417,6 +457,12 @@ pub(crate) unsafe fn scan_b4_asym_avx512(
                     let chunk_hi = (hi0 << 24) | (hi1 << 16) | (hi2 << 8) | hi3;
                     let lo_zmm = _mm512_set1_epi32(chunk_lo as i32);
                     let hi_zmm = _mm512_set1_epi32(chunk_hi as i32);
+                    // Blend mask 0xFF00 (bits 8-15 set): _mm512_mask_blend_epi32
+                    // takes lane i from `hi_zmm` where bit i is set, else from
+                    // `lo_zmm` — so lanes 0-7 <- chunk_lo, lanes 8-15 <- chunk_hi.
+                    // Pairs with `shifts` = [28,24,20,16,12,8,4,0] x2: lanes 0-7
+                    // extract chunk_lo's 8 nibbles (codes 0-7), lanes 8-15 extract
+                    // chunk_hi's (codes 8-15), most-significant nibble first.
                     let combined = _mm512_mask_blend_epi32(0xFF00u16, lo_zmm, hi_zmm);
                     let codes = _mm512_and_si512(_mm512_srlv_epi32(combined, shifts), mask_f);
                     let codes_f = _mm512_cvtepi32_ps(codes);
