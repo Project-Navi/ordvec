@@ -654,9 +654,15 @@ impl Bitmap {
     /// Compute bitmap-overlap scores for a subset of doc IDs against a pre-built
     /// query bitmap. `q_bitmap` is a 1-D `uint64` array of `dim / 64` words
     /// (e.g. from [`Bitmap.build_query_bitmap_fp32`]); `doc_ids` is a 1-D
-    /// `uint32` array that must be in range and sorted ascending (the core scans
-    /// sequential bitmap rows for cache locality). Returns a 1-D `uint32` array
-    /// of overlap scores aligned to `doc_ids`.
+    /// `uint32` array that must be in range. Returns a 1-D `uint32` array of
+    /// overlap scores aligned to `doc_ids`.
+    ///
+    /// `doc_ids` must additionally be sorted ascending. This is a *Python-side
+    /// ergonomic policy*, not a core requirement: the Rust core accepts unsorted
+    /// ids and scores them correctly in input order, just with worse cache
+    /// locality. The binding requires the sorted (cache-friendly) form so that
+    /// is the only path Python callers take — pass `np.sort(doc_ids)` if your
+    /// survivor set is unordered.
     fn body_overlap_scores_subset<'py>(
         &self,
         py: Python<'py>,
@@ -691,9 +697,11 @@ impl Bitmap {
                 "doc id {bad} out of range (index holds {n} vectors)"
             )));
         }
-        // The core contract requires ascending doc_ids (and debug builds assert
-        // it); enforce it here so a violation is a clean ValueError in every
-        // build mode rather than a debug-only panic.
+        // Python-side ergonomic policy (NOT a core correctness requirement):
+        // the Rust core scores unsorted ids correctly in input order, just with
+        // worse cache locality. The binding requires the sorted, cache-friendly
+        // form and returns a clean ValueError rather than silently running the
+        // slow path.
         if ids_slice.windows(2).any(|w| w[0] > w[1]) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "doc_ids must be sorted in ascending order",
