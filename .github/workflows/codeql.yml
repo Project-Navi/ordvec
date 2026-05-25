@@ -1,0 +1,72 @@
+name: codeql
+
+# CodeQL code scanning (GitHub's static-analysis / variant-analysis engine).
+# Scans the Rust core crate, the PyO3 Python bindings, and the GitHub Actions
+# workflows themselves, surfacing security findings as code-scanning alerts.
+#
+# build-mode: none — CodeQL's Rust support and build-less ("no-build") database
+# creation are GA (CodeQL >= 2.23.3). Rust, Python, and `actions` are all
+# analysed WITHOUT a compiler/interpreter run, so no `cargo build` (and no
+# MSRV toolchain) is needed here; the database is built directly from source.
+# This keeps the scan fast and independent of the build matrix.
+#
+# Least-privilege permissions: `security-events: write` is the only elevated
+# scope (required to upload SARIF / publish alerts); `contents: read` +
+# `actions: read` are read-only. Nothing else is granted.
+#
+# Because this workflow runs UNATTENDED on a cron schedule AND holds
+# `security-events: write`, every third-party action is SHA-pinned (immutable)
+# — a compromised mutable tag (@v3/@v6) cannot auto-execute on a scheduled,
+# write-scoped runner. harden-runner audits egress as the first step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly. Wednesday 07:42 UTC — deliberately off the audit.yml slot
+    # (Monday 06:17 UTC) so the two scheduled scans never collide.
+    - cron: "42 7 * * 3"
+
+# Least-privilege: read-only at the workflow level; the analyze job elevates to
+# security-events: write (the minimum CodeQL needs to publish alerts).
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload SARIF / publish code-scanning alerts
+      contents: read # checkout source
+      actions: read # read workflow run metadata (required by CodeQL)
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, python, actions]
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3
+        with:
+          languages: ${{ matrix.language }}
+          # No-build database creation (GA for rust/python/actions).
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3
+        with:
+          category: "/language:${{ matrix.language }}"
