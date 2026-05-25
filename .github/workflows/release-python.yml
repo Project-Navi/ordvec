@@ -70,7 +70,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip pytest numpy
+          python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
           python -m pip install ordvec-python/dist/*.whl
           python -m pytest ordvec-python/tests -q
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -112,7 +112,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip pytest numpy
+          python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
           python -m pip install ordvec-python/dist/*.tar.gz
           python -m pytest ordvec-python/tests -q
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
