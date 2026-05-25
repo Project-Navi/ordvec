@@ -1,0 +1,81 @@
+name: coverage-python
+
+# Coverage of the PyO3 binding's *Rust* layer (ordvec-python/src/lib.rs) as
+# exercised by the pytest suite — the half the core coverage.yml job (scoped
+# -p ordvec) cannot see. cargo-llvm-cov instruments the cdylib via a
+# RUSTC_WRAPPER (show-env); maturin builds that instrumented extension into a
+# venv; pytest drives it (each test process emits .profraw); and
+# "report -p ordvec-python" aggregates them. Uploaded to Codecov under the
+# python-binding flag so the binding's number is tracked apart from the core
+# line. Informational like the core coverage job: no floor yet (the FFI glue
+# has guard branches unreachable on 64-bit, e.g. the usize-overflow arms), and
+# fail_ci_if_error is false so a failed or absent upload never blocks a PR.
+# The upload runs without credentials (supported for public repos).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ordvec-python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/coverage-python.yml"
+  pull_request:
+    paths:
+      - "ordvec-python/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/coverage-python.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-python-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coverage-python:
+    name: coverage (binding, cargo-llvm-cov + pytest)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-llvm-cov (pinned)
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      # One shell: the cargo-llvm-cov env from show-env must stay live across the
+      # instrumented maturin build, the pytest run, and the report, so they share
+      # a single step. The venv isolates maturin's editable install.
+      - name: Build instrumented extension, run pytest, collect coverage
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --require-hashes -r ordvec-python/requirements-dev.txt
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          ( cd ordvec-python && maturin develop )
+          python -m pytest ordvec-python/tests -q
+          cargo llvm-cov report -p ordvec-python --summary-only
+          cargo llvm-cov report -p ordvec-python --lcov --output-path binding-lcov.info
+      - name: Upload binding coverage to Codecov
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        with:
+          files: binding-lcov.info
+          flags: python-binding
+          fail_ci_if_error: false
