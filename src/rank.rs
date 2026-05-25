@@ -95,6 +95,15 @@ pub fn bucket_ranks(ranks: &[u16], bits: u8) -> Vec<u8> {
 /// Layout: the bucket with index 0 occupies the most-significant bits
 /// of the first byte. Requires `bits ∈ {1, 2, 4}` and `d`'s length to
 /// be a multiple of `8 / bits`.
+///
+/// # Panics
+/// Panics if `bits ∉ {1, 2, 4}`, if `buckets.len()` is not a multiple
+/// of `8 / bits`, or if any code is `>= 1 << bits`. The last guard is
+/// the public-contract backstop: an out-of-range code would otherwise
+/// be silently truncated to `code & ((1 << bits) - 1)` and corrupt the
+/// packed stream. (Internal callers feed codes straight from
+/// [`rank_to_bucket`], which is always in range; this protects direct
+/// callers of the primitive.)
 pub fn pack_buckets(buckets: &[u8], bits: u8) -> Vec<u8> {
     assert!(matches!(bits, 1 | 2 | 4), "bits must be 1, 2, or 4");
     let codes_per_byte = (8 / bits) as usize;
@@ -104,15 +113,26 @@ pub fn pack_buckets(buckets: &[u8], bits: u8) -> Vec<u8> {
         0,
         "d ({d}) must be a multiple of codes_per_byte ({codes_per_byte}) for bits = {bits}",
     );
+    let mask = (1u8 << bits) - 1;
     let n_bytes = d / codes_per_byte;
     let mut out = vec![0u8; n_bytes];
-    let mask = (1u8 << bits) - 1;
     let bits_u = bits as usize;
+    // Pack in a single pass, failing loud on an out-of-range code rather than
+    // silently masking it (`code & mask` would turn e.g. 7 at bits=2 into 3,
+    // packing a different vector). Checking inside the loop keeps the
+    // fail-loud guarantee without a second O(d) pass over `buckets`; the
+    // branch is loop-invariant-predictable for the always-valid internal
+    // callers. Asserting `b <= mask` makes the trailing `& mask` redundant.
     for (i, &b) in buckets.iter().enumerate() {
+        assert!(
+            b <= mask,
+            "bucket code {b} out of range: every code must be < 1 << bits ({})",
+            mask as u16 + 1,
+        );
         let byte_idx = i / codes_per_byte;
         let pos = i % codes_per_byte;
         let shift = (codes_per_byte - 1 - pos) * bits_u;
-        out[byte_idx] |= (b & mask) << shift;
+        out[byte_idx] |= b << shift;
     }
     out
 }
@@ -160,8 +180,23 @@ pub fn rankquant_bytes_per_vec(d: usize, bits: u8) -> usize {
 /// With `2^B` equal-width bins on the rank axis the bucket centres
 /// after mean-centring are `b - (2^B - 1) / 2`, giving the symmetric
 /// pattern `..., -1.5, -0.5, +0.5, +1.5, ...` for `B = 2`.
+///
+/// # Panics
+/// Panics if `bits > 7` — bucket codes are `u8`, so the bit width is
+/// capped at the representable bucketing range, matching
+/// [`rank_to_bucket`] (the RankQuant family uses `bits ∈ {1, 2, 4}`).
+/// Also panics if `bucket >= 1 << bits`; this guard fails loud in *every*
+/// build — like the sibling [`pack_buckets`] check — so a direct caller
+/// cannot silently receive a centre outside the symmetric range. The
+/// internal LUT builders only ever pass `bucket ∈ [0, 1 << bits)` (the
+/// loop bound *is* `1 << bits`), so the assert never trips on the hot path.
 #[inline]
 pub fn bucket_centre(bucket: u8, bits: u8) -> f32 {
+    assert!(bits <= 7, "bits too large");
+    assert!(
+        (bucket as u32) < (1u32 << bits),
+        "bucket {bucket} out of range for bits = {bits}",
+    );
     let n = (1u32 << bits) as f32;
     bucket as f32 - (n - 1.0) / 2.0
 }
@@ -185,8 +220,15 @@ pub fn rank_norm(d: usize) -> f32 {
 ///
 /// The mean-centred bucket index has variance `(2^(2B) - 1) / 12`, so
 /// the per-vector L2 norm is `sqrt(d * (2^(2B) - 1) / 12)`.
+///
+/// # Panics
+/// Panics if `bits ∉ {1, 2, 4}`, mirroring the [`crate::RankQuant`]
+/// bit-width domain (and [`rankquant_bytes_per_vec`]). Without it a
+/// nonsensical `bits` would return a norm for a scheme that does not
+/// exist (or overflow `1 << bits`).
 #[inline]
 pub fn rankquant_norm(d: usize, bits: u8) -> f32 {
+    assert!(matches!(bits, 1 | 2 | 4), "bits must be 1,2,4");
     let n = (1u32 << bits) as f64;
     let var = (n * n - 1.0) / 12.0;
     ((d as f64) * var).sqrt() as f32
@@ -564,5 +606,38 @@ mod tests {
             (analytical - direct).abs() / direct < 1e-5,
             "analytical {analytical}, direct {direct}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn pack_buckets_rejects_out_of_range_code() {
+        // Code 7 at bits=2 is out of `[0, 4)`. The old `& mask` silently
+        // packed it as 3; the contract now rejects it loud.
+        let _ = pack_buckets(&[7, 7, 7, 7], 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "bits too large")]
+    fn bucket_centre_rejects_bits_above_7() {
+        // bits >= 32 overflows `1 << bits`; the guard caps at 7 (the u8
+        // bucket domain), matching `rank_to_bucket`.
+        let _ = bucket_centre(0, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range for bits")]
+    fn bucket_centre_rejects_out_of_range_bucket() {
+        // bucket 4 at bits=2 is outside [0, 4). The guard now fails loud in
+        // release too (was debug-only), matching pack_buckets and the Python
+        // wrapper — otherwise the caller silently gets a centre of +2.5.
+        let _ = bucket_centre(4, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "bits must be 1,2,4")]
+    fn rankquant_norm_rejects_invalid_bits() {
+        // 3-bit packing has no RankQuant scheme; the norm must refuse it
+        // rather than return a value for a non-existent layout.
+        let _ = rankquant_norm(64, 3);
     }
 }

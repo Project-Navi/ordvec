@@ -77,6 +77,50 @@ fn bitmap_then_subset_recovers_exact_when_m_eq_n() {
 }
 
 #[test]
+fn body_overlap_subset_accepts_unsorted_ids_in_input_order() {
+    // Contract: `doc_ids` need NOT be sorted. Unsorted ids are accepted and
+    // scored correctly, with each output aligned to the *input* position
+    // (sorting is only a cache-locality preference). Pin it on the Rust side —
+    // the Python binding's tests only cover the stricter Python policy that
+    // *rejects* unsorted ids, so nothing else proves the core's promise.
+    let corpus = make_corpus(7_654);
+    let n_top = D / 4;
+    let mut bitmap = Bitmap::new(D, n_top);
+    bitmap.add(&corpus);
+
+    // Self-query of doc 7: its query bitmap equals doc 7's stored bitmap, so
+    // doc 7's overlap is exactly n_top (maximal), while docs 1 and 4 score
+    // lower. That makes the input-order alignment check below non-trivial.
+    let query: Vec<f32> = corpus[7 * D..8 * D].to_vec();
+    let q_bitmap = bitmap.build_query_bitmap_fp32(&query);
+
+    let ids: [u32; 3] = [7, 1, 4]; // deliberately unsorted, all in range
+    let mut out = vec![0u32; ids.len()];
+    bitmap.body_overlap_scores_subset(&q_bitmap, &ids, &mut out);
+
+    // Output is aligned to input order: position 0 is doc 7 (the self-query),
+    // so it must be the maximal n_top. A doc-id-sorting implementation would
+    // place doc 1 here instead, and this would fail.
+    assert_eq!(
+        out[0], n_top as u32,
+        "unsorted batch must score in input order: out[0] is doc 7 (self-query = n_top)"
+    );
+
+    // Full correctness + alignment: each batch score equals the same doc
+    // scored on its own (a single-element subset is trivially sorted), so
+    // `single` is ground truth for `ids[i]`.
+    for (i, &id) in ids.iter().enumerate() {
+        let mut single = [0u32; 1];
+        bitmap.body_overlap_scores_subset(&q_bitmap, &[id], &mut single);
+        assert_eq!(
+            out[i], single[0],
+            "unsorted id {id} at position {i}: batch {} != individual {}",
+            out[i], single[0]
+        );
+    }
+}
+
+#[test]
 fn bitmap_top_m_candidates_uses_no_ground_truth() {
     // Sanity guardrail: top_m_candidates must depend only on the
     // query embedding (rank transform) and the stored bitmaps. The

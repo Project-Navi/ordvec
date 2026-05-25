@@ -116,6 +116,14 @@ def test_bucket_centre_symmetric():
     assert [bucket_centre(b, 2) for b in range(4)] == [-1.5, -0.5, 0.5, 1.5]
 
 
+def test_bucket_centre_rejects_out_of_range_bucket():
+    # bucket 4 at bits=2 is outside [0, 4). The core hard-asserts this in every
+    # build; the binding must surface it as a clean ValueError, never a
+    # PanicException (mirrors pack_buckets' out-of-range guard).
+    with pytest.raises(ValueError, match="out of range"):
+        bucket_centre(4, 2)
+
+
 def test_rank_norm_matches_direct():
     d = 1024
     mean = (d - 1) / 2

@@ -25,6 +25,9 @@
 //! * `bits` is checked against `{1, 2, 4}` before any multiplication.
 //! * Total payload size is computed via [`usize::checked_mul`] and
 //!   rejected if it overflows.
+//! * The declared payload must match the file's remaining bytes
+//!   *exactly* — a structurally-valid file with trailing bytes is
+//!   rejected (v1 formats have no footer or reserved trailing section).
 //! * Per-index invariants (e.g., `dim % (1 << bits) == 0` for RankQuant)
 //!   are returned as `Err(InvalidData)`, never `assert!`'d.
 //!
@@ -82,7 +85,7 @@ fn try_alloc_zeroed(n: usize) -> io::Result<Vec<u8>> {
 /// recoverable error — and holds both the byte buffer and the typed `Vec`
 /// live at once (2x peak). Reserving fallibly and reading element-by-element
 /// removes both problems. The size guards ([`check_payload_bytes`],
-/// [`check_payload_fits_file`]) run *before* this call; `read_le_vec`
+/// [`check_payload_matches_file`]) run *before* this call; `read_le_vec`
 /// reserves the same element count those guards validated.
 fn read_le_vec<R: Read, T, const W: usize>(
     r: &mut R,
@@ -100,25 +103,36 @@ fn read_le_vec<R: Read, T, const W: usize>(
     Ok(v)
 }
 
-/// Reject a declared payload that cannot fit in the file's remaining bytes.
+/// Reject a declared payload whose size does not *exactly* match the
+/// file's remaining bytes.
 ///
 /// `reader` is positioned just past the header; `file_len` is the file's
-/// total length. A file cannot contain more payload than its own length,
-/// so this catches a forged "tiny header claims gigabytes" before any
-/// allocation — the primary defense, with [`try_alloc_zeroed`] as
-/// defense-in-depth. `stream_position` gives the bytes already consumed
-/// without manual offset accounting.
-fn check_payload_fits_file<R: Seek>(
+/// total length. The payload is the sole, final section of every v1
+/// format (no footer, no appended sections), so the declared payload
+/// must consume the rest of the file exactly:
+/// * `payload > remaining` catches a forged "tiny header claims
+///   gigabytes" before any allocation — the primary size defense, with
+///   [`try_alloc_zeroed`] as defense-in-depth.
+/// * `payload < remaining` rejects a structurally-valid file with
+///   trailing bytes (corruption, or a record smuggling extra data past
+///   a smaller declared payload). A canonical index file has no slack;
+///   a future format that reserves a trailing section will carry a new
+///   magic/version and its own loader.
+///
+/// `stream_position` gives the bytes already consumed without manual
+/// offset accounting.
+fn check_payload_matches_file<R: Seek>(
     reader: &mut R,
     file_len: u64,
     payload_bytes: usize,
 ) -> io::Result<()> {
     let pos = reader.stream_position()?;
     let remaining = file_len.saturating_sub(pos);
-    if payload_bytes as u64 > remaining {
-        return Err(invalid(
-            "declared payload exceeds remaining file size (truncated or forged header)",
-        ));
+    if payload_bytes as u64 != remaining {
+        return Err(invalid(format!(
+            "declared payload ({payload_bytes} B) does not match remaining \
+             file size ({remaining} B): truncated, forged, or trailing bytes"
+        )));
     }
     Ok(())
 }
@@ -226,7 +240,7 @@ pub fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u16>)>
         .and_then(|x| x.checked_mul(2))
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, file_len, payload_bytes)?;
     // `payload_bytes == n_vectors * dim * 2`, so the u16 element count is
     // `payload_bytes / 2`. Read directly into a fallibly reserved Vec<u16>
     // instead of allocating a byte buffer and `.collect()`-ing it — the old
@@ -350,7 +364,7 @@ pub fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, V
         .map(|x| x / 8)
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, file_len, payload_bytes)?;
     let mut packed = try_alloc_zeroed(payload_bytes)?;
     f.read_exact(&mut packed)?;
     // Constant-composition invariant: every document must place exactly
@@ -451,7 +465,7 @@ pub fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, V
         .and_then(|x| x.checked_mul(8))
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, file_len, payload_bytes)?;
     // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.
@@ -548,7 +562,7 @@ pub fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec
         .and_then(|x| x.checked_mul(8))
         .ok_or_else(|| invalid("payload size overflows usize"))?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_fits_file(&mut f, file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, file_len, payload_bytes)?;
     // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.

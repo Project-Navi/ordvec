@@ -141,3 +141,83 @@ fn load_sign_bitmap_accepts_any_bit_pattern() {
         "sign bitmap doc count preserved after edit"
     );
 }
+
+#[test]
+fn loaders_reject_trailing_bytes() {
+    // Every v1 format's payload is the file's final section, so the loader
+    // requires the declared payload to consume the rest of the file exactly
+    // (`check_payload_matches_file`). A structurally-valid file with even one
+    // extra trailing byte must be rejected on all four formats — otherwise a
+    // record could smuggle data past a smaller declared payload, or silent
+    // corruption would pass unnoticed. One byte is appended past the payload
+    // and each loader must now error.
+    let corpus = make_corpus(5);
+    let n_top = D / 4;
+
+    // Rank (.tvr)
+    {
+        let mut idx = Rank::new(D);
+        idx.add(&corpus);
+        let p = tmp("rank_trail");
+        idx.write(&p).unwrap();
+        assert!(Rank::load(&p).is_ok(), "valid Rank file must load");
+        let mut bytes = read_bytes(&p);
+        bytes.push(0x00);
+        write_bytes(&p, &bytes);
+        let r = Rank::load(&p);
+        std::fs::remove_file(&p).ok();
+        assert!(r.is_err(), "Rank::load must reject trailing bytes");
+    }
+
+    // RankQuant (.tvrq)
+    {
+        let mut idx = RankQuant::new(D, 2);
+        idx.add(&corpus);
+        let p = tmp("rq_trail");
+        idx.write(&p).unwrap();
+        assert!(
+            RankQuant::load(&p).is_ok(),
+            "valid RankQuant file must load"
+        );
+        let mut bytes = read_bytes(&p);
+        bytes.push(0x00);
+        write_bytes(&p, &bytes);
+        let r = RankQuant::load(&p);
+        std::fs::remove_file(&p).ok();
+        assert!(r.is_err(), "RankQuant::load must reject trailing bytes");
+    }
+
+    // Bitmap (.tvbm)
+    {
+        let mut idx = Bitmap::new(D, n_top);
+        idx.add(&corpus);
+        let p = tmp("bm_trail");
+        idx.write(&p).unwrap();
+        assert!(Bitmap::load(&p).is_ok(), "valid Bitmap file must load");
+        let mut bytes = read_bytes(&p);
+        bytes.push(0x00);
+        write_bytes(&p, &bytes);
+        let r = Bitmap::load(&p);
+        std::fs::remove_file(&p).ok();
+        assert!(r.is_err(), "Bitmap::load must reject trailing bytes");
+    }
+
+    // SignBitmap (.tvsb) — no composition invariant, but the exact-EOF
+    // length guard still applies.
+    {
+        let mut idx = SignBitmap::new(D);
+        idx.add(&corpus);
+        let p = tmp("sb_trail");
+        idx.write(&p).unwrap();
+        assert!(
+            SignBitmap::load(&p).is_ok(),
+            "valid SignBitmap file must load"
+        );
+        let mut bytes = read_bytes(&p);
+        bytes.push(0x00);
+        write_bytes(&p, &bytes);
+        let r = SignBitmap::load(&p);
+        std::fs::remove_file(&p).ok();
+        assert!(r.is_err(), "SignBitmap::load must reject trailing bytes");
+    }
+}

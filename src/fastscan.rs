@@ -504,11 +504,39 @@ pub struct RankQuantFastscan {
 impl RankQuantFastscan {
     /// Construct an empty FastScan b=2 index.
     ///
+    /// The accepted `dim` domain mirrors
+    /// [`RankQuant::new(dim, 2)`](crate::RankQuant::new) exactly, so a
+    /// FastScan index and its single-rate sibling agree on which
+    /// dimensions are valid:
+    ///
+    /// - `dim <= u16::MAX` — the rank transform stores ranks as `u16`.
+    ///   A larger `dim` would construct here but panic on the first
+    ///   [`add`](Self::add), inside
+    ///   [`rank_transform`](crate::rank::rank_transform).
+    /// - `dim % 4 == 0` — b=2 buckets the rank axis into `2^2 = 4` equal
+    ///   bins, so exactly `dim / 4` coordinates land in each bucket and
+    ///   the analytical
+    ///   [`rankquant_norm`](crate::rank::rankquant_norm) stays exact.
+    ///   This subsumes the pair-encoding's `dim % 2 == 0`.
+    ///
     /// # Panics
-    /// Panics if `dim < 2` or `dim % 2 != 0`.
+    /// Panics if `dim < 2`, `dim > u16::MAX`, or `dim % 4 != 0`.
     pub fn new(dim: usize) -> Self {
         assert!(dim >= 2, "FastScan b=2: dim must be >= 2");
-        assert_eq!(dim % 2, 0, "FastScan b=2: dim {dim} must be even");
+        assert!(
+            dim <= u16::MAX as usize,
+            "FastScan b=2: dim must fit in u16"
+        );
+        // Mirror `RankQuant::new(dim, 2)`: divisible by 2^bits = 4 so
+        // every bucket receives exactly dim/4 ranks (keeps the analytical
+        // rankquant_norm exact). dim % 4 == 0 implies the pair-encoding's
+        // dim % 2 == 0, so this single check subsumes the old even guard.
+        assert_eq!(
+            dim % 4,
+            0,
+            "FastScan b=2: dim {dim} must be divisible by 4 \
+             (b=2 constant composition; matches RankQuant::new(dim, 2))"
+        );
         Self {
             dim,
             n_vectors: 0,

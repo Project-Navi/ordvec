@@ -310,11 +310,24 @@ impl Bitmap {
             .collect()
     }
 
-    /// Compute bitmap-overlap scores for a sorted subset of doc IDs.
-    /// `doc_ids` MUST be in ascending order (callers ensure this so
-    /// the body scan is sequential over nearby bitmap rows — random-
-    /// access gather would defeat the cache locality argument).
-    /// `out` is filled in the same order as `doc_ids`.
+    /// Compute bitmap-overlap scores for a subset of doc IDs.
+    ///
+    /// `doc_ids` *should* be in ascending order for best cache locality:
+    /// the body scan walks the bitmap rows in the given order, so a sorted
+    /// list reads nearby rows sequentially while a shuffled list scatters
+    /// across the allocation. Unsorted IDs are still accepted and scored
+    /// correctly in input order — sortedness is a performance preference,
+    /// not a correctness requirement. `out` is filled in the same order as
+    /// `doc_ids`.
+    ///
+    /// Every id is still hard-bounds-checked against `n_vectors` before the
+    /// unsafe scan dispatches (an out-of-range id would otherwise drive a
+    /// raw AVX-512 load past the allocation); that check is the actual
+    /// safety contract, distinct from the locality preference above.
+    ///
+    /// Document IDs are `u32` across the candidate APIs (here and the
+    /// `top_m_candidates` family, which enumerate `0..n_vectors`), so an
+    /// index addresses at most `u32::MAX` documents.
     ///
     /// Public surface to support staged-pipeline callers that need to
     /// rescore a small survivor set under the exact body overlap.
@@ -335,10 +348,11 @@ impl Bitmap {
             "body_overlap_scores_subset: doc_id out of range [0, {})",
             self.n_vectors,
         );
-        debug_assert!(
-            doc_ids.windows(2).all(|w| w[0] <= w[1]),
-            "body_overlap_scores_subset: doc_ids must be sorted ascending",
-        );
+        // No sortedness assert: unsorted `doc_ids` are scored correctly in
+        // input order (each row is read independently below), only with
+        // worse cache locality. The doc comment frames sorting as a
+        // performance preference, so a debug_assert here would wrongly
+        // panic on valid-but-unsorted input.
 
         #[cfg(target_arch = "x86_64")]
         let use_avx512vpop = is_x86_feature_detected!("avx512f")

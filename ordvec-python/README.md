@@ -11,7 +11,8 @@ import ordvec
 
 q = ordvec.RankQuant(1024, 2)          # 1024-dim, 2 bits/coord
 q.add(np.random.randn(10_000, 1024).astype(np.float32))
-scores, ids = q.search(np.random.randn(8, 1024).astype(np.float32), k=10)
+# asymmetric: full-precision float queries vs bucketed docs (recommended)
+scores, ids = q.search_asymmetric(np.random.randn(8, 1024).astype(np.float32), k=10)
 ```
 
 ## Classes
