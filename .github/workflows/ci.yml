@@ -148,6 +148,29 @@ jobs:
         run: cargo publish -p ordvec --dry-run --locked
 
   # ----------------------------------------------------------------------
+  # Pin the release-publish SBOM invariants. release-*.yml are
+  # workflow_dispatch-only, so their "generate SBOM then publish" flow never runs
+  # in push/PR CI — a generated *.cdx.json once broke both publish paths and would
+  # only have surfaced at manual release. This exercises the invariants every
+  # push/PR (see tests/release_publish_invariants.sh).
+  # ----------------------------------------------------------------------
+  release-guard:
+    name: release-publish invariants
+    runs-on: ubuntu-latest
+    # Least-privilege: the guard only runs git check-ignore + grep on the
+    # checked-out tree, so a read-only token is all it needs (explicit here even
+    # though the workflow default is already contents: read).
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: release-publish SBOM invariants
+        run: bash tests/release_publish_invariants.sh
+
+  # ----------------------------------------------------------------------
   # Supply-chain policy gate. The `deps` job's cargo-tree grep is a coarse
   # "no BLAS/ndarray/faer" guard; this job enforces the fine-grained, auditable
   # policy in deny.toml — RUSTSEC advisories, the license allow-list, banned /

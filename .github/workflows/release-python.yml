@@ -201,5 +201,11 @@ jobs:
           subject-path: |
             dist/*.whl
             dist/*.tar.gz
+      # The merge-multiple download above pulls EVERY artifact into dist/,
+      # including sbom-python (.cdx.json). PyPI/twine accept only wheels + sdists,
+      # so a stray .cdx.json fails the upload. Drop it here (after attestation,
+      # which covers only the dists); the SBOM remains the `sbom-python` artifact.
+      - name: Drop the SBOM from the PyPI upload dir (wheels + sdist only)
+        run: find dist -name '*.cdx.json' -delete
       - name: Publish to PyPI (Trusted Publishing; PEP 740 attestations on by default)
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
