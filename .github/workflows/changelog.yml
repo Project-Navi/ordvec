@@ -1,18 +1,21 @@
 name: changelog
 
-# Cut a GitHub Release with git-cliff-generated notes when a vX.Y.Z tag is
-# pushed. This job does NOT write to `main` — `main` is branch-protected
-# (no direct pushes, signed commits, required reviews), so the in-repo
-# CHANGELOG.md is curated via the release PR (see CONTRIBUTING.md "Releases").
-# git-cliff authors only the public GitHub Release notes here.
+# Cut a GitHub Release with git-cliff-generated notes when a stable
+# vMAJOR.MINOR.PATCH tag is pushed. This job does NOT write to `main` — `main`
+# is branch-protected (no direct pushes, signed commits, required reviews), so
+# the in-repo CHANGELOG.md is curated via the release PR (see CONTRIBUTING.md
+# "Releases"). git-cliff authors only the public GitHub Release notes here.
 #
 # The Release is created as a DRAFT so the generated notes get a final human
 # check before they go public (this repo holds a fiction-free, publishable-grade
 # bar). Drop `--draft` below once you trust the output.
 #
-# The `v*.*.*` trigger matches any 3-part v-tag (multi-digit included); the
-# job-level `if` guard below then skips pre-release tags (e.g. v0.3.0-rc.1), so
-# only stable vMAJOR.MINOR.PATCH releases produce notes.
+# Tag handling: GitHub Actions tag globs cannot express "digits only" (and `+`
+# is unreliable there), so the trigger is a deliberately loose
+# `v[0-9]*.[0-9]*.[0-9]*` and the gate step enforces the exact stable shape
+# `^v[0-9]+\.[0-9]+\.[0-9]+$`. A pre-release (v0.3.0-rc.1) or non-SemVer
+# (v1.2.3.4, vfoo.bar.baz) tag therefore wakes the job but skips every step
+# below the gate — no checkout, no git-cliff, no Release.
 #
 # Injection-safety: the only external value used in a run: step is the tag name,
 # bound to the `TAG_NAME` env var from `github.ref_name` and used as the quoted
@@ -22,7 +25,7 @@ name: changelog
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]*.[0-9]*.[0-9]*"
 
 concurrency:
   group: changelog-${{ github.ref }}
@@ -35,16 +38,27 @@ jobs:
   release-notes:
     name: release notes (git-cliff)
     runs-on: ubuntu-latest
-    # The `v*.*.*` trigger also matches pre-release tags; skip anything with a
-    # hyphen (v0.3.0-rc.1, ...) so only stable releases get release notes.
-    if: ${{ !contains(github.ref_name, '-') }}
     steps:
+      - name: Gate on a stable SemVer tag
+        id: semver
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG_NAME is not a stable vMAJOR.MINOR.PATCH tag; skipping release notes."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
       # actions/checkout v4.3.1, SHA-pinned — a contents:write job pins ALL
       # tooling to immutable refs (no mutable tags), git-cliff-action included.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - if: steps.semver.outputs.ok == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0 # full history + tags for git-cliff
       - name: Generate release notes
+        if: steps.semver.outputs.ok == 'true'
         # orhun/git-cliff-action v4.8.0, SHA-pinned (supply-chain hygiene for a
         # workflow holding a contents:write token).
         uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5
@@ -54,6 +68,7 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
       - name: Create draft GitHub Release
+        if: steps.semver.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
