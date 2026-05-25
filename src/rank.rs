@@ -114,22 +114,25 @@ pub fn pack_buckets(buckets: &[u8], bits: u8) -> Vec<u8> {
         "d ({d}) must be a multiple of codes_per_byte ({codes_per_byte}) for bits = {bits}",
     );
     let mask = (1u8 << bits) - 1;
-    // Fail loud on out-of-range codes rather than silently masking them:
-    // `(b & mask)` below would turn e.g. code 7 at bits=2 into 3, packing a
-    // different vector than the caller intended. Surface it at the boundary.
-    assert!(
-        buckets.iter().all(|&b| b <= mask),
-        "bucket code out of range: every code must be < 1 << bits ({})",
-        mask as u16 + 1,
-    );
     let n_bytes = d / codes_per_byte;
     let mut out = vec![0u8; n_bytes];
     let bits_u = bits as usize;
+    // Pack in a single pass, failing loud on an out-of-range code rather than
+    // silently masking it (`code & mask` would turn e.g. 7 at bits=2 into 3,
+    // packing a different vector). Checking inside the loop keeps the
+    // fail-loud guarantee without a second O(d) pass over `buckets`; the
+    // branch is loop-invariant-predictable for the always-valid internal
+    // callers. Asserting `b <= mask` makes the trailing `& mask` redundant.
     for (i, &b) in buckets.iter().enumerate() {
+        assert!(
+            b <= mask,
+            "bucket code {b} out of range: every code must be < 1 << bits ({})",
+            mask as u16 + 1,
+        );
         let byte_idx = i / codes_per_byte;
         let pos = i % codes_per_byte;
         let shift = (codes_per_byte - 1 - pos) * bits_u;
-        out[byte_idx] |= (b & mask) << shift;
+        out[byte_idx] |= b << shift;
     }
     out
 }
@@ -179,14 +182,14 @@ pub fn rankquant_bytes_per_vec(d: usize, bits: u8) -> usize {
 /// pattern `..., -1.5, -0.5, +0.5, +1.5, ...` for `B = 2`.
 ///
 /// # Panics
-/// Panics if `bits > 7` (`1 << bits` would overflow the `u32` bin count
-/// and silently wrap in release) or if `bucket >= 1 << bits`. The bucket
-/// guard fails loud in *every* build — like the sibling [`pack_buckets`]
-/// check — so a direct caller cannot silently receive a centre outside
-/// the symmetric range. The internal LUT builders only ever pass
-/// `bucket ∈ [0, 1 << bits)` (the loop bound *is* `1 << bits`), so the
-/// assert never trips on the hot path and is dominated by the doc scan
-/// regardless.
+/// Panics if `bits > 7` — bucket codes are `u8`, so the bit width is
+/// capped at the representable bucketing range, matching
+/// [`rank_to_bucket`] (the RankQuant family uses `bits ∈ {1, 2, 4}`).
+/// Also panics if `bucket >= 1 << bits`; this guard fails loud in *every*
+/// build — like the sibling [`pack_buckets`] check — so a direct caller
+/// cannot silently receive a centre outside the symmetric range. The
+/// internal LUT builders only ever pass `bucket ∈ [0, 1 << bits)` (the
+/// loop bound *is* `1 << bits`), so the assert never trips on the hot path.
 #[inline]
 pub fn bucket_centre(bucket: u8, bits: u8) -> f32 {
     assert!(bits <= 7, "bits too large");

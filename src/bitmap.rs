@@ -325,6 +325,10 @@ impl Bitmap {
     /// raw AVX-512 load past the allocation); that check is the actual
     /// safety contract, distinct from the locality preference above.
     ///
+    /// Document IDs are `u32` across the candidate APIs (here and the
+    /// `top_m_candidates` family, which enumerate `0..n_vectors`), so an
+    /// index addresses at most `u32::MAX` documents.
+    ///
     /// Public surface to support staged-pipeline callers that need to
     /// rescore a small survivor set under the exact body overlap.
     pub fn body_overlap_scores_subset(&self, q_bitmap: &[u64], doc_ids: &[u32], out: &mut [u32]) {
