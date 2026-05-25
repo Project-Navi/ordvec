@@ -48,3 +48,19 @@ path = "fuzz_targets/load_sign_bitmap.rs"
 test = false
 doc = false
 bench = false
+
+# Hot-path targets (beyond the loaders): the ingest + asymmetric-search compute
+# path, and the write -> load round-trip the loader targets never reach.
+[[bin]]
+name = "search_rankquant"
+path = "fuzz_targets/search_rankquant.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip_rankquant"
+path = "fuzz_targets/roundtrip_rankquant.rs"
+test = false
+doc = false
+bench = false

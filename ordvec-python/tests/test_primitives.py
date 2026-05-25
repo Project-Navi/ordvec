@@ -171,7 +171,7 @@ def test_search_asymmetric_byte_lut_rejects_b1():
     vectors = rng.standard_normal((10, 128)).astype(np.float32)
     idx = RankQuant(dim=128, bits=1)
     idx.add(vectors)
-    with pytest.raises(ValueError, match="2, 4"):
+    with pytest.raises(ValueError, match="benchmark-only"):
         search_asymmetric_byte_lut(idx, vectors[:2], k=5)
 
 

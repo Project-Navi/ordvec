@@ -453,7 +453,7 @@ impl TopK {
 
 #[cfg(test)]
 mod tests {
-    use super::{and_popcount, checked_new_len, xor_popcount};
+    use super::{and_popcount, checked_new_len, xor_popcount, TopK};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -482,6 +482,20 @@ mod tests {
                 assert_eq!(xor_popcount(&d, &q), naive_xor(&d, &q), "XOR qpv={qpv}");
             }
         }
+    }
+
+    #[test]
+    fn topk_zero_k_is_inert() {
+        // k == 0 arises when an empty index clamps `k = min(requested, n) = 0`.
+        // `maybe_insert` must be a no-op and `finalize_into` must emit nothing —
+        // never panic or index out of bounds on the zero-length slots.
+        let mut top = TopK::new(0);
+        top.maybe_insert(1.0, 0);
+        top.maybe_insert(f32::NEG_INFINITY, 7);
+        let mut scores: [f32; 0] = [];
+        let mut indices: [i64; 0] = [];
+        top.finalize_into(&mut scores, &mut indices);
+        assert!(scores.is_empty() && indices.is_empty());
     }
 
     #[test]

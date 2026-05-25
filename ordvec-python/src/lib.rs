@@ -206,6 +206,9 @@ impl Rank {
     }
 
     /// Serialise the rank index to a `.tvr` file.
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     fn write(&self, path: &str) -> PyResult<()> {
         self.inner
             .write(path)
@@ -213,6 +216,9 @@ impl Rank {
     }
 
     /// Load a `Rank` index from a `.tvr` file previously written by [`Rank.write`].
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     #[classmethod]
     fn load(_cls: &Bound<PyType>, path: &str) -> PyResult<Self> {
         let inner = ordvec_core::Rank::load(path)
@@ -379,12 +385,20 @@ impl RankQuant {
         Ok((scores, indices))
     }
 
+    /// Serialise the quantised index to a `.tvrq` file.
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     fn write(&self, path: &str) -> PyResult<()> {
         self.inner
             .write(path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
+    /// Load a `RankQuant` index from a `.tvrq` file written by [`RankQuant.write`].
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     #[classmethod]
     fn load(_cls: &Bound<PyType>, path: &str) -> PyResult<Self> {
         let inner = ordvec_core::RankQuant::load(path)
@@ -786,12 +800,20 @@ impl Bitmap {
         self.inner.is_empty()
     }
 
+    /// Serialise the bitmap index to a `.tvbm` file.
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     fn write(&self, path: &str) -> PyResult<()> {
         self.inner
             .write(path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
+    /// Load a `Bitmap` index from a `.tvbm` file written by [`Bitmap.write`].
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     #[classmethod]
     fn load(_cls: &Bound<PyType>, path: &str) -> PyResult<Self> {
         let inner = ordvec_core::Bitmap::load(path)
@@ -977,6 +999,9 @@ impl SignBitmap {
 
     /// Persist the sign-bitmap payload to a `.tvsb` file. Format: 13-byte header
     /// (`TVSB` magic + version + dim + n_vectors) + LE u64 bitmaps.
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     fn write(&self, path: &str) -> PyResult<()> {
         self.inner
             .write(path)
@@ -986,6 +1011,9 @@ impl SignBitmap {
     /// Load a `SignBitmap` from a `.tvsb` file previously written by
     /// [`SignBitmap.write`]. Raises `IOError` if the file is missing, malformed,
     /// or its payload length disagrees with the header-declared shape.
+    ///
+    /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
+    /// sanitisation — so treat it as trusted input (see the module docstring).
     #[classmethod]
     fn load(_cls: &Bound<PyType>, path: &str) -> PyResult<Self> {
         let inner = ordvec_core::SignBitmap::load(path)
@@ -1203,7 +1231,7 @@ fn search_asymmetric_byte_lut<'py>(
 ) -> PyResult<SearchArrays<'py>> {
     if index.inner.bits() == 1 {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "search_asymmetric_byte_lut requires bits in {2, 4}; use RankQuant.search_asymmetric for b=1",
+            "search_asymmetric_byte_lut is a benchmark-only helper and does not support bits=1; use RankQuant.search_asymmetric instead",
         ));
     }
     let arr = queries.as_array();

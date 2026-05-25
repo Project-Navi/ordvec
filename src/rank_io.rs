@@ -252,7 +252,12 @@ pub(crate) fn write_rank(
 
 pub(crate) fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u16>)> {
     let file = File::open(path)?;
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Propagate a metadata() failure instead of swallowing it as `0`. With a
+    // bogus `file_len == 0`, `check_payload_matches_file` would false-reject
+    // every non-empty index (its `remaining` saturates to 0, never equal to a
+    // positive `payload_bytes`) and, for an empty corpus, pass while skipping
+    // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
+    let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
@@ -355,7 +360,12 @@ pub(crate) fn write_rankquant(
 
 pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, usize, Vec<u8>)> {
     let file = File::open(path)?;
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Propagate a metadata() failure instead of swallowing it as `0`. With a
+    // bogus `file_len == 0`, `check_payload_matches_file` would false-reject
+    // every non-empty index (its `remaining` saturates to 0, never equal to a
+    // positive `payload_bytes`) and, for an empty corpus, pass while skipping
+    // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
+    let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
@@ -481,7 +491,12 @@ pub(crate) fn write_bitmap(
 
 pub(crate) fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, usize, Vec<u64>)> {
     let file = File::open(path)?;
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Propagate a metadata() failure instead of swallowing it as `0`. With a
+    // bogus `file_len == 0`, `check_payload_matches_file` would false-reject
+    // every non-empty index (its `remaining` saturates to 0, never equal to a
+    // positive `payload_bytes`) and, for an empty corpus, pass while skipping
+    // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
+    let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
@@ -597,7 +612,12 @@ pub(crate) fn write_sign_bitmap(
 /// breaking the constructor↔loader roundtrip.
 pub(crate) fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec<u64>)> {
     let file = File::open(path)?;
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Propagate a metadata() failure instead of swallowing it as `0`. With a
+    // bogus `file_len == 0`, `check_payload_matches_file` would false-reject
+    // every non-empty index (its `remaining` saturates to 0, never equal to a
+    // positive `payload_bytes`) and, for an empty corpus, pass while skipping
+    // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
+    let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;

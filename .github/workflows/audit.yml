@@ -1,0 +1,36 @@
+name: audit
+
+# Scheduled supply-chain advisory scan. ci.yml's `deny` job already runs
+# cargo-deny on every push/PR, but a NEW RUSTSEC advisory filed against an
+# existing, unchanged dependency would not be caught until the next PR opens.
+# This re-runs the advisories check on a weekly schedule (and on demand) so a
+# freshly published advisory surfaces as a failing run rather than going unseen
+# between PRs — standard hygiene for a crate published to crates.io + PyPI.
+#
+# Read-only token, no `run:` steps (no injection surface). Because this runs
+# UNATTENDED on a cron schedule, the third-party actions are SHA-pinned (not the
+# mutable @v4/@v2 tags ci.yml uses on human-triggered push/PR) so a compromised
+# tag update cannot auto-execute on a scheduled runner. Scoped to
+# `check advisories`.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # 06:17 UTC every Monday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: EmbarkStudios/cargo-deny-action@a531616d8ce3b9177443e48a1159bc945a099823 # v2.0.19
+        with:
+          command: check advisories
