@@ -18,4 +18,12 @@ We aim to acknowledge reports within a few business days.
 `ordvec` parses serialized index files (`.tvr` / `.tvrq` / `.tvbm` /
 `.tvsb`); the loaders are fuzzed (`cargo +nightly fuzz`), so
 parsing-robustness reports against the deserialization paths are especially
-welcome.
+welcome. Reports are also welcome against the `unsafe` SIMD kernels (shape /
+bounds invariants), the Python FFI contract (buffer handling, GIL discipline),
+and the release pipeline.
+
+## Threat model
+
+See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full attack-surface analysis —
+existing defenses, known residual risks, and the library-owned vs
+deployment-owned split.
