@@ -41,10 +41,12 @@ vector on its own:
   prefilter feeds an exact rerank — the coarse→fine pipeline ships as
   library primitives.
 
-ordvec is a compressed **flat-scan** substrate (optionally two-stage), not
-a navigable-graph or billion-scale ANN index: it pairs small codes with
-fast runtime-dispatched SIMD (AVX-512/AVX2, NEON, wasm128) rather than
-graph traversal.
+ordvec is a compressed **flat-scan** substrate (optionally two-stage): small
+codes scored by fast SIMD — AVX-512/AVX2 runtime-dispatched on x86_64, baseline
+NEON on aarch64, and `simd128` on wasm32. It
+is the code-and-scan layer, not a navigable-graph index — but the codes are
+small and index-agnostic, so they compose *under* an ANN or sharding layer for
+large-scale serving rather than competing with one.
 
 ## Ordinal index family
 
@@ -56,6 +58,33 @@ graph traversal.
   coordinate); scoring is `popcount(Q AND D)`, a coarsened rank overlap.
 - **`SignBitmap`** — a sign bitmap per document for sign-cosine
   candidate generation, feeding an exact rerank stage.
+
+Two further paths, for callers who need them:
+
+- **`RankQuantFastscan`** *(`#[doc(hidden)]` — reachable as
+  `ordvec::RankQuantFastscan`, but the API is not yet stable)* — an optional
+  b=2 FastScan kernel (block-32 PQ-LUT) for absolute-minimum scan latency, at
+  2× the RankQuant b=2 footprint (`dim/2` bytes/doc). Surfaced here so
+  latency-critical callers know it exists.
+- **`MultiBucketBitmap`** *(behind `--features experimental`)* — the
+  multi-bucket bilinear-overlap probe behind the research-side decomposition;
+  a scaffold for the theory, not a production path.
+
+## The bitmap prefilter has a closed-form null
+
+The `Bitmap` prefilter scores candidates by `popcount(Q AND D)` over each
+document's fixed-size top-bucket set. Two *unrelated* documents — modelled as
+independent uniform top-bucket sets — overlap **hypergeometrically**,
+`H(dim, n_top, n_top)`, with expected overlap `n_top² / dim` (e.g. 16 at
+`dim = 256`, `n_top = 64`). So the filter's **selectivity** — how often an
+unrelated document clears a given overlap threshold — is closed-form and
+data-independent, not a tuned cutoff. (Whether *true* neighbours clear the bar
+is empirical; this is an exact candidate-generation null, not a
+retrieval-optimality theorem.) The invariance underneath it — that the rank
+transform is unchanged by any strictly monotone reparametrisation of the
+coordinates — is separately machine-checked in Lean, with the formalisation
+accompanying the paper. Details in
+[`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ## Quickstart
 
@@ -87,27 +116,81 @@ For the sub-linear two-stage path (`Bitmap` / `SignBitmap` candidate
 generation → `RankQuant` rerank) and the full mode comparison, see
 [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
+### Python
+
+PyO3/maturin bindings are **in progress** — the same `Rank` / `RankQuant` /
+`Bitmap` / `SignBitmap` API from Python, shipping to PyPI as `ordvec` (the
+coordinated PyPI release is pending). Until then, build from source with
+`maturin develop` in [`ordvec-python/`](ordvec-python/).
+
 ## Documentation
 
 - **Design deep-dive & reproducible benchmark tables:**
   [`docs/RANK_MODES.md`](docs/RANK_MODES.md)
+- **Design alternatives evaluated and cut:**
+  [`docs/ALTERNATIVES_CONSIDERED.md`](docs/ALTERNATIVES_CONSIDERED.md)
+- **Index-file trust model:**
+  [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md),
+  [`THREAT_MODEL.md`](THREAT_MODEL.md)
 - **API docs:** <https://docs.rs/ordvec> *(available after the first
   crates.io release)*
-- **Paper (OrdVec / RankQuant):** _link TBD. Collaborators welcome (see
-  [Contributing](#contributing))._
+- **Paper (OrdVec / RankQuant):** _link TBD — see
+  [Research collaboration](#research-collaboration)._
 
 ## Reproducible benchmark
 
-The head-to-head benchmark generates a seeded synthetic corpus
-in-process, so the quality numbers (R@10, candidate-recall, bytes/vec)
-are regenerable from a clean checkout with no external corpus file:
+The head-to-head benchmark generates a seeded synthetic corpus in-process, so
+the **quality numbers (R@10, candidate-recall, bytes/vec) are deterministic**
+and regenerable from a clean checkout with no external corpus file:
 
 ```sh
 cargo run --release --example bench_rank
 ```
 
-A committed capture of one run lives at
-[`benchmarks/rank_modes_results.txt`](benchmarks/rank_modes_results.txt).
+A few operating points from the committed run
+([`benchmarks/rank_modes_results.txt`](benchmarks/rank_modes_results.txt)):
+
+| Mode | bytes/vec | p50 (ms) | Mdocs/s | R@10 |
+|------|----------:|---------:|--------:|-----:|
+| `Rank` asym (full-precision reference) | 512 | 3.71 | 8 | 0.845 |
+| `RankQuant` b=4 asym | 128 | 0.31 | 96 | 0.806 |
+| `RankQuant` b=2 asym | 64 | 0.24 | 126 | 0.572 |
+| `RankQuant` b=2 FastScan | 128 | 0.09 | 333 | 0.570 |
+| Two-stage b=2 (M=500, CR=1.000) | 96 | 0.11 | 275 | 0.572 |
+
+*One representative run on a **synthetic** corpus (dim=256, n=30k, seed=1),
+AMD Ryzen 9 9950X (AVX-512), 32 threads, single-thread scan. **R@10 is
+deterministic** run-to-run; **throughput/latency vary** with hardware and run.
+R@10 is measured against FP32 brute-force cosine on this synthetic corpus —
+the broader real-corpus evaluation lives in the paper (in progress).*
+
+## Scope
+
+ordvec is a **library and substrate**, not a turnkey service: small
+ordinal/sign codes, fast SIMD scoring, and a built-in two-stage prefilter —
+the code-and-scan layer of a retrieval system. It is not a navigable-graph
+index (HNSW) on its own — yet — and not a serving tier at all: ordvec is the
+substrate other systems build on, so its small, index-agnostic codes slot
+**under** an ANN or sharding layer for large-scale serving rather than
+replacing it. Encoding is training-free and data-oblivious by design —
+no codebook fit — so you index the first vector with no prior data and never
+refit as the corpus grows.
+
+Quality evidence in this repo is the reproducible synthetic benchmark above;
+the broader real-corpus evaluation is in the paper (in progress).
+
+## Security: index-file trust
+
+The on-disk formats (`.tvr` / `.tvrq` / `.tvbm` / `.tvsb`) carry **no built-in
+checksum, MAC, or signature — by design.** The loaders validate *structure*
+(magic, version, bounds, exact-length payload) but not *origin*: a
+structurally valid file can still be untrusted. If an index file crosses a
+trust boundary (network transfer, shared storage), verifying it is the
+caller's responsibility — e.g. a SHA-256 manifest, artifact-store integrity,
+or Sigstore attestation. No in-format crypto is shipped because it would add
+key management the library can't own. See
+[`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md) and
+[`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 ## Provenance
 
@@ -125,17 +208,37 @@ sign-cosine intuition and engineering polish.
 Thanks to Mike Singleton ([@singleton2787](https://github.com/singleton2787))
 for mathematical assistance and mentorship.
 
+## Research collaboration
+
+ordvec is the reference implementation for an in-progress paper on **ordinal
+retrieval** — using the rank and sign structure of embeddings, rather than
+their floating-point magnitudes, as the retrieval signal. The repository is
+open specifically to grow a group of collaborators, **including named
+co-authorship on the paper** — a different invitation than "send a PR."
+Collaboration we're actively seeking:
+
+- **Real-corpus evaluation** — running the modes against public corpora
+  (GloVe, MTEB / BEIR, OpenAI embedding dumps) beyond the synthetic benchmark.
+- **Theory** — formalising the hypergeometric candidate-generation null and
+  the rank-cosine invariants.
+- **Independent reproduction** — re-running the benchmark on other hardware
+  and reporting the numbers.
+
+If that's your area, see [GOVERNANCE.md](GOVERNANCE.md) and open an issue or a
+discussion.
+
 ## Contributing
 
-Contributions to the code, the docs, and the accompanying paper are all
-welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The crate is going
-public specifically to invite collaboration on polishing the OrdVec /
-RankQuant paper.
+Contributions to the code, the docs, and the paper are all welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Minimum supported Rust version
 
-ordvec's MSRV is **Rust 1.89** — the release that stabilized the AVX-512
-intrinsics the SIMD kernels rely on. Raising the MSRV is treated as a
+ordvec's MSRV is **Rust 1.89** — the release that stabilized the specific
+AVX-512 intrinsics the SIMD kernels compile against (it also clears the 1.87
+floor from `is_multiple_of`). Because the kernels are built against those
+intrinsics, this is a hard compile floor, not just a convenience pin: a
+toolchain below 1.89 won't build the crate. Raising the MSRV is treated as a
 minor-version change.
 
 ## License

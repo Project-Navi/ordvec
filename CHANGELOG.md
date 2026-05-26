@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **README pre-release lifts:** a caveated operating-point table from the
+  committed synthetic benchmark; the Bitmap prefilter's hypergeometric null;
+  a "Security: index-file trust" callout; a "Research collaboration" (paper
+  co-authorship) section; a "Scope" section; `RankQuantFastscan` (doc-hidden)
+  and the `experimental` `MultiBucketBitmap` surfaced with caveats; in-progress
+  Python bindings noted; and a more precise MSRV rationale.
+
 ### Added
 
 - **CI fuzz smoke** (`.github/workflows/fuzz.yml`): a bounded cargo-fuzz run on
