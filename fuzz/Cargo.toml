@@ -64,3 +64,12 @@ path = "fuzz_targets/roundtrip_rankquant.rs"
 test = false
 doc = false
 bench = false
+
+# FastScan b=2 compute path (`RankQuantFastscan`): the one unsafe-heavy scan
+# kernel the `search_rankquant` target does not reach.
+[[bin]]
+name = "fastscan_b2"
+path = "fuzz_targets/fastscan_b2.rs"
+test = false
+doc = false
+bench = false
