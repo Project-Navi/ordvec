@@ -119,10 +119,11 @@ development history is in this repository's git log.
 
 ## Acknowledgements
 
-Thanks to [@toadkicker](https://github.com/toadkicker) for the sign-cosine
-intuition and engineering polish.
+Thanks to Todd Baur ([@toadkicker](https://github.com/toadkicker)) for the
+sign-cosine intuition and engineering polish.
 
-Thanks to Mike Singleton for mathematical assistance and mentorship.
+Thanks to Mike Singleton ([@singleton2787](https://github.com/singleton2787))
+for mathematical assistance and mentorship.
 
 ## Contributing
 
