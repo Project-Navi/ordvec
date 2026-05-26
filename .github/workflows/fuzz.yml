@@ -12,11 +12,10 @@ name: fuzz
 #     across ALL seven targets.
 #
 # This runs UNATTENDED on a cron schedule, so every third-party action is
-# SHA-pinned (not the mutable @vN tags ci.yml uses on human-triggered push/PR)
-# and cargo-fuzz is version-pinned — a fuzz smoke must not itself become a
-# supply-chain hole. Read-only token; the only `run:` interpolation is the
-# matrix target name, passed through `env:` (never inlined into the shell) so
-# there is no template-injection surface (THREAT-CICD-001).
+# SHA-pinned and cargo-fuzz is version-pinned — a fuzz smoke must not itself
+# become a supply-chain hole. Read-only token; the only `run:` interpolation is
+# the matrix target name, passed through `env:` (never inlined into the shell)
+# so there is no template-injection surface (THREAT-CICD-001).
 
 on:
   pull_request:
