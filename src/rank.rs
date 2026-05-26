@@ -64,6 +64,14 @@ pub fn rank_transform_into(v: &[f32], out: &mut [u16]) {
 
 /// Bucket a single rank into one of `1 << bits` equal-width bins on
 /// `[0, d)`. Returns a value in `[0, 1 << bits)`.
+///
+/// # Panics
+/// Panics if `bits > 7`, if `d == 0`, or if `rank >= d`. The `rank < d`
+/// guard fails loud in *every* build — like the sibling [`pack_buckets`] and
+/// [`bucket_centre`] checks — rather than silently clamping an out-of-range
+/// rank into the top bucket. Internal callers feed ranks straight from
+/// [`rank_transform`] (a permutation of `[0, d)`), so it never trips on the
+/// hot path.
 #[inline]
 pub fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> u8 {
     // `bits` is a `u8`, so a caller could pass e.g. 8 or 255. `1u32 << bits`
@@ -73,17 +81,32 @@ pub fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> u8 {
     // zero. Guard both up front so the failure is loud in every build.
     assert!(bits <= 7, "bits too large");
     assert!(d > 0, "d must be positive");
+    // A valid rank is a position in `[0, d)`. Reject `rank >= d` loudly instead
+    // of silently clamping the quotient back into range: the rest of the public
+    // bucket API ([`pack_buckets`] / [`bucket_centre`]) fails loud on an
+    // out-of-domain argument, so a direct caller that miscomputes a rank should
+    // hear about it rather than receive a plausible-but-wrong bucket.
+    assert!((rank as usize) < d, "rank ({rank}) must be < d ({d})");
     let n_buckets = 1u32 << bits;
     // u64 math: `d` is a `usize` and reaches this from the Python binding as a
     // free argument, so `d as u32` could truncate a `d >= 2^32` (e.g. to 0,
     // which would divide by zero and panic). rank ≤ u16::MAX and n_buckets ≤
     // 128, so the product fits u64 comfortably; over the realistic d ≤ u16::MAX
     // domain this is bit-identical to the previous u32 form.
-    let b = (rank as u64 * n_buckets as u64) / d as u64;
-    b.min(n_buckets as u64 - 1) as u8
+    //
+    // With `rank < d` guaranteed above, `rank * n_buckets / d < n_buckets`
+    // (integer division floors), so the quotient already lands in
+    // `[0, n_buckets)` and fits the returned `u8` without a clamp.
+    ((rank as u64 * n_buckets as u64) / d as u64) as u8
 }
 
 /// Bucket every entry of a full rank vector.
+///
+/// # Panics
+/// Panics if `bits > 7`, or — via [`rank_to_bucket`] — if any entry is
+/// `>= ranks.len()`. A valid rank vector is a permutation of
+/// `[0, ranks.len())`, so a well-formed input never trips the latter; empty
+/// input returns empty without invoking the per-entry guard.
 pub fn bucket_ranks(ranks: &[u16], bits: u8) -> Vec<u8> {
     let d = ranks.len();
     ranks.iter().map(|&r| rank_to_bucket(r, d, bits)).collect()
@@ -565,6 +588,15 @@ mod tests {
         let huge_d = 1usize << 40;
         assert_eq!(rank_to_bucket(0, huge_d, 2), 0);
         assert!(rank_to_bucket(u16::MAX, huge_d, 2) < 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be < d")]
+    fn rank_to_bucket_rejects_rank_ge_d() {
+        // A valid rank lives in `[0, d)`; `rank == d` is out of range. It used
+        // to clamp silently to the top bucket — now it fails loud in release
+        // too, matching pack_buckets / bucket_centre.
+        let _ = rank_to_bucket(8, 8, 2);
     }
 
     #[test]

@@ -1084,6 +1084,14 @@ fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> PyResult<u8> {
     if d == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err("d must be > 0"));
     }
+    // The core `rank_to_bucket` now asserts `rank < d` (fail-loud, matching the
+    // other bucket primitives); surface that as a clean `ValueError` rather
+    // than letting the assert escape as a `PanicException`.
+    if rank as usize >= d {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "rank ({rank}) must be < d ({d})"
+        )));
+    }
     Ok(ordvec_core::rank::rank_to_bucket(rank, d, bits))
 }
 
@@ -1110,6 +1118,17 @@ fn bucket_ranks<'py>(
     if slice.is_empty() {
         return Ok(Vec::<u8>::new().into_pyarray(py));
     }
+    // `bucket_ranks` treats the input as a rank vector: each entry indexes into
+    // `[0, len)`, and the core `rank_to_bucket` now asserts `rank < len`. Reject
+    // an out-of-range entry here with a clean `ValueError` rather than letting
+    // that assert surface as a `PanicException`. A valid rank vector (a
+    // permutation of `[0, len)`) never trips this.
+    let d = slice.len();
+    if let Some(&bad) = slice.iter().find(|&&r| r as usize >= d) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "rank ({bad}) must be < d ({d})"
+        )));
+    }
     Ok(ordvec_core::rank::bucket_ranks(slice, bits).into_pyarray(py))
 }
 
@@ -1135,9 +1154,11 @@ fn pack_buckets<'py>(
             slice.len()
         )));
     }
-    // Reject out-of-range bucket codes rather than silently masking them: the
-    // core packs `b & ((1 << bits) - 1)`, so a value with high bits set would be
-    // truncated to a different bucket. The bucket alphabet is [0, 1 << bits).
+    // Reject out-of-range bucket codes here so the caller gets a clean
+    // `ValueError`: the core `pack_buckets` now *asserts* every code is in
+    // `[0, 1 << bits)` (it fails loud rather than masking), so an unchecked
+    // out-of-range value would otherwise escape as a `PanicException`. The
+    // bucket alphabet is [0, 1 << bits).
     let max_code = (1u16 << bits) - 1;
     if let Some(&bad) = slice.iter().find(|&&b| b as u16 > max_code) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(

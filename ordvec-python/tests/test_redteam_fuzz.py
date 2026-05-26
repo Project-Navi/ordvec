@@ -617,6 +617,20 @@ def test_rank_to_bucket_d_zero_value_error():
         rank_to_bucket(0, 0, 2)
 
 
+def test_rank_to_bucket_rank_ge_d_value_error():
+    # The core asserts rank < d (fail-loud, like the other bucket primitives);
+    # the binding surfaces it as a clean ValueError, not a PanicException.
+    with pytest.raises(ValueError, match="must be < d"):
+        rank_to_bucket(8, 8, 2)
+
+
+def test_bucket_ranks_out_of_range_value_error():
+    # An entry >= len() would trip the core's `rank < d` assert; the binding
+    # rejects it as a ValueError rather than letting it surface as a panic.
+    with pytest.raises(ValueError, match="must be < d"):
+        bucket_ranks(np.array([0, 5, 2, 3], dtype=np.uint16), 2)
+
+
 @pytest.mark.parametrize("bits", [8, 255])
 def test_bucket_centre_bits_above_7_value_error(bits):
     with pytest.raises(ValueError, match="bits"):
