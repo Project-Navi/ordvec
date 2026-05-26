@@ -52,6 +52,24 @@ cargo clippy -p ordvec-python --all-targets -- -D warnings
 maturin develop && pytest ordvec-python/tests   # in a virtualenv
 ```
 
+### Fuzzing
+
+The loader, write→load round-trip, and FastScan paths have seven cargo-fuzz
+targets in `fuzz/`. CI runs a bounded smoke on every PR (`fuzz.yml`); locally
+you need a nightly toolchain and `cargo install cargo-fuzz`:
+
+```sh
+cargo +nightly fuzz build                 # compile all targets
+cargo +nightly fuzz run load_rank         # one target, ad hoc
+./fuzz/run_full_fuzz.sh                    # full deep campaign (all targets)
+```
+
+`run_full_fuzz.sh` runs each target in libFuzzer fork mode, persists the corpus
+(resumable across runs), and collects crash artifacts. **It is heavy by
+default** (~3h × 7 targets, `cores − 2` forks) — dial it down on a laptop via
+env knobs, e.g. `SECS_PER_TARGET=120 FORKS=2 ./fuzz/run_full_fuzz.sh`. See the
+script header for all knobs.
+
 ## Workflow
 
 - **Branches:** `<type>/<slug>` (feat, fix, refactor, docs, test, chore,

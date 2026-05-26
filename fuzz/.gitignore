@@ -2,3 +2,6 @@ target
 corpus
 artifacts
 coverage
+
+# Campaign logs from run_full_fuzz.sh (e.g. full_fuzz_run.log)
+*.log
