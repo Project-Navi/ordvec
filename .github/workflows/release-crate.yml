@@ -50,13 +50,19 @@ jobs:
         run: cargo publish -p ordvec --locked --dry-run
 
   require-ci-green:
-    # A manual release dispatch must not ship a commit whose full CI matrix has
-    # not gone green. The `verify` job above re-runs tests + the publish
-    # dry-run, but it does NOT cover lint, the no-default/experimental configs,
-    # MSRV 1.89, the deps + cargo-deny supply-chain gates, or the AVX-512-SDE /
-    # wasm-simd128 runtime coverage. Rather than duplicate (and drift from) all
-    # of ci.yml, require that the `ci` workflow concluded `success` for this
-    # exact SHA before publish runs.
+    # A manual release dispatch must not ship a commit whose CI has not gone
+    # green. The `verify` job above re-runs tests + the publish dry-run, but it
+    # does NOT cover lint, the no-default/experimental configs, MSRV 1.89, the
+    # deps + cargo-deny supply-chain gates, the AVX-512-SDE / wasm-simd128
+    # runtime coverage (ci.yml), the cargo-fuzz loader/FastScan smoke (fuzz.yml),
+    # or the CodeQL static scan of the shipped Rust source (codeql.yml). Rather
+    # than duplicate (and drift from) those workflows, require that EACH of them
+    # concluded `success` for this exact SHA on main before publish runs.
+    #
+    # Only per-push-to-main workflows are gated, so a run for the release SHA is
+    # guaranteed to exist: audit.yml is schedule-only (no per-SHA run to assert);
+    # coverage*/scorecard are advisory or external-service-flaky; zizmor/
+    # actionlint are pre-merge CI hygiene, not artifact safety.
     name: require full CI green for this commit
     runs-on: ubuntu-latest
     permissions:
@@ -67,24 +73,26 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
-      - name: assert ci.yml is green for this commit
+      - name: assert ci.yml, fuzz.yml and codeql.yml are green for this commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Require a SUCCESSFUL ci.yml run for this SHA *on main*. Filtering on
-          # the branch as well as head_sha stops a green run for the same commit
-          # on an unrelated branch from satisfying the gate.
-          ok="$(gh api \
-            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&branch=main&per_page=20" \
-            --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"
-          echo "successful ci.yml runs for ${SHA} on main: ${ok}"
-          if [ "${ok}" -lt 1 ]; then
-            echo "::error::no successful ci.yml run for ${SHA} on main. Push to main, let CI pass, then re-run this release."
-            exit 1
-          fi
+          # Require a SUCCESSFUL run for this SHA *on main* for each workflow.
+          # Filtering on the branch as well as head_sha stops a green run for the
+          # same commit on an unrelated branch from satisfying the gate.
+          for wf in ci.yml fuzz.yml codeql.yml; do
+            ok="$(gh api \
+              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&status=success&per_page=20" \
+              --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"
+            echo "successful ${wf} runs for ${SHA} on main: ${ok}"
+            if [ "${ok}" -lt 1 ]; then
+              echo "::error::no successful ${wf} run for ${SHA} on main. Push to main, let CI pass, then re-run this release."
+              exit 1
+            fi
+          done
 
   publish:
     name: publish to crates.io

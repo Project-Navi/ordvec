@@ -7,10 +7,8 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12977/badge)](https://www.bestpractices.dev/projects/12977)
 [![codecov](https://codecov.io/gh/Fieldnote-Echo/ordvec/graph/badge.svg)](https://codecov.io/gh/Fieldnote-Echo/ordvec)
 
-<!-- Add at the first crates.io release:
 [![Crates.io](https://img.shields.io/crates/v/ordvec.svg)](https://crates.io/crates/ordvec)
 [![docs.rs](https://docs.rs/ordvec/badge.svg)](https://docs.rs/ordvec)
--->
 
 Training-free ordinal & sign quantization for vector retrieval.
 
@@ -88,12 +86,12 @@ accompanying the paper. Details in
 
 ## Quickstart
 
-The crate is being prepared for its first crates.io release. Until then,
-add it as a git dependency:
-
 ```toml
 [dependencies]
-ordvec = { git = "https://github.com/Fieldnote-Echo/ordvec" }
+ordvec = "0.2"
+
+# Or, to track unreleased `main`, use a git dependency instead:
+# ordvec = { git = "https://github.com/Fieldnote-Echo/ordvec" }
 ```
 
 ```rust
@@ -112,28 +110,32 @@ let top_ids = results.indices_for_query(0);     // top-10 doc ids for query 0
 let top_scores = results.scores_for_query(0);
 ```
 
-For the sub-linear two-stage path (`Bitmap` / `SignBitmap` candidate
+For the two-stage compressed-scan path (`Bitmap` / `SignBitmap` candidate
 generation → `RankQuant` rerank) and the full mode comparison, see
 [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ### Python
 
-PyO3/maturin bindings are **in progress** — the same `Rank` / `RankQuant` /
-`Bitmap` / `SignBitmap` API from Python, shipping to PyPI as `ordvec` (the
-coordinated PyPI release is pending). Until then, build from source with
-`maturin develop` in [`ordvec-python/`](ordvec-python/).
+The same `Rank` / `RankQuant` / `Bitmap` / `SignBitmap` API is available from
+Python — the bindings ship to PyPI as `ordvec`:
+
+```bash
+pip install ordvec
+```
+
+Wheels target CPython 3.10+ (abi3); to build from source instead, see
+[`ordvec-python/`](https://github.com/Fieldnote-Echo/ordvec/tree/main/ordvec-python).
 
 ## Documentation
 
 - **Design deep-dive & reproducible benchmark tables:**
   [`docs/RANK_MODES.md`](docs/RANK_MODES.md)
 - **Design alternatives evaluated and cut:**
-  [`docs/ALTERNATIVES_CONSIDERED.md`](docs/ALTERNATIVES_CONSIDERED.md)
+  [`docs/ALTERNATIVES_CONSIDERED.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/ALTERNATIVES_CONSIDERED.md)
 - **Index-file trust model:**
   [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md),
   [`THREAT_MODEL.md`](THREAT_MODEL.md)
-- **API docs:** <https://docs.rs/ordvec> *(available after the first
-  crates.io release)*
+- **API docs:** <https://docs.rs/ordvec>
 - **Paper (OrdVec / RankQuant):** _link TBD — see
   [Research collaboration](#research-collaboration)._
 
@@ -213,8 +215,9 @@ for mathematical assistance and mentorship.
 ordvec is the reference implementation for an in-progress paper on **ordinal
 retrieval** — using the rank and sign structure of embeddings, rather than
 their floating-point magnitudes, as the retrieval signal. The repository is
-open specifically to grow a group of collaborators, **including named
-co-authorship on the paper** — a different invitation than "send a PR."
+open specifically to grow a group of collaborators, **including potential
+named co-authorship where contributions meet the paper's authorship bar** —
+a different invitation than "send a PR."
 Collaboration we're actively seeking:
 
 - **Real-corpus evaluation** — running the modes against public corpora

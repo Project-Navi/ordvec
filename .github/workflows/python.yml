@@ -6,16 +6,14 @@ name: python
 # the core checks, and so a green run proves the bindings build cold from a
 # checkout (the paper's reproducibility requirement).
 on:
-  # Push runs only on main (post-merge); feature branches are covered by the
-  # pull_request trigger below, so a branch with an open PR doesn't double-run.
+  # Push runs on EVERY commit to main (no paths filter): release-python.yml's
+  # require-ci-green gate asserts a successful python.yml run exists for the exact
+  # release SHA on main, so a docs-only or workflow-only release tip must still
+  # produce a run here or the wheel gate would be unsatisfiable. Feature branches
+  # stay path-filtered via the pull_request trigger below (a PR that doesn't touch
+  # the binding skips this), and main's concurrency cancels superseded runs.
   push:
     branches: [main]
-    paths:
-      - "ordvec-python/**"
-      - "src/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/python.yml"
   pull_request:
     paths:
       - "ordvec-python/**"

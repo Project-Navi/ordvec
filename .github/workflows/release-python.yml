@@ -139,11 +139,19 @@ jobs:
           if-no-files-found: error
 
   require-ci-green:
-    # The wheel must not ship from a commit whose core (`ci.yml`) or binding
-    # (`python.yml`) matrices have not gone green. The build-wheels job above
+    # The wheel must not ship from a commit whose core (`ci.yml`), binding
+    # (`python.yml`), fuzz-smoke (`fuzz.yml`), or CodeQL static-scan
+    # (`codeql.yml`) gates have not gone green. The build-wheels job above
     # builds + pytest-checks each platform wheel, but it does not cover the core
-    # crate's gates or the binding's full OS/Python matrix and lint. Require
-    # both workflows to have concluded `success` for this exact SHA.
+    # crate's gates, the binding's full OS/Python matrix and lint, the loader/
+    # FastScan fuzz smoke, or the CodeQL scan of the shipped Rust + Python
+    # source. Require each workflow to have concluded `success` for this exact
+    # SHA on main.
+    #
+    # Only per-push-to-main workflows are gated, so a run for the release SHA is
+    # guaranteed to exist: audit.yml is schedule-only (no per-SHA run to assert);
+    # coverage*/scorecard are advisory or external-service-flaky; zizmor/
+    # actionlint are pre-merge CI hygiene, not artifact safety.
     name: require core + binding CI green for this commit
     runs-on: ubuntu-latest
     permissions:
@@ -154,7 +162,7 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
-      - name: assert ci.yml and python.yml are green for this commit
+      - name: assert ci.yml, python.yml, fuzz.yml and codeql.yml are green for this commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -164,9 +172,9 @@ jobs:
           # Require a SUCCESSFUL run for this SHA *on main* for each workflow.
           # Filtering on the branch as well as head_sha stops a green run for the
           # same commit on an unrelated branch from satisfying the gate.
-          for wf in ci.yml python.yml; do
+          for wf in ci.yml python.yml fuzz.yml codeql.yml; do
             ok="$(gh api \
-              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&per_page=20" \
+              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&status=success&per_page=20" \
               --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"
             echo "successful ${wf} runs for ${SHA} on main: ${ok}"
             if [ "${ok}" -lt 1 ]; then

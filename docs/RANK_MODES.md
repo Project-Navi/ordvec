@@ -35,7 +35,7 @@ Real-corpus evaluation appears in the accompanying paper (link TBD).
 
 The bitmap two-stage path (`Bitmap` candidate gen →
 `RankQuant` exact subset rerank) is the operating point that
-turns RankQuant from a slow exact scan into a sub-linear retriever:
+turns RankQuant from a slow exact scan into a fast two-stage retriever:
 the bitmap probe is the cheap candidate generator, and
 `search_asymmetric_subset` reruns the exact RankQuant kernel on only
 the surviving M candidates. The bench reports this path as its

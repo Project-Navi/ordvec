@@ -14,8 +14,9 @@ workflows. Nothing ships on a tag push or a merge.
 Both `release-crate.yml` and `release-python.yml`:
 
 - are **`workflow_dispatch`-only** (no `push` / tag trigger);
-- run a **`require-ci-green`** gate confirming `ci.yml` (and, for the wheel,
-  `python.yml`) are green for the target commit on `main`;
+- run a **`require-ci-green`** gate confirming the per-commit CI is green for the
+  target commit on `main` — `ci.yml`, `fuzz.yml`, and `codeql.yml` for the crate,
+  plus `python.yml` for the wheel (a *successful* run for that exact SHA on `main`);
 - publish via **OIDC trusted publishing** (no long-lived crates.io / PyPI
   tokens in the repo);
 - emit **SLSA build provenance** (`actions/attest-build-provenance`) **before**
@@ -55,8 +56,27 @@ Trusted Publishing step.
    sync (`cargo build --locked`).
 2. Bump the version (crate `Cargo.toml`, and `ordvec-python` if the wheel
    changed) and update `CHANGELOG.md`. Commit on `main`.
-3. Confirm CI is **green for that exact `main` SHA** (the dispatch ref must be
-   `main` — the environment will refuse any other branch).
+3. Confirm CI is **green for current `main` HEAD**. A release dispatches from
+   `main` (the environment refuses any other ref), so `require-ci-green` always
+   checks `main` HEAD's SHA — which needs a **completed, successful** (not
+   cancelled, not in-progress) run of `ci.yml`, `fuzz.yml`, `codeql.yml` (and
+   `python.yml` for the wheel).
+   - **Do not merge another PR between the release commit and the dispatch.**
+     `ci.yml` / `python.yml` use `cancel-in-progress`, so merging again moves
+     `main` HEAD and cancels the previous commit's in-flight CI. The superseded
+     commit is no longer the release target: **release from the new HEAD once its
+     own CI has completed green** — never from, or by re-validating, the older
+     commit.
+   - If HEAD's *own* run shows `cancelled` (superseded, but you have since
+     stopped pushing), re-run **that HEAD run** from the Actions UI and wait for
+     it to finish green before dispatching. The SHA you re-run must be the exact
+     SHA you publish; do not hand-clear the gate on any other commit.
+   - Release only from a commit on `main` with a **successful push-to-main run**
+     of each gated workflow — in practice the tip the merge produced (a squash
+     commit, a rebased tip, or a merge commit), whatever the merge strategy. An
+     interior commit that exists in history only from a PR branch has no
+     push-to-main run (its CI ran as a `pull_request` on the branch) and so is
+     not releasable.
 4. Get the maintainer's explicit go to publish.
 5. Dispatch `release-crate.yml` (crate) and/or `release-python.yml` (wheel)
    from **`main`**.
