@@ -42,5 +42,5 @@ the origin project.
 
 Dual-licensed under either of
 [MIT](https://github.com/Fieldnote-Echo/ordvec/blob/main/LICENSE-MIT) or
-[Apache-2.0](https://github.com/Fieldnote-Echo/ordvec/blob/main/LICENSE-APACHE)
+[Apache-2.0](https://github.com/Fieldnote-Echo/ordvec/blob/main/LICENSE-APACHE-2.0)
 at your option.
