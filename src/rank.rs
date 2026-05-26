@@ -103,11 +103,16 @@ pub fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> u8 {
 /// Bucket every entry of a full rank vector.
 ///
 /// # Panics
-/// Panics if `bits > 7`, or — via [`rank_to_bucket`] — if any entry is
-/// `>= ranks.len()`. A valid rank vector is a permutation of
-/// `[0, ranks.len())`, so a well-formed input never trips the latter; empty
-/// input returns empty without invoking the per-entry guard.
+/// Panics if `bits > 7` (validated up front, so this holds for empty input
+/// too), or — via [`rank_to_bucket`] — if any entry is `>= ranks.len()`. A
+/// valid rank vector is a permutation of `[0, ranks.len())`, so well-formed
+/// input never trips the per-entry guard.
 pub fn bucket_ranks(ranks: &[u16], bits: u8) -> Vec<u8> {
+    // Validate `bits` up front so an invalid width fails loud even for empty
+    // input — an empty `ranks` skips the per-entry `rank_to_bucket` check and
+    // would otherwise silently return an empty vec. Mirrors the Python binding,
+    // which checks `bits` before its empty short-circuit.
+    assert!(bits <= 7, "bits too large");
     let d = ranks.len();
     ranks.iter().map(|&r| rank_to_bucket(r, d, bits)).collect()
 }
@@ -597,6 +602,14 @@ mod tests {
         // to clamp silently to the top bucket — now it fails loud in release
         // too, matching pack_buckets / bucket_centre.
         let _ = rank_to_bucket(8, 8, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "bits too large")]
+    fn bucket_ranks_rejects_bits_above_7_even_when_empty() {
+        // `bits` is validated up front, so an invalid width fails loud even on
+        // empty input — which never reaches the per-entry rank_to_bucket guard.
+        let _ = bucket_ranks(&[], 8);
     }
 
     #[test]
