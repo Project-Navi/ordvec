@@ -35,6 +35,13 @@
 //! [`l2_normalise`](crate::util::l2_normalise), and `k` is clamped to
 //! `n_vectors` exactly as the sibling search methods do.
 
+// Make every unsafe operation inside an `unsafe fn` require an explicit
+// `unsafe {}` block rather than leaning on the fn-level `unsafe`. This is
+// defense-in-depth for the AVX-512 FastScan kernel below: it keeps the kernel's
+// unsafe surface visible to future edits. Crate-wide rollout to the other SIMD
+// modules is tracked separately (see THREAT_MODEL.md, THREAT-SIMD-001).
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use rayon::prelude::*;
 
 use crate::rank::{bucket_ranks, rank_transform, rankquant_norm};
@@ -212,91 +219,97 @@ unsafe fn scan_b2_fastscan_avx512(
     // is 255, so FLUSH × 255 must fit in u16: FLUSH ≤ 257. Pick 256.
     const FLUSH: usize = 256;
 
-    for b in 0..n_blocks {
-        let block_ptr = packed_fs.as_ptr().add(b * bytes_per_block);
+    // SAFETY: every raw load/store and AVX-512 intrinsic in this loop is
+    // in-bounds and feature-gated per the function-level SAFETY comment above.
+    // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
+    unsafe {
+        for b in 0..n_blocks {
+            let block_ptr = packed_fs.as_ptr().add(b * bytes_per_block);
 
-        // 32-lane u32 accumulators (split across two __m512i, lo/hi 16).
-        let mut acc32_lo = _mm512_setzero_si512();
-        let mut acc32_hi = _mm512_setzero_si512();
+            // 32-lane u32 accumulators (split across two __m512i, lo/hi 16).
+            let mut acc32_lo = _mm512_setzero_si512();
+            let mut acc32_hi = _mm512_setzero_si512();
 
-        let mut p = 0usize;
-        while p < pairs {
-            let chunk = (pairs - p).min(FLUSH);
+            let mut p = 0usize;
+            while p < pairs {
+                let chunk = (pairs - p).min(FLUSH);
 
-            // 32-lane u16 accumulator split: each holds 16 u16 values
-            // in its low 256 bits.
-            let mut acc16_lo = _mm512_setzero_si512(); // lanes 0..16
-            let mut acc16_hi = _mm512_setzero_si512(); // lanes 16..32
+                // 32-lane u16 accumulator split: each holds 16 u16 values
+                // in its low 256 bits.
+                let mut acc16_lo = _mm512_setzero_si512(); // lanes 0..16
+                let mut acc16_hi = _mm512_setzero_si512(); // lanes 16..32
 
-            let inner_end = p + chunk;
-            let inner_chunks_4 = chunk / 4;
-            let mut pp = p;
+                let inner_end = p + chunk;
+                let inner_chunks_4 = chunk / 4;
+                let mut pp = p;
 
-            for _ in 0..inner_chunks_4 {
-                macro_rules! step {
-                    ($off:expr) => {{
-                        let codes256 =
-                            _mm256_loadu_si256(block_ptr.add((pp + $off) * 32) as *const __m256i);
-                        let lut128 = _mm_loadu_si128(
-                            lut_u8.as_ptr().add((pp + $off) * 16) as *const __m128i
-                        );
-                        let lut256 = _mm256_broadcastsi128_si256(lut128);
-                        let contrib = _mm256_shuffle_epi8(lut256, codes256);
-                        let lo128 = _mm256_castsi256_si128(contrib);
-                        let hi128 = _mm256_extracti128_si256(contrib, 1);
-                        let lo256 = _mm256_cvtepu8_epi16(lo128);
-                        let hi256 = _mm256_cvtepu8_epi16(hi128);
-                        acc16_lo = _mm512_add_epi16(acc16_lo, _mm512_castsi256_si512(lo256));
-                        acc16_hi = _mm512_add_epi16(acc16_hi, _mm512_castsi256_si512(hi256));
-                    }};
+                for _ in 0..inner_chunks_4 {
+                    macro_rules! step {
+                        ($off:expr) => {{
+                            let codes256 = _mm256_loadu_si256(
+                                block_ptr.add((pp + $off) * 32) as *const __m256i
+                            );
+                            let lut128 = _mm_loadu_si128(
+                                lut_u8.as_ptr().add((pp + $off) * 16) as *const __m128i
+                            );
+                            let lut256 = _mm256_broadcastsi128_si256(lut128);
+                            let contrib = _mm256_shuffle_epi8(lut256, codes256);
+                            let lo128 = _mm256_castsi256_si128(contrib);
+                            let hi128 = _mm256_extracti128_si256(contrib, 1);
+                            let lo256 = _mm256_cvtepu8_epi16(lo128);
+                            let hi256 = _mm256_cvtepu8_epi16(hi128);
+                            acc16_lo = _mm512_add_epi16(acc16_lo, _mm512_castsi256_si512(lo256));
+                            acc16_hi = _mm512_add_epi16(acc16_hi, _mm512_castsi256_si512(hi256));
+                        }};
+                    }
+                    step!(0);
+                    step!(1);
+                    step!(2);
+                    step!(3);
+                    pp += 4;
                 }
-                step!(0);
-                step!(1);
-                step!(2);
-                step!(3);
-                pp += 4;
+
+                while pp < inner_end {
+                    let codes256 = _mm256_loadu_si256(block_ptr.add(pp * 32) as *const __m256i);
+                    let lut128 = _mm_loadu_si128(lut_u8.as_ptr().add(pp * 16) as *const __m128i);
+                    let lut256 = _mm256_broadcastsi128_si256(lut128);
+                    let contrib = _mm256_shuffle_epi8(lut256, codes256);
+                    let lo128 = _mm256_castsi256_si128(contrib);
+                    let hi128 = _mm256_extracti128_si256(contrib, 1);
+                    let lo256 = _mm256_cvtepu8_epi16(lo128);
+                    let hi256 = _mm256_cvtepu8_epi16(hi128);
+                    acc16_lo = _mm512_add_epi16(acc16_lo, _mm512_castsi256_si512(lo256));
+                    acc16_hi = _mm512_add_epi16(acc16_hi, _mm512_castsi256_si512(hi256));
+                    pp += 1;
+                }
+
+                // Widen u16 → u32. Meaningful u16s sit in the low 256 bits.
+                let lo256_u16 = _mm512_castsi512_si256(acc16_lo);
+                let hi256_u16 = _mm512_castsi512_si256(acc16_hi);
+                let lo32 = _mm512_cvtepu16_epi32(lo256_u16);
+                let hi32 = _mm512_cvtepu16_epi32(hi256_u16);
+                acc32_lo = _mm512_add_epi32(acc32_lo, lo32);
+                acc32_hi = _mm512_add_epi32(acc32_hi, hi32);
+
+                p = inner_end;
             }
 
-            while pp < inner_end {
-                let codes256 = _mm256_loadu_si256(block_ptr.add(pp * 32) as *const __m256i);
-                let lut128 = _mm_loadu_si128(lut_u8.as_ptr().add(pp * 16) as *const __m128i);
-                let lut256 = _mm256_broadcastsi128_si256(lut128);
-                let contrib = _mm256_shuffle_epi8(lut256, codes256);
-                let lo128 = _mm256_castsi256_si128(contrib);
-                let hi128 = _mm256_extracti128_si256(contrib, 1);
-                let lo256 = _mm256_cvtepu8_epi16(lo128);
-                let hi256 = _mm256_cvtepu8_epi16(hi128);
-                acc16_lo = _mm512_add_epi16(acc16_lo, _mm512_castsi256_si512(lo256));
-                acc16_hi = _mm512_add_epi16(acc16_hi, _mm512_castsi256_si512(hi256));
-                pp += 1;
+            let mut tmp_lo = [0u32; 16];
+            let mut tmp_hi = [0u32; 16];
+            _mm512_storeu_si512(tmp_lo.as_mut_ptr() as *mut _, acc32_lo);
+            _mm512_storeu_si512(tmp_hi.as_mut_ptr() as *mut _, acc32_hi);
+
+            let doc_base = b * 32;
+            let docs_in_block = (n - doc_base).min(32);
+            for lane in 0..docs_in_block {
+                let acc = if lane < 16 {
+                    tmp_lo[lane]
+                } else {
+                    tmp_hi[lane - 16]
+                };
+                let raw = bias_sum + (acc as f32) * inv_q;
+                top.maybe_insert(raw * scale, doc_base + lane);
             }
-
-            // Widen u16 → u32. Meaningful u16s sit in the low 256 bits.
-            let lo256_u16 = _mm512_castsi512_si256(acc16_lo);
-            let hi256_u16 = _mm512_castsi512_si256(acc16_hi);
-            let lo32 = _mm512_cvtepu16_epi32(lo256_u16);
-            let hi32 = _mm512_cvtepu16_epi32(hi256_u16);
-            acc32_lo = _mm512_add_epi32(acc32_lo, lo32);
-            acc32_hi = _mm512_add_epi32(acc32_hi, hi32);
-
-            p = inner_end;
-        }
-
-        let mut tmp_lo = [0u32; 16];
-        let mut tmp_hi = [0u32; 16];
-        _mm512_storeu_si512(tmp_lo.as_mut_ptr() as *mut _, acc32_lo);
-        _mm512_storeu_si512(tmp_hi.as_mut_ptr() as *mut _, acc32_hi);
-
-        let doc_base = b * 32;
-        let docs_in_block = (n - doc_base).min(32);
-        for lane in 0..docs_in_block {
-            let acc = if lane < 16 {
-                tmp_lo[lane]
-            } else {
-                tmp_hi[lane - 16]
-            };
-            let raw = bias_sum + (acc as f32) * inv_q;
-            top.maybe_insert(raw * scale, doc_base + lane);
         }
     }
 }
