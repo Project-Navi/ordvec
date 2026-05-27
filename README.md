@@ -78,11 +78,25 @@ independent uniform top-bucket sets — overlap **hypergeometrically**,
 unrelated document clears a given overlap threshold — is closed-form and
 data-independent, not a tuned cutoff. (Whether *true* neighbours clear the bar
 is empirical; this is an exact candidate-generation null, not a
-retrieval-optimality theorem.) The invariance underneath it — that the rank
-transform is unchanged by any strictly monotone reparametrisation of the
-coordinates — is separately machine-checked in Lean, with the formalisation
-accompanying the paper. Details in
-[`docs/RANK_MODES.md`](docs/RANK_MODES.md).
+retrieval-optimality theorem.) Two pieces of this are separately machine-checked in Lean 4, both `sorry`-free
+on Lean's standard axiom base (`propext`, `Classical.choice`, `Quot.sound`):
+
+- the **ordinal invariance** the rank transform rests on — that a vector's
+  sorting permutation is unchanged by any strictly monotone reparametrisation
+  of its coordinates — in
+  [`takens-formalization`](https://github.com/Project-Navi/takens-formalization)
+  (theorem `isOrdinalPatternOf_comp_strictMono`); and
+- the **shape of the bitmap candidate filter** — that under a finite
+  monotone-likelihood-ratio overlap-tilt model, an overlap-count *threshold*
+  (the popcount cutoff) is the Bayes-optimal deterministic admission rule, and
+  the uniform constant-weight null gives that threshold exactly the
+  hypergeometric upper tail — in
+  [`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization)
+  (theorem `exists_uniformBitmapOverlapTail_finiteBayesRisk_le_and_hypergeomTail`).
+  This is an *in-model* result: it fixes the optimal rule's shape under the
+  stated assumptions, not a claim that any given corpus obeys the model.
+
+Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ## Quickstart
 

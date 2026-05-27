@@ -128,15 +128,23 @@ don't have a hypergeometric null because they don't have fixed
 bucket cardinalities — their score distribution depends on the
 unknown embedding distribution.
 
-**A research program this suggests.** The chain — representation →
-statistic → retrieval theorem → systems implementation — has a
-plausible formal target. Under a shared-latent-support model where
-relevant documents have elevated coordinates on a query-specific
-support set `S_q`, the top-bucket overlap statistic is monotone in
-the likelihood ratio for relevance, suggesting that bitmap probing
-may approach Bayes-optimality under that model. We do not claim
-that theorem here; this section flags it as the natural
-mathematical direction for the empirical results below.
+**A research program this suggests — now partly machine-checked.** The
+chain — representation → statistic → retrieval theorem → systems
+implementation — now has a checked link in the middle. Under a finite
+monotone-likelihood-ratio overlap-tilt model (the formal cousin of a
+shared-latent-support model, where relevant documents have elevated
+coordinates on a query-specific support set `S_q`), the top-bucket
+overlap statistic is monotone in the likelihood ratio for relevance,
+and an overlap-count threshold — the popcount cutoff — is the
+Bayes-optimal deterministic admission rule, with the uniform
+constant-weight null assigning that threshold exactly the
+hypergeometric upper tail. That is proved `sorry`-free in
+[`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization)
+(`exists_uniformBitmapOverlapTail_finiteBayesRisk_le_and_hypergeomTail`).
+It is an *in-model* result: it fixes the shape of the optimal rule
+under the stated assumptions, not a claim that any given corpus obeys
+the model — whether real neighbours clear the bar stays empirical,
+which is what the bench and the paper measure.
 
 The systems consequence is what the bench measures: at a moderate M
 the bitmap probe captures most of exact RankQuant's top-10 neighbours,
