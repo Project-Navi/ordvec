@@ -180,6 +180,7 @@ impl Bitmap {
     /// `Vec<u32>` of all N scores and `select_nth_unstable` the
     /// top-`m`: O(N + m log m). The ~808 KiB temp at N=207k is
     /// cheap relative to the cost it saves at M ≥ 1000.
+    #[must_use]
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
         assert_all_finite(q);
         let m_eff = m.min(self.n_vectors);
@@ -224,6 +225,7 @@ impl Bitmap {
     /// `queries` is a flat `batch * dim` f32 slice. Returns
     /// `Vec<Vec<u32>>` with one top-`m` set per query, sorted by
     /// overlap descending.
+    #[must_use]
     pub fn top_m_candidates_batched(&self, queries: &[f32], m: usize) -> Vec<Vec<u32>> {
         let dim = self.dim;
         let batch = queries.len() / dim;
@@ -294,6 +296,7 @@ impl Bitmap {
     /// [`Self::top_m_candidates_batched`] in parallel via rayon. Use
     /// when the full query workload is larger than one batch fits
     /// efficiently in L2/L3.
+    #[must_use]
     pub fn top_m_candidates_batched_chunked(
         &self,
         queries: &[f32],
