@@ -31,7 +31,7 @@
 //! usual contract for GIL-releasing numeric extensions (NumPy behaves the same
 //! way).
 
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use pyo3::wrap_pyfunction;
@@ -91,6 +91,106 @@ fn check_bits_124(bits: u8) -> PyResult<()> {
 fn check_bits_max7(bits: u8) -> PyResult<()> {
     if bits > 7 {
         return Err(pyo3::exceptions::PyValueError::new_err("bits must be <= 7"));
+    }
+    Ok(())
+}
+
+fn not_contiguous_err() -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(
+        "array must be C-contiguous; call np.ascontiguousarray() first",
+    )
+}
+
+/// Candidate / doc-id slice obtained from a NumPy array, either borrowed
+/// zero-copy (already `uint32` and contiguous) or owned (converted from another
+/// integer dtype). The `Borrowed` variant keeps the `PyReadonlyArray` guard
+/// alive so its slice stays valid across a GIL-released `py.detach` call.
+enum CandidateIds<'py> {
+    Borrowed(PyReadonlyArray1<'py, u32>),
+    Owned(Vec<u32>),
+}
+
+impl CandidateIds<'_> {
+    fn as_slice(&self) -> PyResult<&[u32]> {
+        match self {
+            CandidateIds::Borrowed(ro) => ro.as_slice().map_err(|_| not_contiguous_err()),
+            CandidateIds::Owned(v) => Ok(v),
+        }
+    }
+}
+
+/// Coerce a NumPy candidate/doc-id array of *any* integer dtype to `u32`.
+///
+/// The core takes `&[u32]` doc ids (the corpus is capped at `MAX_VECTORS = 2^26`,
+/// well below `u32::MAX`), so the natural binding type is `PyReadonlyArray1<u32>`.
+/// But rust-numpy matches that dtype *exactly*, while NumPy index arrays are
+/// `int64` by default (`np.arange`, `np.where()[0]`, `np.array([...])`, fancy
+/// indexing, `np.argpartition`). Requiring `uint32` made the most natural ways to
+/// build a candidate set raise an opaque `TypeError`, even though ordvec's own
+/// candidate generators (`top_m_candidates*`) already emit `uint32`.
+///
+/// We accept any integer dtype and convert with **checked** bounds: a negative id
+/// or one exceeding `u32::MAX` is a clean `ValueError`, never a silent wrap — note
+/// `np.asarray(x, dtype=uint32)` would wrap `-1 -> 4294967295` and `2**32 -> 0`,
+/// which would then score the wrong document. Already-`uint32` contiguous arrays
+/// are borrowed zero-copy; every other dtype is copied once (candidate shortlists
+/// are small relative to the scan; large-M FFI is tracked in issue #11). The
+/// in-range (`< n`) check stays with the caller, which knows the corpus size.
+fn coerce_candidate_ids<'py>(arr: &Bound<'py, PyAny>, what: &str) -> PyResult<CandidateIds<'py>> {
+    // Fast path: already uint32 and C-contiguous -> borrow, zero-copy.
+    if let Ok(a) = arr.cast::<PyArray1<u32>>() {
+        let ro = a.readonly();
+        if ro.as_slice().is_ok() {
+            return Ok(CandidateIds::Borrowed(ro));
+        }
+        // Non-contiguous uint32 falls through to the copying path below.
+    }
+
+    macro_rules! try_int_dtype {
+        ($t:ty) => {
+            if let Ok(a) = arr.cast::<PyArray1<$t>>() {
+                let ro = a.readonly();
+                let view = ro.as_array();
+                let mut out = Vec::with_capacity(view.len());
+                for &x in view.iter() {
+                    out.push(u32::try_from(x).map_err(|_| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "{what} {x} is out of range for a u32 index \
+                             (must be in 0..=4294967295)"
+                        ))
+                    })?);
+                }
+                return Ok(CandidateIds::Owned(out));
+            }
+        };
+    }
+    // u32 first so non-contiguous uint32 (which fell through above) is handled
+    // before the wider/narrower dtypes; order is otherwise irrelevant since each
+    // downcast is an exact dtype match.
+    try_int_dtype!(u32);
+    try_int_dtype!(i64);
+    try_int_dtype!(u64);
+    try_int_dtype!(i32);
+    try_int_dtype!(i16);
+    try_int_dtype!(u16);
+    try_int_dtype!(i8);
+    try_int_dtype!(u8);
+
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "{what} must be a 1-D NumPy array of an integer dtype (e.g. uint32 or int64), got {}",
+        arr.get_type().name()?
+    )))
+}
+
+/// Reject any id `>= n` (out of the corpus) as a typed `IndexError`. The core
+/// hard-asserts ids are in range (an AVX-512 path issues a raw gather load), so an
+/// out-of-range id would otherwise surface as a `PanicException` that leaks the
+/// internal buffer geometry.
+fn check_ids_in_range(ids: &[u32], n: usize, what: &str) -> PyResult<()> {
+    if let Some(&bad) = ids.iter().find(|&&di| (di as usize) >= n) {
+        return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+            "{what} {bad} out of range (index holds {n} vectors)"
+        )));
     }
     Ok(())
 }
@@ -424,11 +524,17 @@ impl RankQuant {
     /// indices (mapped from the local candidate slot); slots that could not be
     /// filled are returned as ``-1``. Uses the same AVX-512 → AVX2 → scalar
     /// dispatch as ``search_asymmetric``.
+    ///
+    /// ``candidates`` may be a 1-D array of any integer dtype — the ``uint32``
+    /// emitted by ``top_m_candidates``/``top_m_candidates_batched`` or a plain
+    /// ``int64`` index array (``np.arange``, ``np.where(...)[0]``, fancy-index
+    /// results). Ids are converted to ``uint32``; a negative id, one ``>= 2**32``,
+    /// or one ``>= len(self)`` raises a ``ValueError``/``IndexError``.
     fn search_asymmetric_subset<'py>(
         &self,
         py: Python<'py>,
         query: PyReadonlyArray1<f32>,
-        candidates: PyReadonlyArray1<u32>,
+        candidates: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SubsetArrays<'py>> {
         let q = query.as_array();
@@ -439,23 +545,12 @@ impl RankQuant {
             )
         })?;
         ensure_finite(q_slice)?;
-        let c = candidates.as_array();
-        let c_slice = c.as_slice().ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(
-                "array must be C-contiguous; call np.ascontiguousarray() first",
-            )
-        })?;
-        // Validate every candidate id against the index size *before* calling the
-        // core. The core gathers `self.packed[di * bpv ..]` for each id and only
-        // `assert!`s the bound, so an out-of-range id would panic inside Rust and
-        // surface across pyo3 as a `PanicException` that leaks the internal buffer
-        // geometry. Reject it here as a typed `IndexError` instead.
-        let n = self.inner.len();
-        if let Some(&bad) = c_slice.iter().find(|&&di| (di as usize) >= n) {
-            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                "candidate id {bad} out of range (index holds {n} vectors)"
-            )));
-        }
+        // Accept candidate ids of any integer dtype (NumPy index arrays are int64
+        // by default) and convert to the core's u32 with checked bounds, then
+        // reject any id outside the corpus before dispatch.
+        let cands = coerce_candidate_ids(candidates, "candidate id")?;
+        let c_slice = cands.as_slice()?;
+        check_ids_in_range(c_slice, self.inner.len(), "candidate id")?;
         let (scores, ids) = py.detach(|| self.inner.search_asymmetric_subset(q_slice, c_slice, k));
         Ok((scores.into_pyarray(py), ids.into_pyarray(py)))
     }
@@ -735,8 +830,8 @@ impl Bitmap {
     /// Compute bitmap-overlap scores for a subset of doc IDs against a pre-built
     /// query bitmap. `q_bitmap` is a 1-D `uint64` array of `dim / 64` words
     /// (e.g. from [`Bitmap.build_query_bitmap_fp32`]); `doc_ids` is a 1-D
-    /// `uint32` array that must be in range. Returns a 1-D `uint32` array of
-    /// overlap scores aligned to `doc_ids`.
+    /// integer array of any dtype (converted to `uint32`) whose ids must be in
+    /// range. Returns a 1-D `uint32` array of overlap scores aligned to `doc_ids`.
     ///
     /// `doc_ids` must additionally be sorted ascending. This is a *Python-side
     /// ergonomic policy*, not a core requirement: the Rust core accepts unsorted
@@ -748,7 +843,7 @@ impl Bitmap {
         &self,
         py: Python<'py>,
         q_bitmap: PyReadonlyArray1<u64>,
-        doc_ids: PyReadonlyArray1<u32>,
+        doc_ids: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
         let qb = q_bitmap.as_array();
         let qb_slice = qb.as_slice().ok_or_else(|| {
@@ -763,21 +858,12 @@ impl Bitmap {
                 qb_slice.len()
             )));
         }
-        let ids = doc_ids.as_array();
-        let ids_slice = ids.as_slice().ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(
-                "array must be C-contiguous; call np.ascontiguousarray() first",
-            )
-        })?;
-        // Bound-check every id before dispatch: the core hard-asserts ids are in
-        // range (the AVX-512 path issues a raw load), so an OOB id would surface
-        // as a PanicException. Reject it as a typed IndexError instead.
-        let n = self.inner.len();
-        if let Some(&bad) = ids_slice.iter().find(|&&di| (di as usize) >= n) {
-            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                "doc id {bad} out of range (index holds {n} vectors)"
-            )));
-        }
+        // Accept doc ids of any integer dtype (NumPy index arrays are int64 by
+        // default) and convert to u32 with checked bounds, then reject any id
+        // outside the corpus before dispatch.
+        let doc_ids = coerce_candidate_ids(doc_ids, "doc id")?;
+        let ids_slice = doc_ids.as_slice()?;
+        check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
         // Python-side ergonomic policy (NOT a core correctness requirement):
         // the Rust core scores unsorted ids correctly in input order, just with
         // worse cache locality. The binding requires the sorted, cache-friendly

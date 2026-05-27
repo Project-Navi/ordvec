@@ -227,6 +227,128 @@ def test_subset_in_range_candidates_still_work():
 
 
 # -------------------------------------------------------------------
+# Candidate / doc-id dtype acceptance. The core takes u32 ids, but NumPy
+# index arrays are int64 by default (np.arange, np.where()[0], fancy
+# indexing, np.argpartition). The binding accepts any integer dtype and
+# converts to u32 with checked bounds rather than rejecting non-uint32
+# with an opaque "ndarray cannot be cast as ndarray" TypeError.
+# -------------------------------------------------------------------
+
+
+# Every integer dtype a candidate set might realistically arrive in.
+INT_DTYPES = [
+    np.uint32,  # ordvec's own top_m_candidates output (zero-copy fast path)
+    np.int64,  # NumPy default — np.arange / np.array([...]) / np.where()[0]
+    np.int32,
+    np.uint64,
+    np.int16,
+    np.uint16,
+    np.int8,
+    np.uint8,
+]
+
+
+@pytest.mark.parametrize("dtype", INT_DTYPES)
+def test_subset_candidate_dtype_accepted_and_equivalent(dtype):
+    # Any integer dtype is accepted and yields results identical to the
+    # uint32 reference. (Friend's report: int64/int32/uint64 used to raise
+    # TypeError.) ids stay small enough for int8 (max 127).
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    ref = np.array([0, 7, 13, 25, 41], dtype=np.uint32)
+    s_ref, id_ref = idx.search_asymmetric_subset(vectors[0], ref, k=4)
+
+    s, ids = idx.search_asymmetric_subset(vectors[0], ref.astype(dtype), k=4)
+    np.testing.assert_array_equal(ids, id_ref)
+    np.testing.assert_array_equal(s, s_ref)
+
+
+def test_subset_candidate_natural_numpy_idioms_accepted():
+    # The ways a user actually builds a candidate set — all int64.
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    for candidates in (
+        np.arange(20),
+        np.where(np.arange(50) % 5 == 0)[0],
+        np.argpartition(np.arange(50)[::-1], 15)[:15],
+    ):
+        assert candidates.dtype == np.int64  # confirm the trap dtype
+        scores, ids = idx.search_asymmetric_subset(vectors[0], candidates, k=3)
+        assert scores.shape == (3,) and ids.shape == (3,)
+
+
+def test_subset_noncontiguous_uint32_candidates_accepted():
+    # A strided uint32 view (non-contiguous) is copied through the checked
+    # path rather than rejected — the contiguous fast path is just an
+    # optimisation, not a requirement, for candidate ids.
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    strided = np.arange(0, 48, 2, dtype=np.uint32)[::3]
+    assert not strided.flags["C_CONTIGUOUS"]
+    scores, ids = idx.search_asymmetric_subset(vectors[0], strided, k=3)
+    assert scores.shape == (3,) and ids.shape == (3,)
+
+
+def test_subset_negative_candidate_raises_value_error():
+    # Fail-loud: a negative id must NOT silently wrap to a huge u32
+    # (np.asarray(-1, uint32) -> 4294967295). Reject with a clear ValueError.
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    candidates = np.array([0, -1, 5], dtype=np.int64)
+    with pytest.raises(ValueError, match="out of range for a u32"):
+        idx.search_asymmetric_subset(vectors[0], candidates, k=2)
+
+
+def test_subset_overflow_candidate_raises_value_error():
+    # Fail-loud: an id >= 2**32 must NOT silently wrap (2**32 + 5 -> 5) and
+    # score the wrong document. Reject with a clear ValueError.
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    candidates = np.array([0, 2**32 + 5], dtype=np.int64)
+    with pytest.raises(ValueError, match="out of range for a u32"):
+        idx.search_asymmetric_subset(vectors[0], candidates, k=2)
+
+
+def test_subset_out_of_range_int64_candidate_raises_index_error():
+    # The >= len(index) check applies regardless of input dtype.
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    candidates = np.array([0, 999], dtype=np.int64)
+    with pytest.raises(IndexError, match="out of range"):
+        idx.search_asymmetric_subset(vectors[0], candidates, k=2)
+
+
+def test_subset_float_candidates_raise_type_error():
+    # A non-integer dtype is a clear TypeError, not a silent truncation.
+    vectors = unit_vectors(50, 128, seed=0)
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(vectors)
+    candidates = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+    with pytest.raises(TypeError, match="integer dtype"):
+        idx.search_asymmetric_subset(vectors[0], candidates, k=2)
+
+
+def test_body_overlap_doc_ids_int64_accepted():
+    # Bitmap.body_overlap_scores_subset shares the same coercion: int64
+    # (sorted) doc_ids are accepted; the ascending-order policy still holds.
+    vectors = unit_vectors(50, 128, seed=0)
+    bm = Bitmap(dim=128, n_top=32)
+    bm.add(vectors)
+    qb = bm.build_query_bitmap_fp32(vectors[0])
+    ids_sorted = np.array([2, 4, 8, 16, 32], dtype=np.int64)
+    out = bm.body_overlap_scores_subset(qb, ids_sorted)
+    assert out.shape == (5,)
+    with pytest.raises(ValueError, match="sorted"):
+        bm.body_overlap_scores_subset(qb, np.array([16, 2, 4], dtype=np.int64))
+
+
+# -------------------------------------------------------------------
 # Wrong array width (ncols/len != dim) -> ValueError, not silent
 # misalignment or a reshape panic. The core derives n = len/dim and only
 # checks divisibility, so a wrong-but-divisible width would slip through.

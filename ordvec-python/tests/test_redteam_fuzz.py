@@ -92,6 +92,19 @@ _WRONG_F32_DTYPES = [
     object,
 ]
 
+# Non-integer dtypes a candidate / doc-id param must reject. Integer dtypes are
+# accepted (converted to u32 with checked bounds — see test_input_guards.py); a
+# float / complex / object array is a clear TypeError, never a truncation.
+_NON_INTEGER_ID_DTYPES = [
+    np.float16,
+    np.float32,
+    np.float64,
+    np.complex64,
+    np.complex128,
+    bool,
+    object,
+]
+
 # Integer scalars that must NOT wrap to a giant usize / OOM. PyO3 maps a negative
 # Python int and anything >= 2**64 to a clean OverflowError on usize conversion.
 _BAD_INT_SCALARS = [-1, -(2**40), 2**64, 2**70]
@@ -277,14 +290,30 @@ def test_rank_add_wrong_dtype_raises_type_error(dt):
         idx.add(bad)
 
 
-@pytest.mark.parametrize("dt", [np.int64, np.uint8, np.int32, np.float32, np.uint64, np.int8])
-def test_subset_candidates_wrong_dtype_raises_type_error(dt):
-    # candidates must be uint32; int64/uint8/etc must not be reinterpreted.
+@pytest.mark.parametrize("dt", _NON_INTEGER_ID_DTYPES)
+def test_subset_candidates_noninteger_dtype_raises_type_error(dt):
+    # Candidate ids accept any *integer* dtype (converted to u32 by value, never
+    # by byte reinterpretation — see test_input_guards.py); a non-integer dtype
+    # must be a clean TypeError, not a silent truncation.
     idx = RankQuant(dim=64, bits=2)
     idx.add(unit_vectors(10, 64))
     cand = np.array([0, 1, 2], dtype=dt)
     with pytest.raises(TypeError):
         idx.search_asymmetric_subset(unit_vectors(1, 64, seed=1)[0], cand, k=2)
+
+
+@pytest.mark.parametrize("dt", [np.uint8, np.int8, np.int64, np.uint64])
+def test_subset_candidates_integer_dtype_converted_by_value(dt):
+    # Adversarial: a narrow/wide integer dtype is read as logical *values*, not
+    # reinterpreted bytes. uint8 [1,2,3] -> ids 1,2,3, identical to uint32.
+    idx = RankQuant(dim=64, bits=2)
+    idx.add(unit_vectors(10, 64))
+    q = unit_vectors(1, 64, seed=1)[0]
+    ref = np.array([1, 2, 3], dtype=np.uint32)
+    s_ref, id_ref = idx.search_asymmetric_subset(q, ref, k=3)
+    s, ids = idx.search_asymmetric_subset(q, ref.astype(dt), k=3)
+    np.testing.assert_array_equal(ids, id_ref)
+    np.testing.assert_array_equal(s, s_ref)
 
 
 @pytest.mark.parametrize("dt", [np.uint32, np.int64, np.float64, np.uint8])
@@ -297,8 +326,10 @@ def test_body_overlap_q_bitmap_wrong_dtype_raises_type_error(dt):
         idx.body_overlap_scores_subset(qb, np.array([0, 1], dtype=np.uint32))
 
 
-@pytest.mark.parametrize("dt", [np.int64, np.uint8, np.int32, np.uint64])
-def test_body_overlap_doc_ids_wrong_dtype_raises_type_error(dt):
+@pytest.mark.parametrize("dt", _NON_INTEGER_ID_DTYPES)
+def test_body_overlap_doc_ids_noninteger_dtype_raises_type_error(dt):
+    # doc_ids accept any integer dtype (converted to u32 with checked bounds);
+    # a non-integer dtype is a clean TypeError.
     idx = Bitmap(dim=128, n_top=32)
     idx.add(unit_vectors(10, 128))
     qb = idx.build_query_bitmap_fp32(unit_vectors(1, 128, seed=1)[0])
