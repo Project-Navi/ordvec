@@ -109,7 +109,7 @@ pub type RankQuantFastscanIndex = RankQuantFastscan;
 /// type. Prefer the slice accessors above for read-only per-query access —
 /// exposing the flat buffers as the stable representation is the trade-off for
 /// that zero-copy interop.
-#[must_use = "search produces results by value; dropping them does no work"]
+#[must_use = "search runs the full scan to produce these results; dropping them discards that work"]
 pub struct SearchResults {
     pub scores: Vec<f32>,
     pub indices: Vec<i64>,

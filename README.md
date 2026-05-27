@@ -81,7 +81,7 @@ is empirical; this is an exact candidate-generation null, not a
 retrieval-optimality theorem.) Two pieces of this are separately machine-checked in Lean 4, both `sorry`-free
 on Lean's standard axiom base (`propext`, `Classical.choice`, `Quot.sound`):
 
-- the **ordinal invariance** the rank transform rests on — that a vector's
+- the **ordinal invariance** on which the rank transform rests — that a vector's
   sorting permutation is unchanged by any strictly monotone reparametrisation
   of its coordinates — in
   [`takens-formalization`](https://github.com/Project-Navi/takens-formalization)

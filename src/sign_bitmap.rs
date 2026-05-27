@@ -125,7 +125,7 @@ impl SignBitmap {
     /// `m_eff` produce a deterministic survivor set across runs and
     /// SIMD dispatch paths — same audit discipline as
     /// [`crate::Bitmap::top_m_candidates`].
-    #[must_use]
+    #[must_use = "this scans the corpus to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
         let m_eff = m.min(self.n_vectors);
         if m_eff == 0 {
@@ -158,7 +158,7 @@ impl SignBitmap {
     /// top-`m` candidate sets for `batch` queries in parallel. Mirrors
     /// [`crate::Bitmap::top_m_candidates_batched`] in kernel
     /// shape (CHUNK=8 hot + tail) and tie-break semantics.
-    #[must_use]
+    #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates_batched(&self, queries: &[f32], m: usize) -> Vec<Vec<u32>> {
         let dim = self.dim;
         let batch = queries.len() / dim;
