@@ -21,16 +21,17 @@
 //!
 //! See the `tests` module below for the round-trip and norm-invariant tests.
 
-use ordered_float::OrderedFloat;
 use rayon::prelude::*;
 
-use crate::util::{assert_all_finite, l2_normalise, result_buffer_len, TopK};
+use crate::util::{
+    assert_all_finite, cmp_finite_f32_then_index, l2_normalise, result_buffer_len, TopK,
+};
 use crate::SearchResults;
 
 /// Compute the dimension-wise rank transform of a single vector.
 ///
 /// `out[k]` is the rank of `v[k]` among `v[0..d]`, with ties broken by
-/// the index (stable sort). Output values are in `[0, d)`. Equivalent
+/// ascending index. Output values are in `[0, d)`. Equivalent
 /// to NumPy's `np.argsort(np.argsort(v))` for a vector of length `d`.
 ///
 /// `d` must fit in `u16` (`d <= 65_535`); panics otherwise.
@@ -39,7 +40,11 @@ pub fn rank_transform(v: &[f32]) -> Vec<u16> {
     assert!(d <= u16::MAX as usize, "dim must fit in u16");
     assert_all_finite(v);
     let mut order: Vec<u16> = (0..d as u16).collect();
-    order.sort_by_key(|&i| OrderedFloat(v[i as usize]));
+    order.sort_unstable_by(|&lhs, &rhs| {
+        let lhs = lhs as usize;
+        let rhs = rhs as usize;
+        cmp_finite_f32_then_index(v[lhs], lhs, v[rhs], rhs)
+    });
     let mut ranks = vec![0u16; d];
     for (rank, &orig_idx) in order.iter().enumerate() {
         ranks[orig_idx as usize] = rank as u16;
@@ -56,7 +61,11 @@ pub fn rank_transform_into(v: &[f32], out: &mut [u16]) {
     assert!(d <= u16::MAX as usize, "dim must fit in u16");
     assert_all_finite(v);
     let mut order: Vec<u16> = (0..d as u16).collect();
-    order.sort_by_key(|&i| OrderedFloat(v[i as usize]));
+    order.sort_unstable_by(|&lhs, &rhs| {
+        let lhs = lhs as usize;
+        let rhs = rhs as usize;
+        cmp_finite_f32_then_index(v[lhs], lhs, v[rhs], rhs)
+    });
     for (rank, &orig_idx) in order.iter().enumerate() {
         out[orig_idx as usize] = rank as u16;
     }
@@ -568,6 +577,20 @@ mod tests {
         let v = [1.0_f32, 1.0, 1.0, 1.0];
         let r = rank_transform(&v);
         assert_eq!(r, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn duplicate_values_tie_by_original_index() {
+        let v = [3.0_f32, 1.0, 3.0, 2.0, 1.0];
+        let r = rank_transform(&v);
+        assert_eq!(r, vec![3, 0, 4, 2, 1]);
+    }
+
+    #[test]
+    fn signed_zeroes_tie_by_original_index() {
+        let v = [0.0_f32, -0.0, 1.0, -0.0, 0.0];
+        let r = rank_transform(&v);
+        assert_eq!(r, vec![0, 1, 4, 2, 3]);
     }
 
     #[test]

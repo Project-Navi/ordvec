@@ -13,6 +13,21 @@
 //! index modules (`rank`, `quant`, `bitmap`, `multi_bucket`, `fastscan`)
 //! but not from outside the crate.
 
+/// Compare finite `f32` values, using the coordinate index as a deterministic
+/// tiebreaker.
+#[inline]
+pub(crate) fn cmp_finite_f32_then_index(
+    lhs_value: f32,
+    lhs_index: usize,
+    rhs_value: f32,
+    rhs_index: usize,
+) -> std::cmp::Ordering {
+    lhs_value
+        .partial_cmp(&rhs_value)
+        .expect("ordvec: finite f32 comparator received non-finite value")
+        .then_with(|| lhs_index.cmp(&rhs_index))
+}
+
 /// Result-buffer length `nq * k`, panicking loudly on usize overflow
 /// instead of silently wrapping to a too-small allocation.
 ///
