@@ -20,10 +20,13 @@ permissions:
 
 jobs:
   coverage:
-    name: coverage (cargo-llvm-cov)
+    name: coverage (cargo-llvm-cov + Intel SDE)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      SDE_VERSION: sde-external-10.7.0-2026-02-18-lin
+      SDE_URL_BASE: https://downloadmirror.intel.com/913594
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -38,20 +41,57 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov (pinned)
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: Install Intel SDE
+        env:
+          # SHA256 of ${SDE_VERSION}.tar.xz — verified before the archive is
+          # unpacked and executed. Bump together with SDE_VERSION.
+          SDE_SHA256: ca3d4086de4acb3faedf9f57b541c6936b7d5e19ae2bf763b6ea933573a0a217
+        run: |
+          set -euo pipefail
+          wget -qO intel-sde.tar.xz "${SDE_URL_BASE}/${SDE_VERSION}.tar.xz"
+          echo "${SDE_SHA256}  intel-sde.tar.xz" | sha256sum -c -
+          mkdir -p "${GITHUB_WORKSPACE}/intel-sde"
+          tar xf intel-sde.tar.xz --strip-components=1 -C "${GITHUB_WORKSPACE}/intel-sde"
+          rm intel-sde.tar.xz
+          "${GITHUB_WORKSPACE}/intel-sde/sde64" --version
+      - name: Sanity-check AVX-512 detection under SDE
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/sde-probe/src"
+          cat > "${RUNNER_TEMP}/sde-probe/Cargo.toml" <<'EOF'
+          [package]
+          name = "sde-probe"
+          version = "0.0.0"
+          edition = "2021"
+          [[bin]]
+          name = "sde-probe"
+          path = "src/main.rs"
+          EOF
+          cat > "${RUNNER_TEMP}/sde-probe/src/main.rs" <<'EOF'
+          fn main() {
+              let f = is_x86_feature_detected!("avx512f");
+              let p = is_x86_feature_detected!("avx512vpopcntdq");
+              println!("avx512f={f} avx512vpopcntdq={p}");
+              assert!(f, "SDE did not expose avx512f to the guest");
+              assert!(p, "SDE did not expose avx512vpopcntdq to the guest");
+          }
+          EOF
+          cargo build --release --manifest-path "${RUNNER_TEMP}/sde-probe/Cargo.toml"
+          "${GITHUB_WORKSPACE}/intel-sde/sde64" -spr -- \
+            "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
       # Generate the lcov report AND enforce a regression floor in a single
       # --all-features invocation, so the floor is computed on exactly the data
       # that gets uploaded (no separate `report` step that could differ in
       # selection). On a regression this command exits non-zero, so the upload
       # below is skipped.
       #
-      # The floor is 78%, set under the AVX-512-free figure: this runner has no
-      # AVX-512, so the runtime SIMD dispatch never reaches the AVX-512 kernels
-      # (bitmap / quant_kernels / sign_bitmap) and line coverage here is ~82%
-      # (vs ~90% on an AVX-512 host). Those kernels are exercised by the separate
-      # `avx512` job under Intel SDE. Follow-up: run THIS job under SDE too, for
-      # the full number and a tighter floor.
+      # Run the instrumented test binaries through Intel SDE (-spr) so runtime
+      # feature detection reaches the AVX-512 kernels. That makes the coverage
+      # floor reflect the same exercised code as the dedicated ci.yml avx512 job.
       - name: Generate coverage (lcov) + enforce floor
-        run: cargo llvm-cov --all-features --fail-under-lines 78 --lcov --output-path lcov.info
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/intel-sde/sde64 -spr --
+        run: cargo llvm-cov --all-features --target x86_64-unknown-linux-gnu --fail-under-lines 85 --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
