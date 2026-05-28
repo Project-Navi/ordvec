@@ -115,6 +115,18 @@ fn rankquant_eval_search_b3_matches_scalar_reference() {
 }
 
 #[test]
+fn rankquant_eval_search_empty_queries_does_not_transform_corpus() {
+    let corpus = make_corpus(75);
+    let queries: Vec<f32> = Vec::new();
+    let res = rankquant_eval_search(&corpus, &queries, D, 3, 10);
+
+    assert_eq!(res.nq, 0);
+    assert_eq!(res.k, 10);
+    assert!(res.scores.is_empty());
+    assert!(res.indices.is_empty());
+}
+
+#[test]
 fn rankquant_constructor_still_rejects_b3() {
     let err = std::panic::catch_unwind(|| RankQuant::new(D, 3));
     assert!(

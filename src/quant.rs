@@ -706,7 +706,7 @@ pub fn rankquant_eval_search(
     let k = k.min(n);
     let k_eff = k;
     let buf_len = result_buffer_len(nq, k);
-    if k_eff == 0 {
+    if nq == 0 || k_eff == 0 {
         return SearchResults {
             scores: vec![0.0; buf_len],
             indices: vec![-1; buf_len],
@@ -733,12 +733,8 @@ pub fn rankquant_eval_search(
             let mut q_centres = vec![0.0f32; dim];
             rankquant_eval_centres(q, bits, &mut q_centres);
             let mut top = TopK::new(k_eff);
-            for di in 0..n {
-                let doc = &doc_centres[di * dim..(di + 1) * dim];
-                let mut acc = 0.0f32;
-                for d in 0..dim {
-                    acc += q_centres[d] * doc[d];
-                }
+            for (di, doc) in doc_centres.chunks_exact(dim).enumerate() {
+                let acc: f32 = q_centres.iter().zip(doc).map(|(q, d)| q * d).sum();
                 top.maybe_insert(acc * inv_norm_sq, di);
             }
             top.finalize_into(out_scores, out_indices);

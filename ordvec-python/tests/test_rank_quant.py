@@ -152,6 +152,18 @@ def test_rankquant_eval_search_empty_corpus_shape():
     assert ids.shape == (3, 0)
 
 
+def test_rankquant_eval_search_empty_queries_shape():
+    vectors = unit_vectors(4, 64, seed=56)
+    queries = np.empty((0, 64), dtype=np.float32)
+
+    scores, ids = rankquant_eval_search(vectors, queries, bits=3, k=10)
+
+    assert scores.shape == (0, 4)
+    assert ids.shape == (0, 4)
+    assert scores.dtype == np.float32
+    assert ids.dtype == np.int64
+
+
 @pytest.mark.parametrize("bits", [2, 4])
 def test_self_query_recall_at_1(bits):
     # 1-bit is too lossy for a strict per-row self-query at this dim;
