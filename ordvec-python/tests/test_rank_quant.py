@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ordvec import RankQuant
+from ordvec import RankQuant, rankquant_eval_search
 
 
 def unit_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
@@ -20,6 +20,51 @@ def unit_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
     v = rng.standard_normal((n, dim)).astype(np.float32)
     v /= np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
     return v
+
+
+def rank_transform_reference(row: np.ndarray) -> np.ndarray:
+    order = np.lexsort((np.arange(row.size), row))
+    ranks = np.empty(row.size, dtype=np.uint16)
+    ranks[order] = np.arange(row.size, dtype=np.uint16)
+    return ranks
+
+
+def rankquant_eval_reference(
+    corpus: np.ndarray, queries: np.ndarray, bits: int, k: int
+) -> tuple[np.ndarray, np.ndarray]:
+    dim = corpus.shape[1]
+    n_buckets = 1 << bits
+    rank_positions = np.arange(dim, dtype=np.uint64)
+    bucket_by_rank = (rank_positions * n_buckets // dim).astype(np.uint8)
+    centre_by_rank = bucket_by_rank.astype(np.float32) - ((n_buckets - 1) / 2.0)
+    norm = np.sqrt(np.sum(centre_by_rank * centre_by_rank, dtype=np.float64)).astype(
+        np.float32
+    )
+
+    def centres(row: np.ndarray) -> np.ndarray:
+        ranks = rank_transform_reference(row)
+        buckets = (ranks.astype(np.uint64) * n_buckets // dim).astype(np.uint8)
+        return buckets.astype(np.float32) - ((n_buckets - 1) / 2.0)
+
+    k_eff = min(k, corpus.shape[0])
+    if k_eff == 0:
+        return (
+            np.empty((queries.shape[0], 0), dtype=np.float32),
+            np.empty((queries.shape[0], 0), dtype=np.int64),
+        )
+
+    doc_centres = np.vstack([centres(row) for row in corpus])
+    scores = np.empty((queries.shape[0], k_eff), dtype=np.float32)
+    indices = np.empty((queries.shape[0], k_eff), dtype=np.int64)
+    doc_ids = np.arange(corpus.shape[0], dtype=np.int64)
+    scale = np.float32(1.0) / (norm * norm)
+    for qi, query in enumerate(queries):
+        q_centres = centres(query)
+        row_scores = (doc_centres @ q_centres).astype(np.float32) * scale
+        order = np.lexsort((doc_ids, -row_scores))[:k_eff]
+        scores[qi] = row_scores[order]
+        indices[qi] = order
+    return scores, indices
 
 
 @pytest.mark.parametrize("bits", [1, 2, 4])
@@ -68,6 +113,58 @@ def test_search_asymmetric_shape(bits):
     assert indices.shape == (3, 10)
 
 
+@pytest.mark.parametrize("bits", [1, 2, 4])
+def test_rankquant_eval_search_matches_rankquant_search(bits):
+    vectors = unit_vectors(45, 128, seed=31 + bits)
+    queries = unit_vectors(5, 128, seed=41 + bits)
+    idx = RankQuant(dim=128, bits=bits)
+    idx.add(vectors)
+
+    packed_scores, packed_ids = idx.search(queries, k=8)
+    eval_scores, eval_ids = rankquant_eval_search(vectors, queries, bits=bits, k=8)
+
+    np.testing.assert_array_equal(eval_ids, packed_ids)
+    np.testing.assert_allclose(eval_scores, packed_scores, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("bits", [1, 2, 3, 4])
+def test_rankquant_eval_search_matches_numpy_reference(bits):
+    vectors = unit_vectors(36, 128, seed=51 + bits)
+    queries = unit_vectors(4, 128, seed=61 + bits)
+
+    scores, ids = rankquant_eval_search(vectors, queries, bits=bits, k=9)
+    ref_scores, ref_ids = rankquant_eval_reference(vectors, queries, bits=bits, k=9)
+
+    assert scores.shape == (4, 9)
+    assert ids.shape == (4, 9)
+    assert scores.dtype == np.float32
+    assert ids.dtype == np.int64
+    np.testing.assert_array_equal(ids, ref_ids)
+    np.testing.assert_allclose(scores, ref_scores, rtol=1e-6, atol=1e-6)
+
+
+def test_rankquant_eval_search_empty_corpus_shape():
+    vectors = np.empty((0, 64), dtype=np.float32)
+    queries = unit_vectors(3, 64, seed=53)
+
+    scores, ids = rankquant_eval_search(vectors, queries, bits=3, k=10)
+
+    assert scores.shape == (3, 0)
+    assert ids.shape == (3, 0)
+
+
+def test_rankquant_eval_search_empty_queries_shape():
+    vectors = unit_vectors(4, 64, seed=56)
+    queries = np.empty((0, 64), dtype=np.float32)
+
+    scores, ids = rankquant_eval_search(vectors, queries, bits=3, k=10)
+
+    assert scores.shape == (0, 4)
+    assert ids.shape == (0, 4)
+    assert scores.dtype == np.float32
+    assert ids.dtype == np.int64
+
+
 @pytest.mark.parametrize("bits", [2, 4])
 def test_self_query_recall_at_1(bits):
     # 1-bit is too lossy for a strict per-row self-query at this dim;
@@ -86,6 +183,12 @@ def test_invalid_bits_rejected():
         RankQuant(dim=64, bits=3)
     with pytest.raises(ValueError, match="bits"):
         RankQuant(dim=64, bits=8)
+    vectors = unit_vectors(4, 64, seed=54)
+    queries = unit_vectors(1, 64, seed=55)
+    with pytest.raises(ValueError, match="bits"):
+        rankquant_eval_search(vectors, queries, bits=0, k=2)
+    with pytest.raises(ValueError, match="bits"):
+        rankquant_eval_search(vectors, queries, bits=8, k=2)
 
 
 def test_dim_not_multiple_of_two_pow_bits_rejected():

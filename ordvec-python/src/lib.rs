@@ -98,6 +98,17 @@ fn check_bits_max7(bits: u8) -> PyResult<()> {
     Ok(())
 }
 
+/// Eval-only RankQuant scoring supports non-byte-aligned widths but still needs
+/// at least two buckets and a bucket alphabet representable by `u8`.
+fn check_bits_1_7(bits: u8) -> PyResult<()> {
+    if !(1..=7).contains(&bits) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "bits must be in 1..=7",
+        ));
+    }
+    Ok(())
+}
+
 fn not_contiguous_err() -> PyErr {
     pyo3::exceptions::PyValueError::new_err(
         "array must be C-contiguous; call np.ascontiguousarray() first",
@@ -265,6 +276,14 @@ fn require_c_contiguous(arr: &Bound<'_, PyAny>) -> PyResult<()> {
 /// large float64 array must not first allocate its float32 twin.
 fn axis_len(arr: &Bound<'_, PyAny>, axis: usize) -> PyResult<usize> {
     arr.getattr("shape")?.get_item(axis)?.extract::<usize>()
+}
+
+fn infer_float_2d_width(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if let Ok(a) = arr.cast::<PyArray2<f32>>() {
+        return Ok(a.readonly().as_array().ncols());
+    }
+    gate_float_ndim(arr, 2)?;
+    axis_len(arr, 1)
 }
 
 /// Present an embedding vector as a 1-D `float32` `PyReadonlyArray`, converting at
@@ -1547,6 +1566,54 @@ fn search_asymmetric_byte_lut<'py>(
     Ok((scores, indices))
 }
 
+/// Eval-only symmetric RankQuant-style search for arbitrary `bits` in `1..=7`.
+///
+/// This rank-transforms and buckets the raw `corpus`/`queries` matrices on the
+/// fly, so it supports non-byte-aligned widths such as `bits=3` without changing
+/// `RankQuant` storage or `.tvrq` persistence. Returns `(scores, indices)` with
+/// the same shape contract as `RankQuant.search`.
+#[pyfunction]
+fn rankquant_eval_search<'py>(
+    py: Python<'py>,
+    corpus: &Bound<'py, PyAny>,
+    queries: &Bound<'py, PyAny>,
+    bits: u8,
+    k: usize,
+) -> PyResult<SearchArrays<'py>> {
+    check_bits_1_7(bits)?;
+    let dim = infer_float_2d_width(corpus)?;
+    if !(2..=u16::MAX as usize).contains(&dim) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "corpus width must be in [2, {}]",
+            u16::MAX
+        )));
+    }
+    let corpus = as_f32_2d(corpus, dim)?;
+    let queries = as_f32_2d(queries, dim)?;
+    let q_arr = queries.as_array();
+    let nq = q_arr.nrows();
+    let corpus_arr = corpus.as_array();
+    let corpus_slice = corpus_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(
+            "array must be C-contiguous; call np.ascontiguousarray() first",
+        )
+    })?;
+    let query_slice = q_arr.as_slice().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(
+            "array must be C-contiguous; call np.ascontiguousarray() first",
+        )
+    })?;
+    let results =
+        py.detach(|| ordvec_core::rankquant_eval_search(corpus_slice, query_slice, dim, bits, k));
+    let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        .into_pyarray(py);
+    let indices = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.indices)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        .into_pyarray(py);
+    Ok((scores, indices))
+}
+
 /// The native extension module backing the `ordvec` Python package.
 #[pymodule]
 fn _ordvec(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1567,6 +1634,7 @@ fn _ordvec(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rank_norm, m)?)?;
     m.add_function(wrap_pyfunction!(rankquant_norm, m)?)?;
     m.add_function(wrap_pyfunction!(search_asymmetric_byte_lut, m)?)?;
+    m.add_function(wrap_pyfunction!(rankquant_eval_search, m)?)?;
 
     // Loader/limit constants (parity with `ordvec::rank_io::*`).
     m.add("MAX_DIM", ordvec_core::rank_io::MAX_DIM)?;
