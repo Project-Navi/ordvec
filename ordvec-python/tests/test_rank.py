@@ -155,10 +155,16 @@ def test_swap_remove_shrinks_length():
     assert len(idx) == 9
 
 
-def test_add_float64_is_rejected():
-    # pyo3 numpy binding is strict on dtype — float64 is not silently
-    # up/down-converted; the caller must convert.
-    idx = Rank(dim=64)
-    v64 = np.random.default_rng(0).standard_normal((4, 64)).astype(np.float64)
-    with pytest.raises(TypeError):
-        idx.add(v64)
+def test_add_float64_is_coerced():
+    # ordvec normalizes real-valued input to float32 at the boundary: float64
+    # (NumPy's default) is accepted and coerced, producing the same index as the
+    # explicitly-f32 array. Rank discards magnitude, so coercion is lossless here.
+    rng = np.random.default_rng(0)
+    v32 = rng.standard_normal((9, 64)).astype(np.float32)
+    a = Rank(dim=64)
+    a.add(v32)
+    b = Rank(dim=64)
+    b.add(v32.astype(np.float64))
+    assert len(a) == len(b) == 9
+    q = rng.standard_normal((3, 64)).astype(np.float32)
+    np.testing.assert_array_equal(a.search(q, k=5)[1], b.search(q, k=5)[1])

@@ -79,10 +79,12 @@ _QNAN = float(np.array([0x7FC00000], dtype=np.uint32).view(np.float32)[0])
 _SNAN = float(np.array([0x7FA00000], dtype=np.uint32).view(np.float32)[0])
 _NEG_SNAN = float(np.array([0xFFA00000], dtype=np.uint32).view(np.float32)[0])
 
-# dtypes rust-numpy must reject for an f32 array param (strict, no coercion).
+# dtypes a float32 embedding param must reject. float16/float32/float64 are now
+# coerced at the boundary (see test_input_dtype.py); integer and bool arrays are
+# *deliberately* rejected (a {0,1} or narrow-int vector rank-transforms to a
+# degenerate index artefact, not a meaningful ordinal signal), and complex/object
+# would be a silent reinterpretation.
 _WRONG_F32_DTYPES = [
-    np.float64,
-    np.float16,
     np.int32,
     np.int64,
     np.uint8,

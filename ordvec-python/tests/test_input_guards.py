@@ -330,7 +330,7 @@ def test_subset_float_candidates_raise_type_error():
     idx = RankQuant(dim=128, bits=2)
     idx.add(vectors)
     candidates = np.array([0.0, 1.0, 2.0], dtype=np.float32)
-    with pytest.raises(TypeError, match="integer dtype"):
+    with pytest.raises(TypeError, match="integer"):
         idx.search_asymmetric_subset(vectors[0], candidates, k=2)
 
 

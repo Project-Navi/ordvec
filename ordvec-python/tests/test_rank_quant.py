@@ -122,13 +122,21 @@ def test_load_rejects_nonexistent_file():
 
 
 @pytest.mark.parametrize("bits", [1, 2, 4])
-def test_add_float64_is_rejected(bits):
-    # pyo3 numpy binding is strict on dtype — float64 is not silently
-    # converted, the caller must convert.
-    idx = RankQuant(dim=64, bits=bits)
-    v64 = np.random.default_rng(0).standard_normal((4, 64)).astype(np.float64)
-    with pytest.raises(TypeError):
-        idx.add(v64)
+def test_add_float64_is_coerced(bits):
+    # float64 is accepted and coerced to float32 at the boundary. The asymmetric
+    # LUT keeps the query floats but scores against f32-quantised docs, so f64
+    # precision beyond f32 is meaningless — same results as an f32 index.
+    rng = np.random.default_rng(0)
+    v32 = rng.standard_normal((9, 64)).astype(np.float32)
+    a = RankQuant(dim=64, bits=bits)
+    a.add(v32)
+    b = RankQuant(dim=64, bits=bits)
+    b.add(v32.astype(np.float64))
+    assert len(a) == len(b) == 9
+    q = rng.standard_normal((3, 64)).astype(np.float32)
+    np.testing.assert_array_equal(
+        a.search_asymmetric(q, k=5)[1], b.search_asymmetric(q, k=5)[1]
+    )
 
 
 @pytest.mark.parametrize("bits", [1, 2, 4])

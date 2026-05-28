@@ -159,11 +159,17 @@ def test_top_m_candidates_deterministic_across_repeated_calls():
     assert set(runs[0]) == {int(i) for i in indices[0].tolist()}
 
 
-def test_add_float64_is_rejected():
-    idx = Bitmap(dim=64, n_top=8)
-    v64 = np.random.default_rng(0).standard_normal((4, 64)).astype(np.float64)
-    with pytest.raises(TypeError):
-        idx.add(v64)
+def test_add_float64_is_coerced():
+    # float64 accepted and coerced to float32 at the boundary; same index as f32.
+    rng = np.random.default_rng(0)
+    v32 = rng.standard_normal((20, 64)).astype(np.float32)
+    a = Bitmap(dim=64, n_top=8)
+    a.add(v32)
+    b = Bitmap(dim=64, n_top=8)
+    b.add(v32.astype(np.float64))
+    assert len(a) == len(b) == 20
+    q = rng.standard_normal((3, 64)).astype(np.float32)
+    np.testing.assert_array_equal(a.search(q, k=5)[1], b.search(q, k=5)[1])
 
 
 def test_dim_above_u16_max_rejected():

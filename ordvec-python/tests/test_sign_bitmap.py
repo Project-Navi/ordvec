@@ -152,11 +152,19 @@ def test_load_rejects_nonexistent_file():
         SignBitmap.load("/nonexistent/path/does-not-exist.tvsb")
 
 
-def test_add_float64_is_rejected():
-    idx = SignBitmap(dim=64)
-    v64 = np.random.default_rng(0).standard_normal((4, 64)).astype(np.float64)
-    with pytest.raises(TypeError):
-        idx.add(v64)
+def test_add_float64_is_coerced():
+    # float64 accepted and coerced to float32 at the boundary; same index as f32.
+    rng = np.random.default_rng(0)
+    v32 = rng.standard_normal((20, 64)).astype(np.float32)
+    a = SignBitmap(dim=64)
+    a.add(v32)
+    b = SignBitmap(dim=64)
+    b.add(v32.astype(np.float64))
+    assert len(a) == len(b) == 20
+    q = rng.standard_normal(64).astype(np.float32)
+    np.testing.assert_array_equal(
+        a.top_m_candidates(q, m=5), b.top_m_candidates(q, m=5)
+    )
 
 
 @pytest.mark.parametrize("dim", [64, 128, 256, 1024])

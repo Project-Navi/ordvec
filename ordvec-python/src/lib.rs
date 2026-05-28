@@ -136,7 +136,7 @@ impl CandidateIds<'_> {
 /// are borrowed zero-copy; every other dtype is copied once (candidate shortlists
 /// are small relative to the scan; large-M FFI is tracked in issue #11). The
 /// in-range (`< n`) check stays with the caller, which knows the corpus size.
-fn coerce_candidate_ids<'py>(arr: &Bound<'py, PyAny>, what: &str) -> PyResult<CandidateIds<'py>> {
+fn as_u32_ids_1d<'py>(arr: &Bound<'py, PyAny>, what: &str) -> PyResult<CandidateIds<'py>> {
     // Fast path: already uint32 and C-contiguous -> borrow, zero-copy.
     if let Ok(a) = arr.cast::<PyArray1<u32>>() {
         let ro = a.readonly();
@@ -176,9 +176,13 @@ fn coerce_candidate_ids<'py>(arr: &Bound<'py, PyAny>, what: &str) -> PyResult<Ca
     try_int_dtype!(i8);
     try_int_dtype!(u8);
 
+    let got = arr
+        .getattr("dtype")
+        .map(|d| d.to_string())
+        .unwrap_or_else(|_| "a non-array object".to_owned());
     Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "{what} must be a 1-D NumPy array of an integer dtype (e.g. uint32 or int64), got {}",
-        arr.get_type().name()?
+        "{what} must be a 1-D integer NumPy array with values in [0, 2**32 - 1]; got {got} \
+         (ordvec stores candidate ids as u32 — boolean and floating-point arrays are rejected)"
     )))
 }
 
@@ -193,6 +197,134 @@ fn check_ids_in_range(ids: &[u32], n: usize, what: &str) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+fn f32_dtype_error(arr: &Bound<'_, PyAny>) -> PyErr {
+    let got = arr
+        .getattr("dtype")
+        .map(|d| d.to_string())
+        .unwrap_or_else(|_| "a non-array object".to_owned());
+    pyo3::exceptions::PyTypeError::new_err(format!(
+        "expected a floating-point NumPy array (float16/float32/float64), got {got}; ordvec \
+         rank/sign-transforms real vectors and converts them to float32 at the boundary — \
+         boolean, integer, complex, object, and string arrays are rejected (a {{0, 1}} or \
+         narrow-integer vector rank-transforms to a degenerate index artefact, not a meaningful \
+         ordinal signal; call .astype(np.float32) to opt in deliberately)"
+    ))
+}
+
+fn not_contiguous_f32_err() -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(
+        "expected a C-contiguous NumPy array; got non-contiguous input. Use \
+         np.ascontiguousarray(x, dtype=np.float32) if you intend to make a copy.",
+    )
+}
+
+/// Reject a non-`float32` input whose dtype isn't a float kind, or whose `ndim`
+/// doesn't match. Error types mirror the strict-extraction contract: a bad dtype
+/// or rank is a `TypeError`, ordered so the dtype message wins. Layout is checked
+/// separately by [`require_c_contiguous`] *after* this (a `ValueError`).
+fn gate_float_ndim(arr: &Bound<'_, PyAny>, ndim: usize) -> PyResult<()> {
+    let kind = arr
+        .getattr("dtype")
+        .and_then(|d| d.getattr("kind"))
+        .and_then(|k| k.extract::<char>());
+    if !matches!(kind, Ok('f')) {
+        return Err(f32_dtype_error(arr));
+    }
+    let nd = arr.getattr("ndim").and_then(|n| n.extract::<usize>());
+    if !matches!(nd, Ok(n) if n == ndim) {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "expected a {ndim}-D float array"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a non-`C`-contiguous original array *before* any dtype coercion, so a
+/// transposed/strided float64 can't be silently laundered into a contiguous
+/// float32 (that hidden copy can dominate runtime / poison benchmarks — the copy
+/// decision stays with the caller).
+fn require_c_contiguous(arr: &Bound<'_, PyAny>) -> PyResult<()> {
+    let contiguous = arr
+        .getattr("flags")
+        .and_then(|f| f.getattr("c_contiguous"))
+        .and_then(|c| c.extract::<bool>())
+        .unwrap_or(false);
+    if contiguous {
+        Ok(())
+    } else {
+        Err(not_contiguous_f32_err())
+    }
+}
+
+/// Present an embedding vector as a 1-D `float32` `PyReadonlyArray`, converting at
+/// the boundary. The premise of ordvec is *float vector in → rank/sign transform*,
+/// so float32 is the internal working dtype, not a contract the caller must
+/// pre-satisfy: `float64` (the default for `np.array([...])` and most API
+/// embeddings) and `float16` are coerced. The transforms that consume the floats
+/// are order-only (rank transform, top-bucket bitmap) or sign-only, and `f64→f32`
+/// rounding is *monotonic* — it can never reorder two coordinates, only collapse a
+/// near-tie at the f32 floor, strictly less perturbation than the rank/bucket
+/// quantisation already applied. The asymmetric-query LUT keeps the floats but
+/// scores against f32-quantised docs, so sub-`f32` query precision is meaningless
+/// there too.
+///
+/// Rejected (matching exception type): non-float dtype — bool / integer / complex /
+/// object / string — and wrong `ndim` (`TypeError`); a non-`C`-contiguous original
+/// (`ValueError`, checked before coercion). Bool and narrow integers are
+/// *deliberately* rejected: a `{0, 1}` or few-valued vector rank-transforms to an
+/// index-tie artefact, i.e. silent retrieval garbage. The all-finite check runs on
+/// the post-coercion f32 (an `f64 > f32::MAX` rounds to `+inf` — caught here, not
+/// silently indexed). Already-`float32` contiguous arrays are borrowed zero-copy.
+fn as_f32_1d<'py>(arr: &Bound<'py, PyAny>) -> PyResult<PyReadonlyArray1<'py, f32>> {
+    let ro = if let Ok(a) = arr.cast::<PyArray1<f32>>() {
+        a.readonly()
+    } else {
+        gate_float_ndim(arr, 1)?;
+        require_c_contiguous(arr)?;
+        arr.py()
+            .import("numpy")?
+            .getattr("ascontiguousarray")?
+            .call1((arr, "float32"))?
+            .cast::<PyArray1<f32>>()
+            .map(|a| a.readonly())
+            .map_err(|_| pyo3::exceptions::PyTypeError::new_err("expected a 1-D float array"))?
+    };
+    ensure_finite(
+        ro.as_array()
+            .as_slice()
+            .ok_or_else(not_contiguous_f32_err)?,
+    )?;
+    Ok(ro)
+}
+
+/// 2-D `(n, dim)` counterpart of [`as_f32_1d`] for the `add` / batched-query paths.
+/// Same contract; see [`as_f32_1d`] for the full rationale.
+fn as_f32_2d<'py>(arr: &Bound<'py, PyAny>) -> PyResult<PyReadonlyArray2<'py, f32>> {
+    let ro = if let Ok(a) = arr.cast::<PyArray2<f32>>() {
+        a.readonly()
+    } else {
+        gate_float_ndim(arr, 2)?;
+        require_c_contiguous(arr)?;
+        arr.py()
+            .import("numpy")?
+            .getattr("ascontiguousarray")?
+            .call1((arr, "float32"))?
+            .cast::<PyArray2<f32>>()
+            .map(|a| a.readonly())
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "expected a 2-D float array of shape (n, dim)",
+                )
+            })?
+    };
+    ensure_finite(
+        ro.as_array()
+            .as_slice()
+            .ok_or_else(not_contiguous_f32_err)?,
+    )?;
+    Ok(ro)
 }
 
 // =====================================================================
@@ -228,7 +360,8 @@ impl Rank {
         format!("Rank(dim={}, n={})", self.inner.dim(), self.inner.len())
     }
 
-    fn add(&mut self, py: Python<'_>, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
+    fn add<'py>(&mut self, py: Python<'py>, vectors: &Bound<'py, PyAny>) -> PyResult<()> {
+        let vectors = as_f32_2d(vectors)?;
         let arr = vectors.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -236,7 +369,6 @@ impl Rank {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -256,9 +388,10 @@ impl Rank {
     fn search<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
@@ -267,7 +400,6 @@ impl Rank {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let results = py.detach(|| self.inner.search(slice, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
@@ -283,9 +415,10 @@ impl Rank {
     fn search_asymmetric<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
@@ -294,7 +427,6 @@ impl Rank {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let results = py.detach(|| self.inner.search_asymmetric(slice, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
@@ -411,7 +543,8 @@ impl RankQuant {
         )
     }
 
-    fn add(&mut self, py: Python<'_>, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
+    fn add<'py>(&mut self, py: Python<'py>, vectors: &Bound<'py, PyAny>) -> PyResult<()> {
+        let vectors = as_f32_2d(vectors)?;
         let arr = vectors.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -419,7 +552,6 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -437,9 +569,10 @@ impl RankQuant {
     fn search<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
@@ -448,7 +581,6 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let results = py.detach(|| self.inner.search(slice, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
@@ -463,9 +595,10 @@ impl RankQuant {
     fn search_asymmetric<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
@@ -474,7 +607,6 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let results = py.detach(|| self.inner.search_asymmetric(slice, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
@@ -533,10 +665,11 @@ impl RankQuant {
     fn search_asymmetric_subset<'py>(
         &self,
         py: Python<'py>,
-        query: PyReadonlyArray1<f32>,
+        query: &Bound<'py, PyAny>,
         candidates: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SubsetArrays<'py>> {
+        let query = as_f32_1d(query)?;
         let q = query.as_array();
         check_width(q.len(), self.inner.dim())?;
         let q_slice = q.as_slice().ok_or_else(|| {
@@ -544,11 +677,10 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(q_slice)?;
         // Accept candidate ids of any integer dtype (NumPy index arrays are int64
         // by default) and convert to the core's u32 with checked bounds, then
         // reject any id outside the corpus before dispatch.
-        let cands = coerce_candidate_ids(candidates, "candidate id")?;
+        let cands = as_u32_ids_1d(candidates, "candidate id")?;
         let c_slice = cands.as_slice()?;
         check_ids_in_range(c_slice, self.inner.len(), "candidate id")?;
         let (scores, ids) = py.detach(|| self.inner.search_asymmetric_subset(q_slice, c_slice, k));
@@ -630,7 +762,8 @@ impl Bitmap {
         )
     }
 
-    fn add(&mut self, py: Python<'_>, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
+    fn add<'py>(&mut self, py: Python<'py>, vectors: &Bound<'py, PyAny>) -> PyResult<()> {
+        let vectors = as_f32_2d(vectors)?;
         let arr = vectors.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -638,7 +771,6 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -658,9 +790,10 @@ impl Bitmap {
     fn search<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         k: usize,
     ) -> PyResult<SearchArrays<'py>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let nq = arr.nrows();
@@ -669,7 +802,6 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let results = py.detach(|| self.inner.search(slice, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
@@ -686,9 +818,10 @@ impl Bitmap {
     fn top_m_candidates<'py>(
         &self,
         py: Python<'py>,
-        query: PyReadonlyArray1<f32>,
+        query: &Bound<'py, PyAny>,
         m: usize,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let query = as_f32_1d(query)?;
         let arr = query.as_array();
         check_width(arr.len(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -696,7 +829,6 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let cands = py.detach(|| self.inner.top_m_candidates(slice, m));
         Ok(cands.into_pyarray(py))
     }
@@ -707,8 +839,9 @@ impl Bitmap {
     fn build_query_bitmap_fp32<'py>(
         &self,
         py: Python<'py>,
-        query: PyReadonlyArray1<f32>,
+        query: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<u64>>> {
+        let query = as_f32_1d(query)?;
         let arr = query.as_array();
         check_width(arr.len(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -716,7 +849,6 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         Ok(self.inner.build_query_bitmap_fp32(slice).into_pyarray(py))
     }
 
@@ -728,9 +860,10 @@ impl Bitmap {
     fn top_m_candidates_batched<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         m: usize,
     ) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let batch = arr.nrows();
@@ -739,7 +872,6 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Guard the core's internal `batch * n` (scores) and `batch * qpv`
         // (query bitmaps) allocations BEFORE the call: an overflow there wraps
         // and then indexes out of bounds (a panic), so convert it to a clean
@@ -773,7 +905,7 @@ impl Bitmap {
     fn top_m_candidates_batched_chunked<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         m: usize,
         batch_size: usize,
     ) -> PyResult<Bound<'py, PyArray2<u32>>> {
@@ -782,6 +914,7 @@ impl Bitmap {
                 "batch_size must be > 0",
             ));
         }
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let n_queries = arr.nrows();
@@ -790,7 +923,6 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Clamp batch_size to the query count so a very large value can't
         // overflow `batch_size * dim` inside the core (which fails loud with an
         // overflow panic). A batch larger than the workload is just one chunk,
@@ -861,7 +993,7 @@ impl Bitmap {
         // Accept doc ids of any integer dtype (NumPy index arrays are int64 by
         // default) and convert to u32 with checked bounds, then reject any id
         // outside the corpus before dispatch.
-        let doc_ids = coerce_candidate_ids(doc_ids, "doc id")?;
+        let doc_ids = as_u32_ids_1d(doc_ids, "doc id")?;
         let ids_slice = doc_ids.as_slice()?;
         check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
         // Python-side ergonomic policy (NOT a core correctness requirement):
@@ -969,7 +1101,8 @@ impl SignBitmap {
         )
     }
 
-    fn add(&mut self, py: Python<'_>, vectors: PyReadonlyArray2<f32>) -> PyResult<()> {
+    fn add<'py>(&mut self, py: Python<'py>, vectors: &Bound<'py, PyAny>) -> PyResult<()> {
+        let vectors = as_f32_2d(vectors)?;
         let arr = vectors.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -977,7 +1110,6 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -998,9 +1130,10 @@ impl SignBitmap {
     fn top_m_candidates<'py>(
         &self,
         py: Python<'py>,
-        query: PyReadonlyArray1<f32>,
+        query: &Bound<'py, PyAny>,
         m: usize,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let query = as_f32_1d(query)?;
         let arr = query.as_array();
         check_width(arr.len(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -1008,7 +1141,6 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         let cands = py.detach(|| self.inner.top_m_candidates(slice, m));
         Ok(cands.into_pyarray(py))
     }
@@ -1022,9 +1154,10 @@ impl SignBitmap {
     fn top_m_candidates_batched<'py>(
         &self,
         py: Python<'py>,
-        queries: PyReadonlyArray2<f32>,
+        queries: &Bound<'py, PyAny>,
         m: usize,
     ) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let queries = as_f32_2d(queries)?;
         let arr = queries.as_array();
         check_width(arr.ncols(), self.inner.dim())?;
         let batch = arr.nrows();
@@ -1033,7 +1166,6 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         // Guard the core's internal `batch * n` (scores) and `batch * qpv`
         // (query bitmaps) allocations BEFORE the call: an overflow there wraps
         // and then indexes out of bounds (a panic), so convert it to a clean
@@ -1066,8 +1198,9 @@ impl SignBitmap {
     fn build_query_bitmap<'py>(
         &self,
         py: Python<'py>,
-        query: PyReadonlyArray1<f32>,
+        query: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<u64>>> {
+        let query = as_f32_1d(query)?;
         let arr = query.as_array();
         check_width(arr.len(), self.inner.dim())?;
         let slice = arr.as_slice().ok_or_else(|| {
@@ -1075,7 +1208,6 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        ensure_finite(slice)?;
         Ok(self.inner.build_query_bitmap(slice).into_pyarray(py))
     }
 
@@ -1144,8 +1276,9 @@ impl SignBitmap {
 #[pyfunction]
 fn rank_transform<'py>(
     py: Python<'py>,
-    v: PyReadonlyArray1<f32>,
+    v: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyArray1<u16>>> {
+    let v = as_f32_1d(v)?;
     let arr = v.as_array();
     let slice = arr.as_slice().ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(
@@ -1333,7 +1466,7 @@ fn rankquant_norm(d: usize, bits: u8) -> PyResult<f32> {
 fn search_asymmetric_byte_lut<'py>(
     py: Python<'py>,
     index: PyRef<'_, RankQuant>,
-    queries: PyReadonlyArray2<f32>,
+    queries: &Bound<'py, PyAny>,
     k: usize,
 ) -> PyResult<SearchArrays<'py>> {
     if index.inner.bits() == 1 {
@@ -1341,6 +1474,7 @@ fn search_asymmetric_byte_lut<'py>(
             "search_asymmetric_byte_lut is a benchmark-only helper and does not support bits=1; use RankQuant.search_asymmetric instead",
         ));
     }
+    let queries = as_f32_2d(queries)?;
     let arr = queries.as_array();
     check_width(arr.ncols(), index.inner.dim())?;
     let nq = arr.nrows();
@@ -1349,7 +1483,6 @@ fn search_asymmetric_byte_lut<'py>(
             "array must be C-contiguous; call np.ascontiguousarray() first",
         )
     })?;
-    ensure_finite(slice)?;
     // Deref the GIL-bound `PyRef` to a plain `&RankQuant` *before* the closure:
     // capturing `index` (a `PyRef`) directly would make the closure non-`Ungil`,
     // but a bare `&ordvec_core::RankQuant` is fine to carry across `detach`.
