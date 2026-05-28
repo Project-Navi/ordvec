@@ -23,7 +23,7 @@ ignore = []
 #
 # Derived from `cargo metadata` over the full graph (lib + dev + build):
 #   * MIT / Apache-2.0      — ordvec itself + the bulk of the tree
-#     (rayon, ordered-float, num-traits, crossbeam-*, rand*, libc, …).
+#     (rayon, crossbeam-*, rand*, libc, …).
 #   * Unicode-3.0           — required by unicode-ident, whose expression is
 #     `(MIT OR Apache-2.0) AND Unicode-3.0`; the AND clause means Unicode-3.0
 #     must be explicitly allowed even though MIT/Apache cover the other half.
