@@ -26,6 +26,32 @@ use crate::rank::{
 use crate::util::{assert_all_finite, l2_normalise, result_buffer_len, TopK};
 use crate::SearchResults;
 
+fn check_eval_bits(bits: u8) {
+    assert!((1..=7).contains(&bits), "bits must be in 1..=7");
+}
+
+fn rankquant_eval_norm(dim: usize, bits: u8) -> f32 {
+    check_eval_bits(bits);
+    assert!(dim >= 2, "dim must be >= 2");
+    assert!(dim <= u16::MAX as usize, "dim must fit in u16");
+    let mut acc = 0.0f64;
+    for rank in 0..dim {
+        let b = rank_to_bucket(rank as u16, dim, bits);
+        let c = bucket_centre(b, bits) as f64;
+        acc += c * c;
+    }
+    acc.sqrt() as f32
+}
+
+fn rankquant_eval_centres(v: &[f32], bits: u8, out: &mut [f32]) {
+    debug_assert_eq!(v.len(), out.len());
+    let ranks = rank_transform(v);
+    for (dst, rank) in out.iter_mut().zip(ranks) {
+        let bucket = rank_to_bucket(rank, v.len(), bits);
+        *dst = bucket_centre(bucket, bits);
+    }
+}
+
 /// `B`-bit RankQuant index.
 ///
 /// Each document is encoded by bucketing its rank vector into
@@ -640,6 +666,89 @@ impl RankQuant {
             })
             .collect();
         (scores, global_indices)
+    }
+}
+
+/// Standalone symmetric RankQuant-style eval search for arbitrary bit widths.
+///
+/// This does **not** use [`RankQuant`] storage and does not change the `.tvrq`
+/// packing contract. It rank-transforms `corpus` and `queries`, buckets each
+/// rank into `1 << bits` equal-width bins, mean-centres bucket ids, normalises
+/// by the analytical norm for that `(dim, bits)`, and returns top-`k` results.
+///
+/// Intended for research/eval sweeps where non-byte-aligned widths such as
+/// `bits = 3` need to be scored without inventing a persistent packed format.
+pub fn rankquant_eval_search(
+    corpus: &[f32],
+    queries: &[f32],
+    dim: usize,
+    bits: u8,
+    k: usize,
+) -> SearchResults {
+    check_eval_bits(bits);
+    assert!(dim >= 2, "dim must be >= 2");
+    assert!(dim <= u16::MAX as usize, "dim must fit in u16");
+    let n = corpus.len() / dim;
+    let nq = queries.len() / dim;
+    assert_eq!(
+        corpus.len(),
+        n * dim,
+        "corpus length must be a multiple of dim"
+    );
+    assert_eq!(
+        queries.len(),
+        nq * dim,
+        "queries length must be a multiple of dim"
+    );
+    assert_all_finite(corpus);
+    assert_all_finite(queries);
+
+    let k = k.min(n);
+    let k_eff = k;
+    let buf_len = result_buffer_len(nq, k);
+    if k_eff == 0 {
+        return SearchResults {
+            scores: vec![0.0; buf_len],
+            indices: vec![-1; buf_len],
+            nq,
+            k,
+        };
+    }
+
+    let norm = rankquant_eval_norm(dim, bits);
+    let inv_norm_sq = 1.0_f32 / (norm * norm);
+    let mut doc_centres = vec![0.0f32; n * dim];
+    doc_centres
+        .par_chunks_mut(dim)
+        .zip(corpus.par_chunks(dim))
+        .for_each(|(out, doc)| rankquant_eval_centres(doc, bits, out));
+
+    let mut scores_flat = vec![0.0f32; buf_len];
+    let mut indices_flat = vec![-1i64; buf_len];
+    queries
+        .par_chunks(dim)
+        .zip(scores_flat.par_chunks_mut(k))
+        .zip(indices_flat.par_chunks_mut(k))
+        .for_each(|((q, out_scores), out_indices)| {
+            let mut q_centres = vec![0.0f32; dim];
+            rankquant_eval_centres(q, bits, &mut q_centres);
+            let mut top = TopK::new(k_eff);
+            for di in 0..n {
+                let doc = &doc_centres[di * dim..(di + 1) * dim];
+                let mut acc = 0.0f32;
+                for d in 0..dim {
+                    acc += q_centres[d] * doc[d];
+                }
+                top.maybe_insert(acc * inv_norm_sq, di);
+            }
+            top.finalize_into(out_scores, out_indices);
+        });
+
+    SearchResults {
+        scores: scores_flat,
+        indices: indices_flat,
+        nq,
+        k,
     }
 }
 

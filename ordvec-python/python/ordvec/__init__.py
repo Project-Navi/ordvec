@@ -7,12 +7,13 @@ Public API: the four index classes ``Rank``, ``RankQuant``, ``Bitmap``,
 ``SignBitmap``, plus the module-level rank-math primitives (``rank_transform``,
 ``rank_to_bucket``, ``bucket_ranks``, ``pack_buckets``, ``unpack_buckets``,
 ``rankquant_bytes_per_vec``, ``bucket_centre``, ``rank_norm``,
-``rankquant_norm``), the byte-LUT scoring helper ``search_asymmetric_byte_lut``,
-and the loader limit constants (``MAX_DIM``, ``MAX_SIGN_BITMAP_DIM``,
-``MAX_VECTORS``). Together with the four classes' methods this mirrors the Rust
-crate's public API; the low-level ``rank_io`` read/write functions are reached
-through the classes' ``write()`` / ``load()`` methods rather than exposed as
-standalone free functions.
+``rankquant_norm``), the eval-only arbitrary-width scorer
+``rankquant_eval_search``, the byte-LUT scoring helper
+``search_asymmetric_byte_lut``, and the loader limit constants (``MAX_DIM``,
+``MAX_SIGN_BITMAP_DIM``, ``MAX_VECTORS``). Together with the four classes'
+methods this mirrors the Rust crate's public API; the low-level ``rank_io``
+read/write functions are reached through the classes' ``write()`` / ``load()``
+methods rather than exposed as standalone free functions.
 
 The ``*Index`` names are back-compat aliases for the pre-0.2 turbovec-python
 rank-mode classes; they are kept only to ease script migration and are not part
@@ -47,6 +48,7 @@ from ._ordvec import (
     rank_norm,
     rank_to_bucket,
     rank_transform,
+    rankquant_eval_search,
     rankquant_bytes_per_vec,
     rankquant_norm,
     search_asymmetric_byte_lut,
@@ -77,6 +79,7 @@ __all__ = [
     "bucket_centre",
     "rank_norm",
     "rankquant_norm",
+    "rankquant_eval_search",
     "search_asymmetric_byte_lut",
     # loader limit constants
     "MAX_DIM",

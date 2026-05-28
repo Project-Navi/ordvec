@@ -1,10 +1,36 @@
 //! RankQuant (B-bit bucket-packed) integration tests.
 
-use ordvec::RankQuant;
+use ordvec::rank::{bucket_centre, rank_to_bucket, rank_transform};
+use ordvec::{rankquant_eval_search, RankQuant};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, ref_rankquant_asymmetric, D, N};
+
+fn ref_rankquant_eval_norm(dim: usize, bits: u8) -> f32 {
+    let mut acc = 0.0f32;
+    for rank in 0..dim {
+        let b = rank_to_bucket(rank as u16, dim, bits);
+        let c = bucket_centre(b, bits);
+        acc += c * c;
+    }
+    acc.sqrt()
+}
+
+fn ref_rankquant_eval_symmetric(a: &[f32], b: &[f32], bits: u8) -> f32 {
+    let dim = a.len();
+    let ra = rank_transform(a);
+    let rb = rank_transform(b);
+    let norm = ref_rankquant_eval_norm(dim, bits);
+    let inv_norm_sq = 1.0f32 / (norm * norm);
+    let mut acc = 0.0f32;
+    for d in 0..dim {
+        let ba = rank_to_bucket(ra[d], dim, bits);
+        let bb = rank_to_bucket(rb[d], dim, bits);
+        acc += bucket_centre(ba, bits) * bucket_centre(bb, bits);
+    }
+    acc * inv_norm_sq
+}
 
 #[test]
 fn rankquant_asymmetric_matches_reference_b2() {
@@ -19,6 +45,82 @@ fn rankquant_asymmetric_matches_reference_b4() {
 #[test]
 fn rankquant_asymmetric_matches_reference_b1() {
     rankquant_asymmetric_matches_reference(1);
+}
+
+#[test]
+fn rankquant_eval_search_matches_rankquant_search_for_packed_widths() {
+    let corpus = make_corpus(71);
+    let mut rng = ChaCha8Rng::seed_from_u64(72);
+    let nq = 5;
+    let queries: Vec<f32> = (0..nq * D).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+    for bits in [1u8, 2, 4] {
+        let mut idx = RankQuant::new(D, bits);
+        idx.add(&corpus);
+
+        let packed = idx.search(&queries, 12);
+        let eval = rankquant_eval_search(&corpus, &queries, D, bits, 12);
+
+        assert_eq!(eval.nq, packed.nq);
+        assert_eq!(eval.k, packed.k);
+        assert_eq!(
+            eval.indices, packed.indices,
+            "eval search top-k diverged from RankQuant::search at bits={bits}",
+        );
+        for (slot, (&a, &b)) in eval.scores.iter().zip(&packed.scores).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "bits={bits} slot {slot}: eval score {a} vs packed score {b}",
+            );
+        }
+    }
+}
+
+#[test]
+fn rankquant_eval_search_b3_matches_scalar_reference() {
+    let corpus = make_corpus(73);
+    let mut rng = ChaCha8Rng::seed_from_u64(74);
+    let nq = 4;
+    let queries: Vec<f32> = (0..nq * D).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let res = rankquant_eval_search(&corpus, &queries, D, 3, 10);
+
+    assert_eq!(res.nq, nq);
+    assert_eq!(res.k, 10);
+    for qi in 0..nq {
+        let q = &queries[qi * D..(qi + 1) * D];
+        let mut reference: Vec<(f32, i64)> = (0..N)
+            .map(|di| {
+                (
+                    ref_rankquant_eval_symmetric(q, &corpus[di * D..(di + 1) * D], 3),
+                    di as i64,
+                )
+            })
+            .collect();
+        reference.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let ref_top = &reference[..10];
+        let ref_ids: Vec<i64> = ref_top.iter().map(|&(_, di)| di).collect();
+        assert_eq!(
+            res.indices_for_query(qi),
+            ref_ids.as_slice(),
+            "b=3 eval top-k ids diverged for query {qi}",
+        );
+        for (slot, &(s_ref, _)) in ref_top.iter().enumerate() {
+            let s = res.scores_for_query(qi)[slot];
+            assert!(
+                (s - s_ref).abs() < 1e-6,
+                "query {qi} slot {slot}: b=3 eval score {s} vs reference {s_ref}",
+            );
+        }
+    }
+}
+
+#[test]
+fn rankquant_constructor_still_rejects_b3() {
+    let err = std::panic::catch_unwind(|| RankQuant::new(D, 3));
+    assert!(
+        err.is_err(),
+        "RankQuant::new must keep the packed-width domain"
+    );
 }
 
 fn rankquant_asymmetric_matches_reference(bits: u8) {

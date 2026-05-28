@@ -52,7 +52,7 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
-pub use quant::RankQuant;
+pub use quant::{rankquant_eval_search, RankQuant};
 pub use rank::Rank;
 pub use sign_bitmap::SignBitmap;
 
