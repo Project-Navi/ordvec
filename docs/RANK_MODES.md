@@ -496,8 +496,9 @@ multi-seed stability is your call.
 1. **Additive index family.** `Rank`, `RankQuant`,
    `Bitmap`, and `SignBitmap` are independent types,
    compiled and tested alongside one another.
-2. **No heavy dependencies.** The rank primitives use `ordered_float`
-   and `rayon`. No BLAS, no codebook training, no rotation matrix.
+2. **No heavy dependencies.** The rank primitives use `rayon` plus
+   internal finite-`f32` ordering helpers. No BLAS, no codebook
+   training, no rotation matrix.
 3. **Build-speed advantage.** Encode is fast and data-independent
    because there is no rotation matmul and no codebook fit — the
    per-vector cost is the `argsort`.
