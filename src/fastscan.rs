@@ -21,6 +21,8 @@
 //! `pub(crate)`: production callers should reach for
 //! [`RankQuant::search_asymmetric`](crate::RankQuant::search_asymmetric),
 //! whose AVX-512 → AVX2 → scalar dispatch is the maintained surface.
+//! This latency path is not part of the constant-weight bitmap overlap
+//! calibration theorem.
 //!
 //! # Provenance
 //!

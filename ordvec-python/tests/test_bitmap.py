@@ -3,9 +3,9 @@
 Exercise the top-bucket bitmap candidate-generator API (add, search,
 top_m_candidates, save/load, accessors) and the two-stage flow with a
 RankQuant rerank. Algorithmic correctness (kernel-vs-scalar parity,
-hypergeometric null distribution checks, bilinear identity proofs) lives
-in the crate's Rust tests under `tests/index/`; these tests cover the
-pyo3 boundary only.
+constant-weight bitmap invariants, bilinear identity checks) lives in the
+crate's Rust tests under `tests/index/`; the formal overlap-null theorem lives
+in `ordvec-formalization`. These tests cover the pyo3 boundary only.
 """
 from __future__ import annotations
 

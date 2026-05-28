@@ -15,6 +15,14 @@ methods this mirrors the Rust crate's public API; the low-level ``rank_io``
 read/write functions are reached through the classes' ``write()`` / ``load()``
 methods rather than exposed as standalone free functions.
 
+``Bitmap`` exposes the constant-weight top-bucket overlap statistic formalized
+in the companion ``ordvec-formalization`` Lean repo: under explicit finite
+symmetry, quotient, and monotone-overlap assumptions, an overlap threshold is
+Bayes-optimal and the idealized uniform constant-weight null gives that
+threshold the hypergeometric upper tail. This is an in-model candidate-admission
+claim, not a guarantee that real encoders or deployment corpora satisfy those
+assumptions.
+
 The ``*Index`` names are back-compat aliases for the pre-0.2 turbovec-python
 rank-mode classes; they are kept only to ease script migration and are not part
 of the documented surface — new code should use the OrdVec ontology names above.

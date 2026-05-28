@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Reframed bitmap-overlap docs around the checked Lean proof spine: query
+  symmetry, quotient sufficiency, finite threshold optimality, and idealized
+  hypergeometric calibration, while preserving the real-encoder caveats.
+
 ## [0.2.0] - 2026-05-26
 
 First public release on crates.io / PyPI — the crate was not published before

@@ -66,35 +66,42 @@ Two further paths, for callers who need them:
   latency-critical callers know it exists.
 - **`MultiBucketBitmap`** *(behind `--features experimental`)* — the
   multi-bucket bilinear-overlap probe behind the research-side decomposition;
-  a scaffold for the theory, not a production path.
+  an algebraic scaffold, not the top-bucket theorem surface or a production
+  path.
 
-## The bitmap prefilter has a closed-form null
+## The bitmap prefilter has a checked finite model
 
 The `Bitmap` prefilter scores candidates by `popcount(Q AND D)` over each
-document's fixed-size top-bucket set. Two *unrelated* documents — modelled as
-independent uniform top-bucket sets — overlap **hypergeometrically**,
-`H(dim, n_top, n_top)`, with expected overlap `n_top² / dim` (e.g. 16 at
-`dim = 256`, `n_top = 64`). So the filter's **selectivity** — how often an
-unrelated document clears a given overlap threshold — is closed-form and
-data-independent, not a tuned cutoff. (Whether *true* neighbours clear the bar
-is empirical; this is an exact candidate-generation null, not a
-retrieval-optimality theorem.) Two pieces of this are separately machine-checked in Lean 4, both `sorry`-free
-on Lean's standard axiom base (`propext`, `Classical.choice`, `Quot.sound`):
+document's fixed-size top-bucket set. In the idealized uniform constant-weight
+null, two unrelated `n_top`-active bitmaps in `dim` coordinates overlap
+**hypergeometrically**, `H(dim, n_top, n_top)`, with expected overlap
+`n_top² / dim` (e.g. 16 at `dim = 256`, `n_top = 64`). That makes the null
+selectivity of an overlap cutoff closed-form.
+
+The current proof story is stronger than a closed-form null alone. Two pieces
+are machine-checked in Lean 4, both `sorry`-free on Lean's standard axiom base
+(`propext`, `Classical.choice`, `Quot.sound`):
 
 - the **ordinal invariance** on which the rank transform rests — that a vector's
   sorting permutation is unchanged by any strictly monotone reparametrisation
   of its coordinates — in
   [`takens-formalization`](https://github.com/Project-Navi/takens-formalization)
   (theorem `isOrdinalPatternOf_comp_strictMono`); and
-- the **shape of the bitmap candidate filter** — that under a finite
-  monotone-likelihood-ratio overlap-tilt model, an overlap-count *threshold*
-  (the popcount cutoff) is the Bayes-optimal deterministic admission rule, and
-  the uniform constant-weight null gives that threshold exactly the
-  hypergeometric upper tail — in
+- the **finite constant-weight bitmap admission model** — symmetry makes
+  literal overlap the canonical query-preserving invariant, quotient
+  sufficiency reduces the decision to that evidence, a finite overlap-tilt
+  signal model makes an overlap-count threshold Bayes-optimal among
+  deterministic admission rules, and the uniform constant-weight bitmap null
+  assigns that same threshold event exactly the hypergeometric upper tail — in
   [`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization)
   (theorem `exists_uniformBitmapOverlapTail_finiteBayesRisk_le_and_hypergeomTail`).
-  This is an *in-model* result: it fixes the optimal rule's shape under the
-  stated assumptions, not a claim that any given corpus obeys the model.
+
+This is an *in-model* result. It proves the rule shape and the idealized finite
+null under explicit quotient, symmetry, and monotone-overlap assumptions. It
+does not prove that real encoders satisfy those assumptions, that the textbook
+hypergeometric is every deployment corpus's null, or that ordinal quotients are
+representation-complete. Whether true neighbours clear a cutoff remains an
+empirical contract to measure.
 
 Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
@@ -149,6 +156,10 @@ Wheels target CPython 3.10+ (abi3); to build from source instead, see
 - **Index-file trust model:**
   [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md),
   [`THREAT_MODEL.md`](THREAT_MODEL.md)
+- **Formal proof spine:** [`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization),
+  including its [`proof-spine`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/proof-spine.md),
+  [`theorem-map`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/theorem-map.md),
+  and [`reviewer brief`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/reviewer-brief.md).
 - **API docs:** <https://docs.rs/ordvec>
 - **Paper (OrdVec / RankQuant):** _link TBD — see
   [Research collaboration](#research-collaboration)._
@@ -236,8 +247,10 @@ Collaboration we're actively seeking:
 
 - **Real-corpus evaluation** — running the modes against public corpora
   (GloVe, MTEB / BEIR, OpenAI embedding dumps) beyond the synthetic benchmark.
-- **Theory** — formalising the hypergeometric candidate-generation null and
-  the rank-cosine invariants.
+- **Theory** — extending and independently auditing the `sorry`-free Lean
+  formalization, especially the finite bitmap proof spine, rank-cosine
+  invariants, and empirical diagnostics for when real encoders meet or violate
+  the model assumptions.
 - **Independent reproduction** — re-running the benchmark on other hardware
   and reporting the numbers.
 

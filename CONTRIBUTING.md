@@ -14,6 +14,10 @@ Contributions to the code, the docs, and the paper are all welcome.
   reproducible `examples/bench_rank` synthetic run. Real-corpus numbers are
   user-runnable and reported in the paper — please don't add unverifiable
   performance claims.
+- **Keep theory claims bounded.** Cite theorem names or formalization docs for
+  proof-backed statements, and preserve the finite in-model vs real-encoder
+  caveat. The Lean bitmap theorem proves a constant-weight overlap admission
+  model under explicit assumptions; it is not a blanket retrieval guarantee.
 - **MSRV is Rust 1.89.** Don't use newer standard-library or language APIs.
 - **Stable surface.** The persistence file magics (`.tvr` / `.tvrq` /
   `.tvbm` / `.tvsb`) and the public method names

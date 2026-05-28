@@ -128,23 +128,29 @@ don't have a hypergeometric null because they don't have fixed
 bucket cardinalities — their score distribution depends on the
 unknown embedding distribution.
 
-**A research program this suggests — now partly machine-checked.** The
-chain — representation → statistic → retrieval theorem → systems
-implementation — now has a checked link in the middle. Under a finite
-monotone-likelihood-ratio overlap-tilt model (the formal cousin of a
-shared-latent-support model, where relevant documents have elevated
-coordinates on a query-specific support set `S_q`), the top-bucket
-overlap statistic is monotone in the likelihood ratio for relevance,
-and an overlap-count threshold — the popcount cutoff — is the
-Bayes-optimal deterministic admission rule, with the uniform
-constant-weight null assigning that threshold exactly the
-hypergeometric upper tail. That is proved `sorry`-free in
-[`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization)
-(`exists_uniformBitmapOverlapTail_finiteBayesRisk_le_and_hypergeomTail`).
-It is an *in-model* result: it fixes the shape of the optimal rule
-under the stated assumptions, not a claim that any given corpus obeys
-the model — whether real neighbours clear the bar stays empirical,
-which is what the bench and the paper measure.
+**Checked finite model: symmetry, quotient sufficiency, threshold,
+calibration.** The proof chain now has a larger machine-checked middle
+than the implementation docs used to claim. In
+[`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization),
+Lean proves that literal bitmap overlap is the canonical invariant
+under query-preserving coordinate relabelings; finite quotient
+sufficiency reduces the admission decision to ordered overlap
+evidence when the likelihood ratio factors through it; a finite
+monotone-likelihood-ratio overlap-tilt model makes an overlap-count
+threshold Bayes-optimal among deterministic admission rules; and the
+uniform constant-weight bitmap null gives that same threshold event
+the exact hypergeometric upper tail. The headline theorem is
+`exists_uniformBitmapOverlapTail_finiteBayesRisk_le_and_hypergeomTail`;
+the proof path is summarized in the formalization repo's
+`docs/proof-spine.md`, with theorem names in `docs/theorem-map.md`.
+
+It is still an *in-model* result. The theorem is about literal
+constant-weight bitmaps, finite deterministic admission, and explicit
+symmetry / quotient / monotone-overlap assumptions. It does not prove
+that real encoders satisfy those assumptions, that the textbook
+hypergeometric is every deployment corpus's null, or that ordinal
+quotients are representation-complete. Whether real neighbours clear a
+cutoff stays empirical, which is what the bench and the paper measure.
 
 The systems consequence is what the bench measures: at a moderate M
 the bitmap probe captures most of exact RankQuant's top-10 neighbours,
@@ -512,3 +518,7 @@ multi-seed stability is your call.
    retrieval still works after the removal is the interesting result:
    on the corpora tested, those components were carrying less than the
    dense-quantization literature assumes.
+6. **Formal boundary.** The Lean result supports the constant-weight
+   bitmap overlap admission model and its idealized null calibration.
+   It does not replace real-corpus recall, null-fit, or monotonicity
+   checks for a deployed encoder.

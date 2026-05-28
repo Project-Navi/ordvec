@@ -57,5 +57,6 @@ into more hosts rather than forcing callers to adapt to it.
 
 ## Out of scope here
 
-Benchmarks and the intellectual framing live in the OrdVec / RankQuant paper;
-this roadmap concerns the crate as an embeddable building block.
+Benchmarks and the intellectual framing live in the OrdVec / RankQuant paper
+and the companion `ordvec-formalization` Lean repository; this roadmap concerns
+the crate as an embeddable building block.

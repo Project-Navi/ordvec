@@ -541,9 +541,10 @@ pub(crate) fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, u
     let bitmaps = read_le_vec(&mut f, payload_bytes / 8, u64::from_le_bytes)?;
     // Constant-composition invariant: every document bitmap must have exactly
     // `n_top` bits set (it flags the document's top `n_top` coordinates). The
-    // hypergeometric null model and the documented `[0, n_top]` score range
-    // both assume this, so a forged row with valid shape but a different
-    // popcount would break both. Verify per-row popcount at the boundary.
+    // idealized uniform constant-weight hypergeometric null model and the
+    // documented `[0, n_top]` score range both assume this, so a forged row
+    // with valid shape but a different popcount would break both. Verify
+    // per-row popcount at the boundary.
     for (row_idx, row) in bitmaps.chunks_exact(qpv).enumerate() {
         let pop: u32 = row.iter().map(|w| w.count_ones()).sum();
         if pop as usize != n_top {
