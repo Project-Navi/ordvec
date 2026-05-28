@@ -156,6 +156,8 @@ Wheels target CPython 3.10+ (abi3); to build from source instead, see
 - **Index-file trust model:**
   [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md),
   [`THREAT_MODEL.md`](THREAT_MODEL.md)
+- **C ABI:**
+  [`docs/c-api.md`](docs/c-api.md)
 - **Formal proof spine:** [`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization),
   including its [`proof-spine`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/proof-spine.md),
   [`theorem-map`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/theorem-map.md),

@@ -1,7 +1,7 @@
 # Threat Model — `ordvec`
 
-> **Status:** v0.2.0 (pre-1.0), 2026-05-25. This is the maintained threat model
-> for the `ordvec` Rust crate and the `ordvec` PyO3/maturin Python bindings. It
+> **Status:** v0.2.0 (pre-1.0), 2026-05-28. This is the maintained threat model
+> for the `ordvec` Rust crate, C ABI, Go wrapper, and PyO3/maturin Python bindings. It
 > is reviewed when the attack surface changes (new persistence formats, new
 > `unsafe` kernels, new FFI surface, or release-pipeline changes).
 >
@@ -10,7 +10,7 @@
 > multi-tenancy of its own. This document deliberately does **not** enumerate
 > web-application threats (SQLi/XSS/CSRF/session) that do not apply. It covers
 > the surfaces that actually exist: untrusted-input parsing, `unsafe` SIMD, the
-> Python FFI boundary, the supply chain, and resource use under untrusted
+> C/Python FFI boundaries, the supply chain, and resource use under untrusted
 > callers. Deployment-owned risks (corpus trust, co-tenancy, admission control)
 > are documented as *context* for integrators, not as library action items.
 
@@ -29,8 +29,8 @@ See also: [`SECURITY.md`](SECURITY.md) (reporting), [`RELEASING.md`](RELEASING.m
   abort, no silent data corruption, no trailing-data acceptance.
 - Deterministic, finite-input behavior for valid embeddings.
 - Clear, documented failure contracts for invalid caller input (non-finite
-  floats, dimension mismatches, shape errors) — panic in Rust, `ValueError`
-  in Python.
+  floats, dimension mismatches, shape errors) — panic in Rust, typed status
+  codes in C/Go, `ValueError` in Python.
 - Supply-chain hygiene for the published crate and Python wheels.
 
 **`ordvec` does not own:**
@@ -68,6 +68,8 @@ absence of a second maintainer is itself a tracked supply-chain residual
 | **Deserialization** | `rank_io.rs` — `.tvr` / `.tvrq` / `.tvbm` / `.tvsb` loaders | Untrusted filesystem / network byte stream |
 | **Compute kernels** | `fastscan.rs`, `quant_kernels.rs`, `bitmap.rs`, `sign_bitmap.rs` | Trust established after format validation |
 | **Index API** | `rank.rs`, `quant.rs`, `bitmap.rs`, `sign_bitmap.rs` | Caller-controlled query embeddings |
+| **C ABI** | `ordvec-ffi` (`include/ordvec.h`) | C caller ↔ Rust boundary; raw pointers and opaque handles |
+| **Go FFI** | `ordvec-go` (cgo over `ordvec-ffi`) | Go slices ↔ synchronous C ABI calls |
 | **Python FFI** | `ordvec-python` (PyO3 / maturin) | Python ↔ Rust boundary; NumPy buffers |
 | **CI / supply chain** | 13 GitHub Actions workflows; `Cargo.lock`; crates.io + PyPI | GitHub OIDC, crates.io, PyPI trust chains |
 
@@ -200,9 +202,54 @@ pre-ranker; callers needing exact scores use `RankQuant::search_asymmetric`.
 
 ---
 
-## 4. Python FFI threats (THREAT-FFI) — binding-owned
+## 4. FFI threats (THREAT-FFI) — binding-owned
 
-### 4.1 Existing defenses (code-verified)
+### 4.1 C ABI defenses (code-verified)
+
+`ordvec-ffi` exposes only loaded `.tvrq` `RankQuant` and `.tvbm` `Bitmap`
+indexes through one opaque handle. The ABI checks raw pointer nullness and
+caller-supplied lengths before use, requires exact v1 `struct_size` values for
+input structs, rejects unknown flags and nonzero reserved input fields,
+validates query dimension and finiteness before entering core search,
+bounds-checks every candidate row before any subset scorer runs, and requires
+caller-owned output buffers large enough for `min(k, search_space_size)`.
+
+Every fallible entry point is wrapped in `catch_unwind`, maps panics to
+`ORDVEC_STATUS_PANIC`, and stores a thread-local error detail for the caller.
+Successful fallible calls clear that thread-local error. The ABI does not log
+queries, row IDs, paths, stats, or errors; stats are local output structs only.
+Concurrent search/info calls may share a handle, but `ordvec_index_free` must
+not race with any other call.
+
+The C ABI is designed for thin higher-level wrappers that preserve the same
+lifetime contract. In the stacked Go-wrapper PR, the repo-local wrapper
+serializes `Search`/`Info` against `Close`, copies C-owned results into Go
+values, treats `Close` as idempotent, returns `ErrClosed` after close, and uses
+the C ABI only synchronously. Those wrapper-specific mitigations are
+code-verified in that PR.
+
+**THREAT-FFI-001 (P1, mitigated): Panic or invalid input crossing the C ABI.**
+Malformed C calls must return status codes rather than unwind into C or read
+past caller buffers. *Mitigations:* exact-size input structs, pointer/order
+validation, row bounds checks, output-capacity checks, `catch_unwind`, Rust ABI
+tests for failure paths, and C/C++ header compile smoke tests. *Residual:*
+passing an invalid non-null pointer is still undefined behavior, as in any C
+ABI; the library can validate nullness and sizes, not pointer provenance.
+
+**THREAT-FFI-002 (P2, documented): Handle lifetime misuse.**
+`ordvec_index_free(NULL)` is a no-op, but double free, use after free, or
+freeing a handle while another thread is searching are undefined behavior.
+*Mitigation:* documented contract in `docs/c-api.md`. The stacked Go wrapper PR
+serializes `Close` against `Search`/`Info` and adds a finalizer safety net,
+while still requiring explicit `Close`.
+
+**THREAT-FFI-003 (P3, mitigated): Accidental telemetry through ABI stats.**
+Search stats could become a logging side channel if the library emitted them
+globally. *Mitigation:* ABI v1 has no callbacks or global logging; stats are
+written only to caller-provided memory and contain aggregate counters/timings,
+not query values or hit contents.
+
+### 4.2 Python defenses (code-verified)
 
 The binding takes `PyReadonlyArray`, rejects non-C-contiguous arrays with a
 clear `ValueError`, validates finiteness (`ensure_finite`), maps shape errors
@@ -212,9 +259,9 @@ in place. PyO3's `&mut self` borrow tracking means a second thread re-entering
 the **same** index object during a released-GIL call gets a clean
 `Already borrowed` `RuntimeError`, never concurrent mutation.
 
-### 4.2 Risks (documented contracts, implemented)
+### 4.3 Python risks (documented contracts, implemented)
 
-**THREAT-FFI-001 (P2, documented): Concurrent input-array mutation during a
+**THREAT-FFI-004 (P2, documented): Concurrent input-array mutation during a
 released-GIL call.** `PyReadonlyArray` keeps the input buffer alive and blocks
 `rust-numpy`-mediated writes for the call's duration, but it cannot stop
 another thread or native extension from mutating the *same backing memory*
@@ -225,7 +272,7 @@ input array from another thread while an `ordvec` call is in progress"),
 matching the standard contract for GIL-releasing NumPy extensions. An optional
 `safe_copy=True` hard-isolation parameter remains a possible future ergonomic.
 
-**THREAT-FFI-002 (P2, documented): Unsanitized filesystem-path forwarding.**
+**THREAT-FFI-005 (P2, documented): Unsanitized filesystem-path forwarding.**
 `write()` / `load()` forward the path to the filesystem unmodified (no `..` /
 traversal sanitization). A service exposing these path arguments to user input
 could enable traversal or arbitrary-file overwrite. This is a **caller
@@ -410,8 +457,11 @@ blast radius of a compromised dependency separately.
 | ID | Category | Owner | Description | Likelihood | Impact | Status / priority |
 |---|---|---|---|---|---|---|
 | THREAT-SIMD-001 | Memory safety | Library | Unsafe-kernel invariant bypass on refactor | Medium | High | **Mitigated** — `unsafe_op_in_unsafe_fn` denied crate-wide + type wrapper + equivalence test |
-| THREAT-FFI-001 | FFI | Binding | Concurrent input mutation during released-GIL call | Medium | Medium | **P2** — documented contract |
-| THREAT-FFI-002 | FFI | Binding | Unsanitized path forwarding | Medium | Medium | **P2** — documented contract |
+| THREAT-FFI-001 | FFI | Binding | Panic or invalid input crossing C ABI | Medium | High | **Mitigated** — status codes, validation, `catch_unwind` |
+| THREAT-FFI-002 | FFI | Caller | Handle lifetime misuse | Medium | High | **P2** — documented contract; stacked Go wrapper serializes `Close` |
+| THREAT-FFI-003 | FFI | Binding | Accidental telemetry through ABI stats | Low | Low | **Mitigated** — caller-owned stats, no logging |
+| THREAT-FFI-004 | FFI | Binding | Concurrent input mutation during released-GIL call | Medium | Medium | **P2** — documented contract |
+| THREAT-FFI-005 | FFI | Binding | Unsanitized path forwarding | Medium | Medium | **P2** — documented contract |
 | THREAT-SUPPLY-001 | Supply chain | Config | Release config / single-owner | Low | Critical | **Mitigated** (reviewer + main-only); residual = account compromise / 2nd owner |
 | THREAT-SUPPLY-002 | Supply chain | Config | Release immutability / tag integrity | Low | High | **Mitigated** — registries immutable; GitHub immutable releases on + `main` protected |
 | THREAT-SUPPLY-003 | Supply chain | Config | Typosquatting adjacent names | Medium | Medium | P3 |
