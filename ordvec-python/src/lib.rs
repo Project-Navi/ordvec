@@ -1201,6 +1201,50 @@ impl SignBitmap {
             .into_pyarray(py))
     }
 
+    /// Dense full-corpus sign-agreement scores for a single query. Returns a
+    /// 1-D `uint32` array of length `len(index)`, aligned by document id.
+    fn score_all<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let query = as_f32_1d(query, Some(self.inner.dim()))?;
+        let arr = query.as_array();
+        let slice = arr.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "array must be C-contiguous; call np.ascontiguousarray() first",
+            )
+        })?;
+        let scores = py.detach(|| self.inner.score_all(slice));
+        Ok(scores.into_pyarray(py))
+    }
+
+    /// Batched dense full-corpus sign-agreement scores. Returns a 2-D `uint32`
+    /// array of shape `(batch, len(index))`, aligned by query row and document id.
+    fn score_all_batched<'py>(
+        &self,
+        py: Python<'py>,
+        queries: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let queries = as_f32_2d(queries, self.inner.dim())?;
+        let arr = queries.as_array();
+        let batch = arr.nrows();
+        let slice = arr.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "array must be C-contiguous; call np.ascontiguousarray() first",
+            )
+        })?;
+        let n = self.inner.len();
+        let qpv = self.inner.dim() / 64;
+        batch.checked_mul(n.max(qpv)).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("batch * index size overflows usize")
+        })?;
+        let scores = py.detach(|| self.inner.score_all_batched_flat(slice));
+        Ok(numpy::ndarray::Array2::from_shape_vec((batch, n), scores)
+            .expect("internal: batched dense score flatten shape invariant")
+            .into_pyarray(py))
+    }
+
     /// Build the query-side sign bitmap from an FP32 query, returned as a 1-D
     /// `uint64` array of `dim / 64` words (`bit j` set iff `q[j] > 0`).
     fn build_query_bitmap<'py>(

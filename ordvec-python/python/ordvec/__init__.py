@@ -24,13 +24,13 @@ checks. Treat ``path`` as trusted input — in a service that derives it from
 caller-supplied data, validate or sandbox the path first, exactly as you would
 before a bare ``open()``.
 
-Threading: ``search`` / ``search_asymmetric`` / ``add`` and the candidate
-generators release the GIL during the heavy Rust scan, so other Python threads
-run concurrently. The input arrays are *read in place* (not copied) for that
-window — do not mutate an array from another thread while a call that received
-it is in progress, or the scan races the write and may return inconsistent
-results. This is the standard contract for GIL-releasing numeric extensions
-(NumPy itself behaves this way).
+Threading: ``search`` / ``search_asymmetric`` / ``add`` and the dense scoring /
+candidate generator methods release the GIL during the heavy Rust scan, so other
+Python threads run concurrently. The input arrays are *read in place* (not
+copied) for that window — do not mutate an array from another thread while a
+call that received it is in progress, or the scan races the write and may return
+inconsistent results. This is the standard contract for GIL-releasing numeric
+extensions (NumPy itself behaves this way).
 """
 
 from ._ordvec import (

@@ -22,6 +22,10 @@ def unit_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
     return v
 
 
+def sign_agreement_reference(vectors: np.ndarray, query: np.ndarray) -> np.ndarray:
+    return ((vectors > 0.0) == (query > 0.0)).sum(axis=1).astype(np.uint32)
+
+
 def test_new_reports_dim_and_is_empty():
     idx = SignBitmap(dim=128)
     assert idx.dim == 128
@@ -116,6 +120,46 @@ def test_empty_batch_against_empty_index_yields_zero_columns():
     empty_q = np.empty((0, 64), dtype=np.float32)
     batched = idx.top_m_candidates_batched(empty_q, m=5)
     assert batched.shape == (0, 0)
+
+
+def test_score_all_shape_dtype_and_reference_values():
+    vectors = unit_vectors(25, 128, seed=21)
+    query = unit_vectors(1, 128, seed=22)[0]
+    idx = SignBitmap(dim=128)
+    idx.add(vectors)
+
+    scores = idx.score_all(query)
+
+    assert scores.shape == (25,)
+    assert scores.dtype == np.uint32
+    np.testing.assert_array_equal(scores, sign_agreement_reference(vectors, query))
+
+
+def test_score_all_batched_shape_and_matches_single_query():
+    vectors = unit_vectors(30, 128, seed=23)
+    queries = unit_vectors(4, 128, seed=24)
+    idx = SignBitmap(dim=128)
+    idx.add(vectors)
+
+    batched = idx.score_all_batched(queries)
+
+    assert batched.shape == (4, 30)
+    assert batched.dtype == np.uint32
+    expected = np.vstack([idx.score_all(q) for q in queries])
+    np.testing.assert_array_equal(batched, expected)
+
+
+def test_score_all_empty_shapes():
+    idx = SignBitmap(dim=64)
+    q = unit_vectors(1, 64, seed=25)[0]
+    assert idx.score_all(q).shape == (0,)
+
+    queries = unit_vectors(3, 64, seed=26)
+    assert idx.score_all_batched(queries).shape == (3, 0)
+
+    idx.add(unit_vectors(5, 64, seed=27))
+    empty_q = np.empty((0, 64), dtype=np.float32)
+    assert idx.score_all_batched(empty_q).shape == (0, 5)
 
 
 def test_dim_not_multiple_of_64_rejected():

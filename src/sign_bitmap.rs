@@ -206,6 +206,83 @@ impl SignBitmap {
             .collect()
     }
 
+    /// Score every indexed document against one query and return dense
+    /// sign-agreement counts aligned by document id.
+    ///
+    /// `scores[di] = dim - popcount(q_bits ^ doc_bits[di])`, so higher is
+    /// better. This is a full-corpus scoring primitive, not a retrieval helper:
+    /// it performs no top-k selection and no sorting.
+    #[must_use = "this scans the corpus to score every document; dropping the result discards that work"]
+    pub fn score_all(&self, q: &[f32]) -> Vec<u32> {
+        let qb = self.build_query_bitmap(q);
+        let mut scores = vec![0u32; self.n_vectors]; // Hamming distance first.
+        sign_scan_collect(
+            &self.bitmaps,
+            self.n_vectors,
+            self.qwords_per_vec,
+            &qb,
+            &mut scores,
+        );
+        let dim = u32::try_from(self.dim).expect("sign bitmap dim fits u32");
+        scores.par_iter_mut().for_each(|h| *h = dim - *h);
+        scores
+    }
+
+    /// Batched dense scoring. Returns a flat row-major buffer of full-corpus
+    /// sign-agreement scores of length `batch * len(index)`, with columns
+    /// aligned by document id and no sorting.
+    #[must_use = "this scans the corpus to score every document per query; dropping the result discards that work"]
+    pub fn score_all_batched_flat(&self, queries: &[f32]) -> Vec<u32> {
+        let dim = self.dim;
+        let batch = queries.len() / dim;
+        assert_eq!(queries.len(), batch * dim);
+        if batch == 0 {
+            return Vec::new();
+        }
+        let n = self.n_vectors;
+        let qpv = self.qwords_per_vec;
+
+        let q_batch_len = batch
+            .checked_mul(qpv)
+            .expect("batched query-bitmap buffer length (batch * qpv) overflows usize");
+        let mut q_batch = vec![0u64; q_batch_len];
+        for bi in 0..batch {
+            let qb = self.build_query_bitmap(&queries[bi * dim..(bi + 1) * dim]);
+            q_batch[bi * qpv..(bi + 1) * qpv].copy_from_slice(&qb);
+        }
+
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let scores_len = batch
+            .checked_mul(n)
+            .expect("batched dense score buffer length (batch * n) overflows usize");
+        let mut scores = vec![0u32; scores_len]; // Hamming distance first.
+        sign_scan_collect_batched(&self.bitmaps, n, qpv, &q_batch, batch, &mut scores);
+
+        let dim = u32::try_from(dim).expect("sign bitmap dim fits u32");
+        scores
+            .par_chunks_mut(n)
+            .for_each(|row| row.iter_mut().for_each(|h| *h = dim - *h));
+        scores
+    }
+
+    /// Batched dense scoring. Returns one full-corpus sign-agreement row per
+    /// query, with columns aligned by document id and no sorting.
+    #[must_use = "this scans the corpus to score every document per query; dropping the result discards that work"]
+    pub fn score_all_batched(&self, queries: &[f32]) -> Vec<Vec<u32>> {
+        let dim = self.dim;
+        let batch = queries.len() / dim;
+        assert_eq!(queries.len(), batch * dim);
+        let n = self.n_vectors;
+        let flat = self.score_all_batched_flat(queries);
+        if n == 0 {
+            return vec![Vec::new(); batch];
+        }
+        flat.chunks(n).map(|row| row.to_vec()).collect()
+    }
+
     pub fn len(&self) -> usize {
         self.n_vectors
     }
@@ -560,6 +637,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn score_all_returns_sign_agreement_by_doc_id() {
+        let n = 37;
+        let corpus = make_corpus(27, n);
+        let mut idx = SignBitmap::new(D);
+        idx.add(&corpus);
+        let mut rng = ChaCha8Rng::seed_from_u64(28);
+        let query: Vec<f32> = (0..D).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+        let scores = idx.score_all(&query);
+        assert_eq!(scores.len(), n);
+        let qbm = idx.build_query_bitmap(&query);
+        for (di, &score) in scores.iter().enumerate() {
+            let off = di * idx.qwords_per_vec;
+            let dbm = &idx.bitmaps[off..off + idx.qwords_per_vec];
+            assert_eq!(
+                score,
+                D as u32 - scalar_hamming(&qbm, dbm),
+                "score_all must return sign agreement for doc {di}",
+            );
+        }
+    }
+
+    #[test]
+    fn score_all_batched_matches_single_query() {
+        let n = 75;
+        let corpus = make_corpus(29, n);
+        let mut idx = SignBitmap::new(D);
+        idx.add(&corpus);
+        let mut rng = ChaCha8Rng::seed_from_u64(30);
+        let batch = 6;
+        let queries: Vec<f32> = (0..batch * D)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
+
+        let batched = idx.score_all_batched(&queries);
+        assert_eq!(batched.len(), batch);
+        for bi in 0..batch {
+            assert_eq!(
+                batched[bi],
+                idx.score_all(&queries[bi * D..(bi + 1) * D]),
+                "batched dense scoring diverged at batch idx {bi}",
+            );
+        }
+    }
+
+    #[test]
+    fn score_all_batched_flat_matches_single_query() {
+        let n = 75;
+        let corpus = make_corpus(31, n);
+        let mut idx = SignBitmap::new(D);
+        idx.add(&corpus);
+        let mut rng = ChaCha8Rng::seed_from_u64(32);
+        let batch = 6;
+        let queries: Vec<f32> = (0..batch * D)
+            .map(|_| rng.random_range(-1.0..1.0))
+            .collect();
+
+        let batched = idx.score_all_batched_flat(&queries);
+        assert_eq!(batched.len(), batch * n);
+        for bi in 0..batch {
+            assert_eq!(
+                &batched[bi * n..(bi + 1) * n],
+                idx.score_all(&queries[bi * D..(bi + 1) * D]),
+                "flat batched dense scoring diverged at batch idx {bi}",
+            );
+        }
+    }
+
+    #[test]
+    fn score_all_empty_shapes() {
+        let idx = SignBitmap::new(D);
+        let query = vec![1.0f32; D];
+        assert!(idx.score_all(&query).is_empty());
+
+        let queries = vec![1.0f32; 2 * D];
+        assert!(idx.score_all_batched_flat(&queries).is_empty());
+        assert_eq!(idx.score_all_batched(&queries), vec![Vec::<u32>::new(); 2]);
+
+        let empty_queries: Vec<f32> = Vec::new();
+        assert!(idx.score_all_batched_flat(&empty_queries).is_empty());
+        assert!(idx.score_all_batched(&empty_queries).is_empty());
+
+        let mut idx = SignBitmap::new(D);
+        idx.add(&make_corpus(33, 5));
+        assert!(idx.score_all_batched_flat(&empty_queries).is_empty());
+        assert!(idx.score_all_batched(&empty_queries).is_empty());
     }
 
     #[test]
