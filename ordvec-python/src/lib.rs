@@ -15,7 +15,10 @@
 //! `assert!`/`assert_all_finite` panics surface as typed Python exceptions, not
 //! an opaque `PanicException`: constructors and `swap_remove` check their
 //! arguments, `check_width` rejects shape mismatches, `ensure_finite` rejects
-//! NaN/±Inf, and the inline guard rejects non-C-contiguous arrays.
+//! NaN/±Inf, and most array inputs reject non-C-contiguous layouts. Candidate
+//! and doc-id arrays are the exception: non-contiguous integer arrays are
+//! copied through the checked `u32` conversion path unless they hit the
+//! contiguous `uint32` zero-copy fast path.
 //!
 //! File paths passed to `write` / `load` are forwarded to the filesystem
 //! unmodified — there is no `..` / traversal sanitisation — so callers must
@@ -137,13 +140,16 @@ impl CandidateIds<'_> {
 /// are small relative to the scan; large-M FFI is tracked in issue #11). The
 /// in-range (`< n`) check stays with the caller, which knows the corpus size.
 fn as_u32_ids_1d<'py>(arr: &Bound<'py, PyAny>, what: &str) -> PyResult<CandidateIds<'py>> {
-    // Fast path: already uint32 and C-contiguous -> borrow, zero-copy.
+    // Fast path: already uint32. Borrow if contiguous; otherwise copy without
+    // unnecessary bounds checks because every u32 value already fits.
     if let Ok(a) = arr.cast::<PyArray1<u32>>() {
         let ro = a.readonly();
         if ro.as_slice().is_ok() {
             return Ok(CandidateIds::Borrowed(ro));
         }
-        // Non-contiguous uint32 falls through to the copying path below.
+        let view = ro.as_array();
+        let out = view.iter().copied().collect();
+        return Ok(CandidateIds::Owned(out));
     }
 
     macro_rules! try_int_dtype {
@@ -164,10 +170,7 @@ fn as_u32_ids_1d<'py>(arr: &Bound<'py, PyAny>, what: &str) -> PyResult<Candidate
             }
         };
     }
-    // u32 first so non-contiguous uint32 (which fell through above) is handled
-    // before the wider/narrower dtypes; order is otherwise irrelevant since each
-    // downcast is an exact dtype match.
-    try_int_dtype!(u32);
+    // Order is irrelevant since each downcast is an exact dtype match.
     try_int_dtype!(i64);
     try_int_dtype!(u64);
     try_int_dtype!(i32);
