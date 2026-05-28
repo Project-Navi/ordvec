@@ -1,8 +1,8 @@
 //! Python bindings for [`ordvec`](https://github.com/Fieldnote-Echo/ordvec) — the
 //! training-free ordinal & sign vector-quantization crate.
 //!
-//! Exposes the four retrieval types under the OrdVec ontology — [`Rank`],
-//! [`RankQuant`], [`Bitmap`], [`SignBitmap`] — as a single abi3 extension module
+//! Exposes the four retrieval types under the OrdVec ontology — `Rank`,
+//! `RankQuant`, `Bitmap`, `SignBitmap` — as a single abi3 extension module
 //! (`_ordvec`) wrapped by the `ordvec` Python package.
 //!
 //! The core crate is aliased as `ordvec_core` throughout, so the Rust namespace
@@ -487,7 +487,7 @@ impl Rank {
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
-    /// Load a `Rank` index from a `.tvr` file previously written by [`Rank.write`].
+    /// Load a `Rank` index from a `.tvr` file previously written by [`Rank::write`].
     ///
     /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
     /// sanitisation — so treat it as trusted input (see the module docstring).
@@ -664,7 +664,7 @@ impl RankQuant {
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
-    /// Load a `RankQuant` index from a `.tvrq` file written by [`RankQuant.write`].
+    /// Load a `RankQuant` index from a `.tvrq` file written by [`RankQuant::write`].
     ///
     /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
     /// sanitisation — so treat it as trusted input (see the module docstring).
@@ -693,6 +693,10 @@ impl RankQuant {
     /// indices (mapped from the local candidate slot); slots that could not be
     /// filled are returned as ``-1``. Uses the same AVX-512 → AVX2 → scalar
     /// dispatch as ``search_asymmetric``.
+    ///
+    /// If the shortlist came from [`Bitmap`], this is the exact RankQuant
+    /// rerank stage over that survivor set; it does not itself apply or
+    /// calibrate a bitmap overlap threshold.
     ///
     /// ``candidates`` may be a 1-D array of any integer dtype — the ``uint32``
     /// emitted by ``top_m_candidates``/``top_m_candidates_batched`` or a plain
@@ -762,6 +766,8 @@ impl Bitmap {
     /// Construct a top-bucket bitmap index. `dim` must be a positive multiple of
     /// 64; `n_top` (how many coordinates per document are flagged "top", e.g.
     /// dim/4 for the b=2-equivalent top quarter) must satisfy `0 < n_top < dim`.
+    /// Every stored document and query bitmap has exactly `n_top` active
+    /// coordinates, matching the constant-weight overlap model.
     #[new]
     fn new(dim: usize, n_top: usize) -> PyResult<Self> {
         if dim == 0 || !dim.is_multiple_of(64) {
@@ -821,7 +827,9 @@ impl Bitmap {
     }
 
     /// Bitmap-overlap search: returns the top-`k` doc indices by
-    /// popcount(query_top AND doc_top).
+    /// popcount(query_top AND doc_top). This uses the overlap statistic from
+    /// the finite threshold theorem but returns a top-k ranking, not a
+    /// calibrated threshold-admission set.
     fn search<'py>(
         &self,
         py: Python<'py>,
@@ -848,7 +856,9 @@ impl Bitmap {
 
     /// Return top-`m` candidate doc IDs for a single query as a 1-D `uint32`
     /// array. Used as the candidate generator for two-stage retrieval (bitmap
-    /// probe → exact RankQuant rerank).
+    /// probe → exact RankQuant rerank). This is a fixed-budget shortlist over
+    /// the formal overlap statistic; the theorem's admission rule is an
+    /// explicit overlap threshold.
     fn top_m_candidates<'py>(
         &self,
         py: Python<'py>,
@@ -868,7 +878,8 @@ impl Bitmap {
 
     /// Build the query-side top-`n_top` bitmap from an FP32 query, returned as a
     /// 1-D `uint64` array of `dim / 64` words (the doc-side packing). Pairs with
-    /// [`Bitmap.body_overlap_scores_subset`] for staged rescoring.
+    /// [`Bitmap::body_overlap_scores_subset`] for staged rescoring. The returned
+    /// bitmap has exactly `n_top` active coordinates.
     fn build_query_bitmap_fp32<'py>(
         &self,
         py: Python<'py>,
@@ -889,6 +900,8 @@ impl Bitmap {
     /// dim)` f32 array; returns a 2-D `uint32` array of shape `(batch, m_eff)`
     /// where `m_eff = min(m, len(index))`. The column count is `m_eff`
     /// regardless of `batch`, so an empty `(0, dim)` input returns `(0, m_eff)`.
+    /// Each row has the same fixed-budget semantics as
+    /// [`Bitmap::top_m_candidates`].
     fn top_m_candidates_batched<'py>(
         &self,
         py: Python<'py>,
@@ -928,11 +941,12 @@ impl Bitmap {
     }
 
     /// Chunked batched candidate generation: like
-    /// [`Bitmap.top_m_candidates_batched`] but processes `queries` in groups of
+    /// [`Bitmap::top_m_candidates_batched`] but processes `queries` in groups of
     /// `batch_size` rows in parallel — use when the full query workload is
     /// larger than one batch fits efficiently in cache. `queries` is a 2-D `(n,
     /// dim)` f32 array; returns a 2-D `uint32` array `(n, m_eff)`. `batch_size`
-    /// must be > 0.
+    /// must be > 0. Each row has the same fixed-budget semantics as
+    /// [`Bitmap::top_m_candidates`].
     fn top_m_candidates_batched_chunked<'py>(
         &self,
         py: Python<'py>,
@@ -991,9 +1005,11 @@ impl Bitmap {
 
     /// Compute bitmap-overlap scores for a subset of doc IDs against a pre-built
     /// query bitmap. `q_bitmap` is a 1-D `uint64` array of `dim / 64` words
-    /// (e.g. from [`Bitmap.build_query_bitmap_fp32`]); `doc_ids` is a 1-D
+    /// (e.g. from [`Bitmap::build_query_bitmap_fp32`]); `doc_ids` is a 1-D
     /// integer array of any dtype (converted to `uint32`) whose ids must be in
     /// range. Returns a 1-D `uint32` array of overlap scores aligned to `doc_ids`.
+    /// These are the exact overlap values to compare against an explicit
+    /// calibrated cutoff when using threshold admission.
     ///
     /// `doc_ids` must additionally be sorted ascending. This is a *Python-side
     /// ergonomic policy*, not a core requirement: the Rust core accepts unsorted
@@ -1058,7 +1074,7 @@ impl Bitmap {
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
-    /// Load a `Bitmap` index from a `.tvbm` file written by [`Bitmap.write`].
+    /// Load a `Bitmap` index from a `.tvbm` file written by [`Bitmap::write`].
     ///
     /// `path` is forwarded to the filesystem unmodified — no `..` / traversal
     /// sanitisation — so treat it as trusted input (see the module docstring).
@@ -1104,7 +1120,8 @@ impl SignBitmap {
     /// 1-bit-per-coord sign-cosine retrieval substrate. `dim` must be a positive
     /// multiple of 64, at most `MAX_SIGN_BITMAP_DIM`. No `n_top` parameter — the
     /// threshold is data-independent (bit set iff coord > 0). Storage: `dim / 8`
-    /// bytes per doc (128 B at D = 1024).
+    /// bytes per doc (128 B at D = 1024). This is separate from the
+    /// constant-weight `Bitmap` theorem and its hypergeometric overlap null.
     #[new]
     fn new(dim: usize) -> PyResult<Self> {
         if dim == 0 || !dim.is_multiple_of(64) {
@@ -1297,7 +1314,7 @@ impl SignBitmap {
     }
 
     /// Load a `SignBitmap` from a `.tvsb` file previously written by
-    /// [`SignBitmap.write`]. Raises `IOError` if the file is missing, malformed,
+    /// [`SignBitmap::write`]. Raises `IOError` if the file is missing, malformed,
     /// or its payload length disagrees with the header-declared shape.
     ///
     /// `path` is forwarded to the filesystem unmodified — no `..` / traversal

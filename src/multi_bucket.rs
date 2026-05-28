@@ -8,7 +8,7 @@
 //! score(q, d) = Σ_{a, b} W[a, b] · |Q_a ∩ D_b|
 //! ```
 //!
-//! for arbitrary weights `W[2^bits][2^bits]` is the formal object the
+//! for arbitrary weights `W[2^bits][2^bits]` is the algebraic object the
 //! scoring decomposes into. For **outer-product weights**
 //! `W[a, b] = (a − c)(b − c)` with `c = (2^bits − 1) / 2` this is
 //! algebraically identical to the symmetric RankQuant per-coord score
@@ -25,6 +25,10 @@
 //! bilinear decomposition empirically and serve as the reference for
 //! **truncated** weight matrices (top-k buckets only, diagonal-only,
 //! banded) which are the principled candidate-generation primitives.
+//!
+//! The companion Lean theorem currently attaches to the literal top-bucket
+//! constant-weight [`crate::Bitmap`] overlap statistic and its threshold tail,
+//! not to arbitrary bilinear weights over all buckets.
 
 use rayon::prelude::*;
 

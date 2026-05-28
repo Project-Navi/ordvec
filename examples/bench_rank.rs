@@ -18,6 +18,11 @@
 //! - recall@10 against FP32 brute-force cosine ground truth
 //! - candidate-recall (CR) for the two-stage modes (ANN probe quality)
 //!
+//! The bitmap rows also serve as an empirical complement to the Lean
+//! constant-weight overlap model: they measure whether this synthetic or
+//! user-supplied corpus behaves like the monotone-overlap regime assumed by the
+//! theorem.
+//!
 //! DETERMINISM. The corpus, queries, and ground truth are fully seeded,
 //! so every QUALITY column (R@10, CR, bytes/vec, total MiB, ns/dim) is
 //! bit-identical across runs on the same machine. Only the wall-clock

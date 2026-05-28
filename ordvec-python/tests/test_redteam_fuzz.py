@@ -1013,7 +1013,8 @@ def test_bitmap_load_forged_n_top_io_error(tmp_path):
 
 def test_bitmap_load_corrupt_popcount_io_error(tmp_path):
     # Zero the payload → each row popcount 0 != n_top, violating the per-row
-    # popcount invariant the hypergeometric model assumes.
+    # popcount invariant the constant-weight bitmap-null / formal overlap model
+    # assumes.
     idx = Bitmap(dim=128, n_top=32)
     idx.add(unit_vectors(20, 128))
     real = str(tmp_path / "real.tvbm")

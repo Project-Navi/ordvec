@@ -8,11 +8,18 @@
 //! For `dim=1024, n_top=256` this is 128 B/doc — half of RankQuant b=2's
 //! storage — and equivalent to the top bucket of RankQuant b=2.
 //!
-//! Score = `popcount(Q_bitmap AND D_bitmap) ∈ [0, n_top]`. The null
-//! distribution for a random doc is hypergeometric
-//! `H(N=dim, K=n_top, n=n_top)` with mean `n_top² / dim`, which lets
-//! callers compute a closed-form p-value for the overlap — a property
-//! magnitude quantizers don't have.
+//! Score = `popcount(Q_bitmap AND D_bitmap) ∈ [0, n_top]`. Under the
+//! idealized uniform constant-weight bitmap null, a random document's overlap
+//! is hypergeometric `H(N=dim, K=n_top, n=n_top)` with mean `n_top² / dim`,
+//! which lets callers compute a closed-form p-value for an overlap cutoff — a
+//! property magnitude quantizers don't have.
+//!
+//! This is also the implementation surface for the companion Lean
+//! formalization's finite model: literal constant-weight bitmap overlap is the
+//! query-preserving quotient statistic, an overlap-tail rule is Bayes-optimal
+//! under explicit monotone-overlap assumptions, and the same threshold event has
+//! the hypergeometric upper tail under the idealized uniform null. The theorem
+//! is in-model only; real encoders and deployment nulls remain empirical.
 //!
 //! Intended primary use: candidate generator for two-stage retrieval
 //! (bitmap probe → top-M candidates → exact RankQuant rerank).
@@ -24,6 +31,12 @@ use crate::util::{and_popcount, assert_all_finite, result_buffer_len, TopK};
 use crate::SearchResults;
 
 /// Top-bucket bitmap index for constant-composition coarse scoring.
+///
+/// The checked finite theorem attached to this surface concerns threshold
+/// admission on literal `n_top`-active bitmaps. The top-k helpers below are
+/// engineering conveniences over the same overlap statistic; calibrated
+/// threshold admission still requires choosing and validating a cutoff for the
+/// caller's corpus.
 pub struct Bitmap {
     dim: usize,
     n_top: usize,
@@ -99,7 +112,9 @@ impl Bitmap {
     /// Build the query-side bitmap from the *FP32 query directly*
     /// (top `n_top` coordinates by value). This preserves the
     /// "rich query, cheap docs" asymmetry of the rank-cosine paper:
-    /// the query side never gets rank-quantised.
+    /// the query side never gets rank-quantised. The returned query bitmap has
+    /// exactly `n_top` active coordinates, matching the constant-weight
+    /// overlap model.
     pub fn build_query_bitmap_fp32(&self, q: &[f32]) -> Vec<u64> {
         assert_eq!(q.len(), self.dim);
         assert_all_finite(q);
@@ -122,6 +137,10 @@ impl Bitmap {
     /// Search: returns the top-`k` documents by popcount-overlap with
     /// the query's top-bucket bitmap. Scores are `popcount(Q AND D)`
     /// reported as f32 (in `[0, n_top]`).
+    ///
+    /// This ranks by the same overlap statistic used by the finite threshold
+    /// theorem, but it returns a top-k list rather than applying a calibrated
+    /// admission cutoff.
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
         let nq = queries.len() / self.dim;
         assert_eq!(queries.len(), nq * self.dim);
@@ -172,7 +191,9 @@ impl Bitmap {
 
     /// Return the top-`m` candidate document indices for a single
     /// query, ordered by bitmap-overlap desc. Helper for two-stage
-    /// retrieval.
+    /// retrieval. This is a fixed-budget shortlist over the formal overlap
+    /// statistic; the theorem's admission rule is a threshold event, not an
+    /// `m`-sized survivor set.
     ///
     /// For large `m` this would exhibit O(N · m) behaviour through a
     /// streaming top-k buffer (each replacement triggers a linear
@@ -224,7 +245,8 @@ impl Bitmap {
     ///
     /// `queries` is a flat `batch * dim` f32 slice. Returns
     /// `Vec<Vec<u32>>` with one top-`m` set per query, sorted by
-    /// overlap descending.
+    /// overlap descending. Each row has the same fixed-budget semantics as
+    /// [`Self::top_m_candidates`].
     #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates_batched(&self, queries: &[f32], m: usize) -> Vec<Vec<u32>> {
         let dim = self.dim;
@@ -295,7 +317,8 @@ impl Bitmap {
     /// `batch_size` and runs each chunk through
     /// [`Self::top_m_candidates_batched`] in parallel via rayon. Use
     /// when the full query workload is larger than one batch fits
-    /// efficiently in L2/L3.
+    /// efficiently in L2/L3. This preserves the fixed-budget shortlist
+    /// semantics of [`Self::top_m_candidates`].
     #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates_batched_chunked(
         &self,
@@ -343,7 +366,9 @@ impl Bitmap {
     /// index addresses at most `u32::MAX` documents.
     ///
     /// Public surface to support staged-pipeline callers that need to
-    /// rescore a small survivor set under the exact body overlap.
+    /// rescore a small survivor set under the exact body overlap. The returned
+    /// overlaps are also the values to compare against an explicit calibrated
+    /// cutoff when using threshold admission.
     pub fn body_overlap_scores_subset(&self, q_bitmap: &[u64], doc_ids: &[u32], out: &mut [u32]) {
         let qpv = self.qwords_per_vec;
         assert_eq!(q_bitmap.len(), qpv);

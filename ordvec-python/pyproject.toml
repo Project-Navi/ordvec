@@ -49,6 +49,7 @@ dependencies = [
 Homepage = "https://github.com/Fieldnote-Echo/ordvec"
 Repository = "https://github.com/Fieldnote-Echo/ordvec"
 Issues = "https://github.com/Fieldnote-Echo/ordvec/issues"
+Formalization = "https://github.com/Fieldnote-Echo/ordvec-formalization"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"

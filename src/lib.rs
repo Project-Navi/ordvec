@@ -20,6 +20,15 @@
 //!   coordinate, set when the coordinate is positive) for sign-cosine
 //!   candidate generation.
 //!
+//! The [`Bitmap`] candidate score is the implementation surface with the
+//! strongest formal story: in the companion Lean formalization, literal
+//! constant-weight bitmap overlap is the query-preserving quotient statistic,
+//! an overlap threshold is Bayes-optimal under an explicit finite
+//! monotone-overlap signal model, and the idealized uniform constant-weight null
+//! calibrates that threshold by the hypergeometric upper tail. This is a finite
+//! in-model theorem, not a claim that real encoders automatically satisfy the
+//! quotient, symmetry, or null assumptions.
+//!
 //! ```no_run
 //! use ordvec::{Rank, RankQuant};
 //!
@@ -67,8 +76,9 @@ pub use sign_bitmap::SignBitmap;
 pub use quant::search_asymmetric_byte_lut;
 
 // `MultiBucketBitmap` underwrites the bilinear bucket-overlap
-// decomposition but is not stable public API. It is reachable only with
-// the `experimental` feature; the default surface excludes it.
+// decomposition but is not the constant-weight top-bucket theorem surface and
+// is not stable public API. It is reachable only with the `experimental`
+// feature; the default surface excludes it.
 #[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmap;
 

@@ -21,8 +21,20 @@ scores, ids = q.search_asymmetric(np.random.randn(8, 1024).astype(np.float32), k
 |-------|---------|
 | `Rank` | Full-precision rank vectors (u16 per coordinate). |
 | `RankQuant` | Bucketed ranks, `bits` ∈ {1, 2, 4}; symmetric + asymmetric (float-query LUT) scoring. |
-| `Bitmap` | Top-bucket bitmap per document; `popcount(Q AND D)` candidate scoring. |
-| `SignBitmap` | Sign bitmap for sign-cosine candidate generation. |
+| `Bitmap` | Constant-weight top-bucket bitmap per document; `popcount(Q AND D)` candidate scoring. |
+| `SignBitmap` | Sign bitmap for sign-cosine candidate generation; separate from the constant-weight bitmap theorem. |
+
+## Theory and calibration
+
+`Bitmap` exposes the constant-weight top-bucket overlap statistic formalized in
+[`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization).
+In that finite Lean model, literal bitmap overlap is the query-preserving
+quotient statistic, an overlap threshold is Bayes-optimal under explicit
+monotone-overlap assumptions, and the idealized uniform constant-weight null
+calibrates that threshold by the hypergeometric upper tail.
+
+This is not a deployment guarantee for every encoder or corpus. Real-corpus
+recall, monotonicity, and null fit remain empirical diagnostics.
 
 ## Installation
 

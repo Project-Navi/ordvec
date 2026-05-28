@@ -549,6 +549,10 @@ impl RankQuant {
     /// probe), but the copy grows linearly in `M`. For very large `M`
     /// (e.g. misuse via FFI), a full [`Self::search_asymmetric`] may be
     /// cheaper; a gather-free in-place scan is tracked for the FFI work.
+    ///
+    /// If the candidate list came from [`crate::Bitmap`], this method reranks
+    /// that shortlist exactly under RankQuant; it does not itself carry the
+    /// bitmap threshold-calibration guarantee.
     pub fn search_asymmetric_subset(
         &self,
         query: &[f32],

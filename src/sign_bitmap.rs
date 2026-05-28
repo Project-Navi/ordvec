@@ -17,6 +17,10 @@
 //! candidate selector takes top-M docs by **lowest** Hamming
 //! (= **highest** agreement).
 //!
+//! This is a separate sign-agreement primitive. It is not a constant-weight
+//! bitmap space and is not covered by [`crate::Bitmap`]'s hypergeometric
+//! overlap-tail theorem.
+//!
 //! Kernel architecture mirrors [`crate::Bitmap`] (single-query
 //! and CHUNK=8 batched hot+tail paths under AVX-512 VPOPCNTDQ). The
 //! only material difference is `_mm512_xor_si512` in place of
