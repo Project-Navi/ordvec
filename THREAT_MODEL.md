@@ -288,8 +288,11 @@ provenance above. The GitHub-side mutability surface is now closed too:
 enabled**, so a published release's `v*` tag cannot be force-moved or deleted
 and its assets cannot be replaced after publication; the **`main` branch is
 protected** (pull-request review required, force-pushes and deletions blocked)
-and is the **only deployment branch** permitted for the `pypi` / `crates-io`
-release environments. *Residual:* draft / non-release tags are not covered by
+and is the **only branch a release-tag commit can reside on**: each release
+environment (`pypi`, `crates-io`) policies "Deployment branches and tags" to
+the tag pattern `v[0-9]*.[0-9]*.[0-9]*`, and `require-ci-green` independently
+verifies the tag SHA has a successful push-event CI run on `main` — a SHA
+that only exists via a PR merge to the protected branch. *Residual:* draft / non-release tags are not covered by
 release immutability, and — as with the registries — these GitHub controls
 ultimately trust the single maintainer account; that residual folds into
 THREAT-SUPPLY-001.

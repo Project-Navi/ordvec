@@ -44,10 +44,18 @@ Trusted Publishing (served from PyPI's Integrity API).
 
 - **Required reviewer** — each environment (`crates-io`, `pypi`) requires
   maintainer (`Fieldnote-Echo`) approval before its publish job runs.
-- **Deployment branches and tags** — each environment is restricted so a
-  release can only deploy from a commit on **`main`**. This makes "only `main`
-  can publish" a configuration invariant rather than a manual check at
-  approval time.
+- **Deployment branches and tags** — each environment's "Deployment branches
+  and tags" policy is set to **Selected branches and tags** with a single
+  **tag pattern**: **`v[0-9]*.[0-9]*.[0-9]*`** (matching the workflow's
+  trigger glob). The release workflow runs on `refs/tags/vX.Y.Z`, NOT
+  `refs/heads/main`, so a **branch-only** allowlist (the old setting under the
+  dispatch model) would deadlock the publish — the environment would refuse
+  every tag-triggered run. The "tag must point at a commit on `main`"
+  guarantee is preserved by **`require-ci-green`**, which only passes if a
+  successful push-event CI run exists for the exact SHA on `main` — a SHA
+  that exists only via a PR merge to the protected branch. Optionally, a
+  **tag ruleset** (Settings → Rules → Rulesets → New tag ruleset) can be added
+  to restrict tag *creation* to refs on `main` as defence in depth.
 
 > These two settings are the supply-chain backstop the workflow code cannot
 > express on its own (THREAT-SUPPLY-001 in [THREAT_MODEL.md](THREAT_MODEL.md)).

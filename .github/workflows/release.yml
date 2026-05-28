@@ -25,14 +25,21 @@
 # Fail-closed: `release-assets` and both publishes `needs:` the attest +
 # provenance jobs, so nothing is attached or published unless provenance signed.
 #
-# ONE-TIME SETUP before the first tag on this workflow (publishes fail closed at
-# the gate until done, so this is safe to land first):
+# ONE-TIME SETUP before the first tag on this workflow (each fails CLOSED until
+# done, so landing this first is safe):
 #   * crates.io: ordvec > Settings > Trusted Publishing > edit the GitHub
 #       publisher -> workflow = `release.yml` (env stays `crates-io`).
 #   * PyPI: ordvec > publishing > edit the GitHub publisher -> workflow =
 #       `release.yml` (env stays `pypi`).
-#   * GitHub: Environments `crates-io` and `pypi` each keep their Required
-#       reviewer (the human publish gate).
+#   * GitHub Environments `crates-io` AND `pypi`:
+#       - keep "Required reviewers" (the human publish gate);
+#       - set "Deployment branches and tags" to **Selected branches and tags**
+#         with a single TAG pattern: `v[0-9]*.[0-9]*.[0-9]*`. The old
+#         workflow_dispatch setting (branch = `main` only) would now deadlock
+#         publishing — this workflow runs on `refs/tags/...`, never on
+#         `refs/heads/main`. The "tag must come from main" guarantee is preserved
+#         by `require-ci-green` (which queries `?branch=main&status=success` for
+#         the SHA), plus branch protection on `main`. See RELEASING.md.
 #
 # Tag glob is deliberately loose (`v[0-9]*...`); the `guard` job enforces strict
 # SemVer (no leading zeros, no pre-release/build suffix). The tag name is only
