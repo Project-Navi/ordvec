@@ -1,0 +1,65 @@
+name: setup-intel-sde
+description: Download and verify the pinned Intel SDE build used by AVX-512 CI.
+
+inputs:
+  version:
+    description: Intel SDE archive basename without the .tar.xz suffix.
+    default: sde-external-10.7.0-2026-02-18-lin
+  url-base:
+    description: Base URL containing the Intel SDE archive.
+    default: https://downloadmirror.intel.com/913594
+  sha256:
+    description: SHA256 of the Intel SDE .tar.xz archive.
+    default: ca3d4086de4acb3faedf9f57b541c6936b7d5e19ae2bf763b6ea933573a0a217
+  install-dir:
+    description: Absolute path, or a path relative to GITHUB_WORKSPACE, for extraction.
+    default: intel-sde
+
+outputs:
+  install-dir:
+    description: Directory containing the extracted Intel SDE files.
+    value: ${{ steps.install.outputs.install-dir }}
+  sde-path:
+    description: Absolute path to the extracted sde64 executable.
+    value: ${{ steps.install.outputs.sde-path }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        arch="$(uname -m)"
+        if [ "${arch}" != "x86_64" ]; then
+          echo "::error::Intel SDE sde64 requires an x86_64 runner; got ${arch}"
+          exit 1
+        fi
+
+        version="${{ inputs.version }}"
+        url_base="${{ inputs.url-base }}"
+        sha256="${{ inputs.sha256 }}"
+        install_dir="${{ inputs.install-dir }}"
+        case "${install_dir}" in
+          /*) ;;
+          *) install_dir="${GITHUB_WORKSPACE}/${install_dir}" ;;
+        esac
+
+        archive="${RUNNER_TEMP}/${version}.tar.xz"
+        curl -fsSL "${url_base}/${version}.tar.xz" -o "${archive}"
+        echo "${sha256}  ${archive}" | sha256sum -c -
+
+        mkdir -p "${install_dir}"
+        tar xf "${archive}" --strip-components=1 -C "${install_dir}"
+        rm "${archive}"
+
+        sde_path="${install_dir}/sde64"
+        if [ ! -x "${sde_path}" ]; then
+          echo "::error::Intel SDE install did not produce an executable sde64 at ${sde_path}"
+          exit 1
+        fi
+        "${sde_path}" --version
+
+        echo "install-dir=${install_dir}" >> "${GITHUB_OUTPUT}"
+        echo "sde-path=${sde_path}" >> "${GITHUB_OUTPUT}"

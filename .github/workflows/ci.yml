@@ -226,16 +226,13 @@ jobs:
   # kernels instead of the scalar/AVX2 fallback.
   #
   # Pattern adapted from microsoft/DiskANN's CI (also a vector-search crate).
-  # SDE pin is a fixed Intel downloadmirror build, SHA256-verified before it is
-  # unpacked or run; bump the version + checksum together when upgrading. If
-  # Intel ever moves the URL or the bytes change, this job fails loudly (the
-  # gate stays honest) rather than silently skipping AVX-512 coverage.
+  # The local setup-intel-sde action owns the fixed Intel downloadmirror build,
+  # SHA256 verification, and x86_64 runner guard. If Intel ever moves the URL
+  # or the bytes change, this job fails loudly (the gate stays honest) rather
+  # than silently skipping AVX-512 coverage.
   avx512:
     name: avx512 (Intel SDE / Sapphire Rapids)
-    runs-on: ubuntu-latest
-    env:
-      SDE_VERSION: sde-external-10.7.0-2026-02-18-lin
-      SDE_URL_BASE: https://downloadmirror.intel.com/913594
+    runs-on: ubuntu-24.04
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -248,18 +245,8 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: install Intel SDE
-        env:
-          # SHA256 of ${SDE_VERSION}.tar.xz — verified before the archive is
-          # unpacked and executed. Bump together with SDE_VERSION.
-          SDE_SHA256: ca3d4086de4acb3faedf9f57b541c6936b7d5e19ae2bf763b6ea933573a0a217
-        run: |
-          set -euo pipefail
-          wget -qO intel-sde.tar.xz "${SDE_URL_BASE}/${SDE_VERSION}.tar.xz"
-          echo "${SDE_SHA256}  intel-sde.tar.xz" | sha256sum -c -
-          mkdir -p "${GITHUB_WORKSPACE}/intel-sde"
-          tar xf intel-sde.tar.xz --strip-components=1 -C "${GITHUB_WORKSPACE}/intel-sde"
-          rm intel-sde.tar.xz
-          "${GITHUB_WORKSPACE}/intel-sde/sde64" --version
+        id: sde
+        uses: ./.github/actions/setup-intel-sde
       - name: sanity-check AVX-512 detection under SDE
         run: |
           set -euo pipefail
@@ -289,11 +276,11 @@ jobs:
           }
           EOF
           cargo build --release --manifest-path "${RUNNER_TEMP}/sde-probe/Cargo.toml"
-          "${GITHUB_WORKSPACE}/intel-sde/sde64" -spr -- \
+          "${{ steps.sde.outputs.sde-path }}" -spr -- \
             "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
       - name: cargo test under SDE (AVX-512 kernels)
         env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/intel-sde/sde64 -spr --
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ steps.sde.outputs.sde-path }} -spr --
         run: |
           set -euo pipefail
           cargo test
