@@ -589,15 +589,17 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
-      - name: Collect the wheels + sdist
+      - name: Collect the wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          pattern: wheels-*
           path: dist
           merge-multiple: true
-      # PyPI accepts ONLY wheels + sdists; drop everything else (SBOMs, the
-      # Sigstore bundle, the SLSA provenance) so the upload doesn't choke.
-      - name: Keep only wheels + sdist in the upload dir
-        run: find dist -type f ! -name '*.whl' ! -name '*.tar.gz' -delete
+      - name: Collect the sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdist
+          path: dist
       - name: Publish to PyPI (Trusted Publishing; PEP 740 attestations on by default)
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
