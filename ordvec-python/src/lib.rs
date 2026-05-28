@@ -1237,16 +1237,8 @@ impl SignBitmap {
         batch.checked_mul(n.max(qpv)).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("batch * index size overflows usize")
         })?;
-        let result = py.detach(|| self.inner.score_all_batched(slice));
-        let total = batch.checked_mul(n).ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("result size (batch * n) overflows usize")
-        })?;
-        let mut flat: Vec<u32> = Vec::with_capacity(total);
-        for row in &result {
-            debug_assert_eq!(row.len(), n);
-            flat.extend_from_slice(row);
-        }
-        Ok(numpy::ndarray::Array2::from_shape_vec((batch, n), flat)
+        let scores = py.detach(|| self.inner.score_all_batched_flat(slice));
+        Ok(numpy::ndarray::Array2::from_shape_vec((batch, n), scores)
             .expect("internal: batched dense score flatten shape invariant")
             .into_pyarray(py))
     }
