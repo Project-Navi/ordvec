@@ -248,6 +248,8 @@ jobs:
         id: sde
         uses: ./.github/actions/setup-intel-sde
       - name: sanity-check AVX-512 detection under SDE
+        env:
+          SDE_PATH: ${{ steps.sde.outputs.sde-path }}
         run: |
           set -euo pipefail
           # Prove SDE genuinely exposes AVX-512 to the guest via the SAME
@@ -276,7 +278,7 @@ jobs:
           }
           EOF
           cargo build --release --manifest-path "${RUNNER_TEMP}/sde-probe/Cargo.toml"
-          "${{ steps.sde.outputs.sde-path }}" -spr -- \
+          "${SDE_PATH}" -spr -- \
             "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
       - name: cargo test under SDE (AVX-512 kernels)
         env:

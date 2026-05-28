@@ -42,6 +42,8 @@ jobs:
         id: sde
         uses: ./.github/actions/setup-intel-sde
       - name: Sanity-check AVX-512 detection under SDE
+        env:
+          SDE_PATH: ${{ steps.sde.outputs.sde-path }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/sde-probe/src"
@@ -64,7 +66,7 @@ jobs:
           }
           EOF
           cargo build --release --manifest-path "${RUNNER_TEMP}/sde-probe/Cargo.toml"
-          "${{ steps.sde.outputs.sde-path }}" -spr -- \
+          "${SDE_PATH}" -spr -- \
             "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
       # Generate the lcov report AND enforce a regression floor in a single
       # --all-features invocation, so the floor is computed on exactly the data
