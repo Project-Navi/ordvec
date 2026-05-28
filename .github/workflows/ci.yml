@@ -163,12 +163,17 @@ jobs:
         run: cargo publish -p ordvec --dry-run --locked
 
   # ----------------------------------------------------------------------
-  # Pin the release-publish SBOM invariants. release.yml is tag-triggered (with
-  # the two registry publishes gated behind GitHub Environments), so its
-  # "generate SBOM then publish" flow runs only on a real release — a generated
-  # *.cdx.json once broke both publish paths and would only have surfaced at
-  # release time. This exercises the invariants every push/PR (see
-  # tests/release_publish_invariants.sh).
+  # Pin the release-publish invariants. release.yml is tag-triggered (with the
+  # two registry publishes gated behind GitHub Environments), so its release-
+  # specific flow runs only on a real release. Two structural lints guard it
+  # on every push/PR so regressions can't sneak in between releases:
+  #   * release_publish_invariants.sh — the *.cdx.json SBOM never reaches PyPI
+  #     (a generated SBOM once broke both publish paths).
+  #   * release_signed_release_invariants.sh — the signed-release / provenance
+  #     graph stays intact: release-assets-draft stays draft, the SLSA
+  #     generator emits a .intoto.jsonl, both publishes need the draft assets,
+  #     publish-crate proves byte-identity vs the attested .crate, and
+  #     publish-github-release un-drafts ONLY after both publishes succeed.
   # ----------------------------------------------------------------------
   release-guard:
     name: release-publish invariants
@@ -187,6 +192,8 @@ jobs:
           persist-credentials: false
       - name: release-publish SBOM invariants
         run: bash tests/release_publish_invariants.sh
+      - name: signed-release / provenance invariants
+        run: bash tests/release_signed_release_invariants.sh
 
   # ----------------------------------------------------------------------
   # Supply-chain policy gate. The `deps` job's cargo-tree grep is a coarse

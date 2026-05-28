@@ -2,9 +2,23 @@
 #
 # Cutting a stable `vMAJOR.MINOR.PATCH` tag fully automates: build (crate +
 # wheels + sdist) -> attest (GitHub artifact attestations) -> SLSA Build-L3
-# provenance -> attach EVERYTHING to a GitHub Release -> un-draft. The two
-# registry publishes (crates.io, PyPI) are the ONLY manual gates: each is bound
-# to a GitHub Environment with Required Reviewers, so it pauses for a human.
+# provenance -> stage EVERYTHING on the DRAFT GitHub Release (`release-assets-
+# draft`) -> gated registry publishes -> un-draft ONLY after BOTH publishes
+# succeed (`publish-github-release`). The two registry publishes (crates.io,
+# PyPI) are the manual gates: each is bound to a GitHub Environment with
+# Required Reviewers, so it pauses for a human.
+#
+# The un-draft-after-publish ordering is deliberate: it prevents a public
+# GitHub Release from existing for a version that crates.io / PyPI later
+# refused. If a publish fails, the Release stays DRAFT and the maintainer
+# investigates / re-runs the failed job, after which `publish-github-release`
+# un-drafts.
+#
+# `publish-crate` additionally proves BYTE-IDENTITY between the .crate
+# `cargo publish` uploads and the SLSA-attested artifact: it downloads the
+# `dist-crate` artifact, re-packages with `--locked`, and sha256-compares
+# before minting the crates.io OIDC token. If the bytes drift (toolchain
+# change, deterministic-packaging regression), the publish fails closed.
 #
 # Why one workflow (not the old three): the GitHub Release assets + the single
 # un-draft must be coordinated by explicit `needs:` edges. The previous
@@ -22,8 +36,12 @@
 #   * gh-action-pypi-publish -> PEP 740 attestations on PyPI (Integrity API).
 #   * crates.io / PyPI publish via Trusted Publishing (OIDC) — NO stored tokens.
 #
-# Fail-closed: `release-assets` and both publishes `needs:` the attest +
-# provenance jobs, so nothing is attached or published unless provenance signed.
+# Fail-closed: `release-assets-draft` and both publishes `needs:` attest +
+# provenance, so nothing is attached or published unless provenance signed; and
+# `publish-github-release` `needs:` both publishes, so the Release stays DRAFT
+# unless both registry pushes succeed. The signed-release graph is pinned in
+# `tests/release_signed_release_invariants.sh` (run by ci.yml's release-guard
+# on every push/PR) so a future commit can't silently dismantle it.
 #
 # ONE-TIME SETUP before the first tag on this workflow (each fails CLOSED until
 # done, so landing this first is safe):
@@ -407,13 +425,13 @@ jobs:
       upload-assets: false
       provenance-name: ordvec-${{ needs.guard.outputs.version }}.intoto.jsonl
 
-  release-assets:
-    name: attach all assets to the Release + un-draft
+  release-assets-draft:
+    name: stage all assets on the DRAFT Release (does NOT un-draft)
     needs: [guard, notes, attest, provenance, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload assets + un-draft the Release
+      contents: write # upload assets to the draft Release
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -424,10 +442,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Attach distributables, signature and provenance to the Release
+      - name: Attach distributables, signature and provenance to the draft Release
         # SOLE Release-asset writer. SBOMs stay build artifacts (registries don't
         # host them); the GitHub-native bundle (.sigstore.json) and the SLSA
         # provenance (.intoto.jsonl) ship with the artifacts they attest.
+        # The Release is left DRAFT — un-drafting happens in
+        # `publish-github-release` only after BOTH registry publishes succeed,
+        # so a partial publish never leaves a "public Release with no
+        # registry artifact" half-state.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
@@ -440,15 +462,10 @@ jobs:
             dist/*.sigstore.json \
             dist/*.intoto.jsonl \
             --clobber
-      - name: Publish the GitHub Release (un-draft)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: gh release edit "$TAG_NAME" --draft=false
 
   publish-crate:
     name: publish to crates.io
-    needs: [guard, release-assets]
+    needs: [guard, release-assets-draft]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     environment: crates-io # MANUAL GATE — Required reviewer
@@ -466,6 +483,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
         with:
           toolchain: stable
+      # BYTE-IDENTITY GATE. The .crate cargo publish uploads MUST equal the
+      # .crate the SLSA / attest jobs covered, otherwise the published artifact
+      # isn't the attested one (toolchain drift, non-deterministic packaging,
+      # etc. could quietly diverge). Re-package here with `--locked` and
+      # sha256-compare against the attested artifact produced by `build-crate`.
+      # If they differ, this job fails closed BEFORE the OIDC token is minted
+      # and BEFORE `cargo publish` runs — nothing reaches crates.io.
+      - name: Download the attested .crate (from build-crate)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist-crate
+          path: attested
+      - name: Re-package the crate (must be byte-identical to the attested .crate)
+        run: cargo package -p ordvec --locked
+      - name: Verify byte-identity vs the attested .crate
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          ATTESTED="attested/ordvec-${VERSION}.crate"
+          PACKAGED="target/package/ordvec-${VERSION}.crate"
+          [ -f "$ATTESTED" ] || { echo "::error::attested .crate not found at $ATTESTED"; exit 1; }
+          [ -f "$PACKAGED" ] || { echo "::error::packaged .crate not found at $PACKAGED"; exit 1; }
+          A_SHA=$(sha256sum "$ATTESTED" | cut -d' ' -f1)
+          P_SHA=$(sha256sum "$PACKAGED" | cut -d' ' -f1)
+          echo "attested sha256: $A_SHA"
+          echo "packaged sha256: $P_SHA"
+          if [ "$A_SHA" != "$P_SHA" ]; then
+            echo "::error::byte-identity check failed — the .crate this publish job would upload differs from the SLSA-attested artifact. Refusing to publish."
+            exit 1
+          fi
+          echo "OK: byte-identity verified ($A_SHA)"
       # Mint the short-lived crates.io credential immediately before publish so
       # the ephemeral token's exposure window is minimal. No stored secret.
       - name: Mint a short-lived crates.io credential (OIDC)
@@ -478,7 +527,7 @@ jobs:
 
   publish-pypi:
     name: publish to PyPI
-    needs: [guard, release-assets]
+    needs: [guard, release-assets-draft]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     environment:
@@ -505,3 +554,27 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist
+
+  publish-github-release:
+    name: un-draft the GitHub Release (only after BOTH registry publishes succeed)
+    needs: [guard, publish-crate, publish-pypi]
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # un-draft the Release
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      # Un-drafting ONLY here, after both registry publishes have succeeded,
+      # is what prevents a public GitHub Release from existing for a version
+      # that crates.io / PyPI later refused. If either publish job fails or is
+      # skipped, this job is also skipped and the Release stays DRAFT — the
+      # maintainer investigates / re-runs the failed publish, after which a
+      # re-run of this job un-drafts.
+      - name: Publish the GitHub Release (un-draft)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: gh release edit "$TAG_NAME" --draft=false

@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+#
+# Signed-release / provenance invariants — pinned in CI.
+#
+# release.yml's signed-release graph is what gets us OpenSSF Scorecard
+# Signed-Releases = 10 and keeps the build-attest-publish chain honest:
+#
+#     build-{crate,wheels,sdist}                  (artifacts)
+#         |
+#         +-> attest         (id-token + attestations + .sigstore.json)
+#         +-> provenance     (slsa-github-generator @vX.Y.Z, .intoto.jsonl)
+#         |
+#         v
+#     release-assets-draft   (uploads .crate/.whl/.tar.gz/.sigstore.json/.intoto.jsonl to DRAFT release)
+#         |
+#         +--> publish-crate (byte-identity check vs attested .crate, then cargo publish)
+#         +--> publish-pypi  (Trusted Publishing)
+#               |
+#               v
+#         publish-github-release (un-draft, ONLY after both publishes succeed)
+#
+# A regression in any of these edges (a future commit drops a needs:, renames
+# the provenance file, lets release-assets-draft un-draft itself, forgets the
+# byte-identity check, or moves the un-draft before the publishes) silently
+# re-creates the v0.2.0 failure mode or weakens the chain. This script pins
+# the graph so the regression fails on every push/PR, not at the next real
+# release.
+#
+# It is intentionally a structural lint on release.yml (greps the YAML), not a
+# runtime exercise of the pipeline — that's the fork dry-run's job.
+set -euo pipefail
+fail() { echo "::error::signed-release invariant violated: $*"; exit 1; }
+
+wf=".github/workflows/release.yml"
+[ -f "$wf" ] || fail "$wf: workflow file not found"
+
+# Extract the body of a job (from `  <name>:` to the next 2-space-indented job key).
+job_body() {
+  local jobname="$1" start end
+  start="$(grep -nE "^  ${jobname}:[[:space:]]*$" "$wf" | head -1 | cut -d: -f1)"
+  [ -n "$start" ] || fail "$wf: no '${jobname}:' job found"
+  end="$(awk -v s="$start" 'NR>s && /^  [A-Za-z0-9_-]+:/ {print NR-1; exit}' "$wf")"
+  [ -n "$end" ] || end="$(awk 'END{print NR}' "$wf")"
+  sed -n "${start},${end}p" "$wf"
+}
+
+# Accept both `needs: [a, b, c]` (inline) and `needs:\n  - a\n  - b` (block) forms.
+job_needs() {
+  local jobname="$1" needed="$2"
+  job_body "$jobname" | grep -qE "(^[[:space:]]+needs:.*\\b${needed}\\b|^[[:space:]]+-[[:space:]]+${needed}[[:space:]]*$)"
+}
+
+# ----------------------------------------------------------------------
+# (1) release-assets-draft needs attest + provenance + require-ci-green + notes
+# ----------------------------------------------------------------------
+for dep in attest provenance require-ci-green notes; do
+  job_needs release-assets-draft "$dep" \
+    || fail "release-assets-draft must \`needs: $dep\` (fail-closed on missing provenance/CI)"
+done
+
+# ----------------------------------------------------------------------
+# (2) release-assets-draft uploads every required asset class to the Release
+# ----------------------------------------------------------------------
+body_draft="$(job_body release-assets-draft)"
+for ext in '\.crate' '\.whl' '\.tar\.gz' '\.sigstore\.json' '\.intoto\.jsonl'; do
+  printf '%s\n' "$body_draft" | grep -qE "dist/\*${ext}([^a-zA-Z]|$)" \
+    || fail "release-assets-draft must \`gh release upload\` dist/*$(printf '%s' "$ext" | sed 's/\\//g')"
+done
+
+# ----------------------------------------------------------------------
+# (3) release-assets-draft must NOT un-draft (the dedicated un-draft job owns
+#     that; un-drafting here would re-introduce the public-release-before-
+#     publish failure mode).
+# ----------------------------------------------------------------------
+if printf '%s\n' "$body_draft" | grep -qE 'gh release edit.*--draft=false'; then
+  fail "release-assets-draft must NOT un-draft the Release (un-drafting belongs in publish-github-release, after both publishes succeed)"
+fi
+
+# ----------------------------------------------------------------------
+# (4) provenance uses slsa-github-generator pinned to a SEMANTIC VERSION TAG
+#     (NOT a SHA — SLSA trust model requires the tag for its self-verification)
+# ----------------------------------------------------------------------
+prov="$(job_body provenance)"
+printf '%s\n' "$prov" | grep -qE 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
+  || fail "provenance must \`uses: slsa-framework/slsa-github-generator/.../generator_generic_slsa3.yml@vX.Y.Z\` (tag-pinned per SLSA trust model)"
+
+# ----------------------------------------------------------------------
+# (5) provenance must have `upload-assets: false` — release-assets-draft is
+#     the sole Release-asset writer; two concurrent writers would race.
+# ----------------------------------------------------------------------
+printf '%s\n' "$prov" | grep -qE '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
+  || fail "provenance must set \`upload-assets: false\` (single Release-asset writer is release-assets-draft; the .intoto.jsonl flows through the workflow-artifact path)"
+
+# ----------------------------------------------------------------------
+# (6) provenance-name MUST end in `.intoto.jsonl` — Scorecard's provenance
+#     probe is a pure filename-suffix match.
+# ----------------------------------------------------------------------
+printf '%s\n' "$prov" | grep -qE '^[[:space:]]+provenance-name:.*\.intoto\.jsonl[[:space:]]*$' \
+  || fail "provenance must set \`provenance-name: <name>.intoto.jsonl\` (Scorecard Signed-Releases provenance probe matches this suffix only)"
+
+# ----------------------------------------------------------------------
+# (7) attest job grants id-token: write + attestations: write
+# ----------------------------------------------------------------------
+att="$(job_body attest)"
+printf '%s\n' "$att" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+  || fail "attest job must grant \`id-token: write\` (Sigstore OIDC signing cert)"
+printf '%s\n' "$att" | grep -qE '^[[:space:]]+attestations:[[:space:]]*write' \
+  || fail "attest job must grant \`attestations: write\` (persist to the GitHub attestation store)"
+
+# ----------------------------------------------------------------------
+# (8) Both publish jobs grant id-token: write AND need release-assets-draft.
+# ----------------------------------------------------------------------
+for pub in publish-crate publish-pypi; do
+  body="$(job_body "$pub")"
+  printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+    || fail "$pub must grant \`id-token: write\` (Trusted Publishing OIDC)"
+  job_needs "$pub" release-assets-draft \
+    || fail "$pub must \`needs: release-assets-draft\` (gated by attest + provenance via the draft-assets edge)"
+done
+
+# ----------------------------------------------------------------------
+# (9) publish-crate enforces byte-identity vs the attested .crate. The
+#     uploaded crate must match the SLSA-attested artifact, otherwise the
+#     published version isn't the one the provenance covers.
+# ----------------------------------------------------------------------
+pcb="$(job_body publish-crate)"
+printf '%s\n' "$pcb" | grep -qE 'uses:[[:space:]]*actions/download-artifact' \
+  || fail "publish-crate must download the attested dist-crate artifact (byte-identity gate)"
+printf '%s\n' "$pcb" | grep -qE 'name:[[:space:]]*dist-crate' \
+  || fail "publish-crate must download the artifact named \`dist-crate\` (the attested .crate)"
+printf '%s\n' "$pcb" | grep -qE 'cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+ordvec[[:space:]]+--locked' \
+  || fail "publish-crate must re-run \`cargo package -p ordvec --locked\` so it can sha256-compare to the attested .crate"
+printf '%s\n' "$pcb" | grep -qE 'sha256sum' \
+  || fail "publish-crate must sha256sum-compare the repackaged .crate vs the attested .crate before publishing"
+
+# ----------------------------------------------------------------------
+# (10) publish-github-release un-drafts ONLY AFTER both registry publishes succeed.
+# ----------------------------------------------------------------------
+for dep in publish-crate publish-pypi; do
+  job_needs publish-github-release "$dep" \
+    || fail "publish-github-release must \`needs: $dep\` (un-draft only after BOTH registry publishes succeed)"
+done
+unp="$(job_body publish-github-release)"
+printf '%s\n' "$unp" | grep -qE 'gh release edit.*--draft=false' \
+  || fail "publish-github-release must \`gh release edit <tag> --draft=false\` (this is the sole un-draft point)"
+
+echo "OK: signed-release invariants hold."

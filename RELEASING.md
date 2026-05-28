@@ -29,10 +29,19 @@ The unified `release.yml`:
   and a **SLSA-generator `*.intoto.jsonl`** attached to the GitHub Release
   **before** the gated publishes — a failed attestation fails the release
   closed, so nothing ships without provenance recorded;
-- attaches the **`.crate`, wheels, sdist, `*.sigstore.json` bundle, and
-  `*.intoto.jsonl` provenance** to the GitHub Release and un-drafts it in a
-  single coordinated job (no manual asset attach — that's what v0.2.0's manual
-  step missed);
+- stages the **`.crate`, wheels, sdist, `*.sigstore.json` bundle, and
+  `*.intoto.jsonl` provenance** on the GitHub Release while it is still **a
+  DRAFT** (`release-assets-draft` is the sole Release-asset writer — no manual
+  attach, which is what v0.2.0's manual step missed);
+- enforces **byte-identity** in `publish-crate`: it downloads the SLSA-attested
+  `.crate` artifact, re-packages with `--locked`, and `sha256`-compares before
+  minting the crates.io OIDC token. If they differ (toolchain drift,
+  non-deterministic packaging), the publish fails closed **before** the token
+  is minted — nothing reaches crates.io;
+- **un-drafts the GitHub Release ONLY after BOTH `publish-crate` AND
+  `publish-pypi` succeed** (`publish-github-release` is the sole un-draft
+  point). If either publish fails or is skipped, the Release stays DRAFT — no
+  public Release ever exists for a version the registries refused;
 - pins every third-party action by **commit SHA** (the one mandated exception
   is the SLSA reusable workflow, tag-pinned per SLSA's trust model), sets
   `persist-credentials: false`, and defaults to `permissions: contents: read`.
@@ -118,12 +127,19 @@ filename. Until either is updated, the corresponding gated publish fails
 
    `release.yml` triggers automatically. It builds the `.crate`, wheels, and
    sdist; attests them (GitHub attestation store + `*.sigstore.json`);
-   generates the SLSA `*.intoto.jsonl`; attaches every artifact, the
-   attestation bundle, and the provenance to the GitHub Release; and un-drafts
-   the release — all without intervention.
+   generates the SLSA `*.intoto.jsonl`; and stages every artifact, the
+   attestation bundle, and the provenance on the GitHub Release — **as a
+   DRAFT**. It then pauses at the two registry environment gates.
 6. **Approve the two publish environments** when they pause in the Actions UI
    (one for `crates-io`, one for `pypi`). The required-reviewer approval is
    what authorises the registry push.
+   - `publish-crate` first sha256-compares its repackaged `.crate` to the
+     SLSA-attested artifact — if they diverge (toolchain drift, etc.) the job
+     fails closed BEFORE the OIDC token is minted, so nothing reaches
+     crates.io. Re-run / investigate.
+   - Once **both** publishes succeed, `publish-github-release` un-drafts the
+     GitHub Release automatically. If one publish fails, the Release stays
+     DRAFT — re-run the failed job, the un-draft then completes.
 7. Verify each published artifact and its provenance:
    - crates.io / docs.rs;
    - PyPI (`pip download ordvec==X.Y.Z` and inspect, plus check the PEP 740
