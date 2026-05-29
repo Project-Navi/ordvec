@@ -47,7 +47,9 @@ job_body() {
 # Accept both `needs: [a, b, c]` (inline) and `needs:\n  - a\n  - b` (block) forms.
 job_needs() {
   local jobname="$1" needed="$2"
-  job_body "$jobname" | grep -qE "(^[[:space:]]+needs:.*\\b${needed}\\b|^[[:space:]]+-[[:space:]]+${needed}[[:space:]]*$)"
+  local body
+  body="$(job_body "$jobname")"
+  printf '%s\n' "$body" | grep -qE "(^[[:space:]]+needs:.*\\b${needed}\\b|^[[:space:]]+-[[:space:]]+${needed}[[:space:]]*$)"
 }
 
 # ----------------------------------------------------------------------
