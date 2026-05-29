@@ -95,6 +95,43 @@ jobs:
         run: cargo clippy -p ordvec-ffi --all-targets -- -D warnings
 
   # ----------------------------------------------------------------------
+  # Repo-local Go wrapper over the C ABI. Build the release static library
+  # first because the cgo wrapper links the source-tree archive directly.
+  # ----------------------------------------------------------------------
+  go-wrapper:
+    name: go wrapper (cgo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: cargo build -p ordvec-ffi --release
+        run: cargo build -p ordvec-ffi --release
+      - name: go test
+        working-directory: ordvec-go
+        env:
+          GOCACHE: ${{ runner.temp }}/go-build
+        run: go test -count=1 ./...
+      - name: go test -race
+        working-directory: ordvec-go
+        env:
+          GOCACHE: ${{ runner.temp }}/go-build
+        run: go test -race -count=1 ./...
+      - name: go test (cgocheck2)
+        working-directory: ordvec-go
+        env:
+          GOEXPERIMENT: cgocheck2
+          GOCACHE: ${{ runner.temp }}/go-build-cgocheck2
+        run: go test -count=1 ./...
+
+  # ----------------------------------------------------------------------
   # Test matrix across the three GitHub-hosted OSes. Covers the default
   # surface, the experimental feature, the no-default-features build, and a
   # release build of the bench example (the heaviest compile path).
