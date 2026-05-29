@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v1";
+pub const CALIBRATION_SCHEMA_VERSION: &str = "ordvec.calibration.v1";
 
 #[derive(Debug)]
 pub enum ManifestError {
@@ -162,6 +163,7 @@ pub fn verify_manifest(document: &ManifestDocument, options: VerifyOptions) -> V
     }
 
     verify_row_identity(document, &options, &mut report);
+    verify_calibration(document, &options, &mut report);
     verify_attestations(&document.manifest, &mut report);
 
     report.ok = report.errors.is_empty();
@@ -527,6 +529,490 @@ fn verify_row_identity(
     }
 }
 
+fn verify_calibration(
+    document: &ManifestDocument,
+    options: &VerifyOptions,
+    report: &mut VerificationReport,
+) {
+    let Some(calibration) = &document.manifest.calibration else {
+        return;
+    };
+
+    report.calibration.present = true;
+    report.calibration.schema_version = Some(calibration.schema_version.clone());
+    report.calibration.profile_id = Some(calibration.profile_id.clone());
+    report.calibration.calibrated_for_model = Some(calibration.calibrated_for.model.clone());
+    report.calibration.ordinalization = Some(calibration.ordinalization.label().to_string());
+    report.calibration.null_model = Some(calibration.null_model.label().to_string());
+
+    validate_calibration_shape(calibration, report);
+    validate_calibration_encoder(calibration, &document.manifest.embedding, report);
+    validate_calibration_ordinalization(calibration, &document.manifest.artifact, report);
+    validate_calibration_profile(
+        calibration,
+        &document.manifest.artifact,
+        &document.base_dir,
+        options,
+        report,
+    );
+}
+
+fn validate_calibration_shape(
+    calibration: &CalibrationProfileRef,
+    report: &mut VerificationReport,
+) {
+    if calibration.schema_version != CALIBRATION_SCHEMA_VERSION {
+        report.error(
+            "calibration_schema_version_unsupported",
+            format!(
+                "calibration.schema_version must be {CALIBRATION_SCHEMA_VERSION}, got {}",
+                calibration.schema_version
+            ),
+        );
+    }
+    if calibration.profile_id.trim().is_empty() {
+        report.error(
+            "calibration_profile_id_empty",
+            "calibration.profile_id must be non-empty",
+        );
+    }
+    if calibration
+        .created_at
+        .as_ref()
+        .is_some_and(|created_at| DateTime::parse_from_rfc3339(created_at).is_err())
+    {
+        report.error(
+            "calibration_created_at_invalid",
+            "calibration.created_at must parse as RFC3339 when present",
+        );
+    }
+    if calibration.calibrated_for.model.trim().is_empty() {
+        report.error(
+            "calibration_encoder_model_empty",
+            "calibration.calibrated_for.model must be non-empty",
+        );
+    }
+    if calibration.calibrated_for.dim == 0 {
+        report.error(
+            "calibration_encoder_dim_zero",
+            "calibration.calibrated_for.dim must be greater than zero",
+        );
+    }
+    validate_optional_non_empty(
+        "calibration_encoder_model_revision_empty",
+        "calibration.calibrated_for.model_revision must be non-empty when present",
+        calibration.calibrated_for.model_revision.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "calibration_encoder_normalization_empty",
+        "calibration.calibrated_for.normalization must be non-empty when present",
+        calibration.calibrated_for.normalization.as_deref(),
+        report,
+    );
+    if calibration.ordinalization.dim() == 0 {
+        report.error(
+            "calibration_ordinalization_dim_zero",
+            "calibration.ordinalization.dim must be greater than zero",
+        );
+    }
+    match &calibration.ordinalization {
+        CalibrationOrdinalization::TopK { k, .. } if *k == 0 => {
+            report.error(
+                "calibration_ordinalization_artifact_mismatch",
+                "calibration top_k.k must be greater than zero",
+            );
+        }
+        CalibrationOrdinalization::Bucket { bits, .. } if !matches!(*bits, 1 | 2 | 4) => {
+            report.error(
+                "calibration_ordinalization_artifact_mismatch",
+                "calibration bucket.bits must be 1, 2, or 4",
+            );
+        }
+        CalibrationOrdinalization::CallerDefined { name, .. } if name.trim().is_empty() => {
+            report.error(
+                "calibration_ordinalization_artifact_mismatch",
+                "calibration caller_defined.name must be non-empty",
+            );
+        }
+        _ => {}
+    }
+    match &calibration.null_model {
+        NullModelSpec::EmpiricalTailTable { statistic } if statistic.trim().is_empty() => {
+            report.error(
+                "calibration_null_statistic_empty",
+                "calibration.null_model.statistic must be non-empty",
+            );
+        }
+        NullModelSpec::CallerDefined {
+            name,
+            parameterization,
+        } => {
+            if name.trim().is_empty() {
+                report.error(
+                    "calibration_null_name_empty",
+                    "calibration.null_model.name must be non-empty",
+                );
+            }
+            validate_optional_non_empty(
+                "calibration_null_parameterization_empty",
+                "calibration.null_model.parameterization must be non-empty when present",
+                parameterization.as_deref(),
+                report,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn validate_calibration_encoder(
+    calibration: &CalibrationProfileRef,
+    embedding: &Embedding,
+    report: &mut VerificationReport,
+) {
+    if calibration.calibrated_for.model != embedding.model {
+        report.error(
+            "calibration_encoder_model_mismatch",
+            format!(
+                "calibration model {:?} does not match embedding.model {:?}",
+                calibration.calibrated_for.model, embedding.model
+            ),
+        );
+    }
+    if calibration.calibrated_for.dim != embedding.dim {
+        report.error(
+            "calibration_encoder_dim_mismatch",
+            format!(
+                "calibration dim {} does not match embedding.dim {}",
+                calibration.calibrated_for.dim, embedding.dim
+            ),
+        );
+    }
+    compare_optional_identity(
+        "calibration_encoder_model_revision_mismatch",
+        "model_revision",
+        embedding.model_revision.as_deref(),
+        calibration.calibrated_for.model_revision.as_deref(),
+        report,
+    );
+    compare_optional_identity(
+        "calibration_encoder_normalization_mismatch",
+        "normalization",
+        embedding.normalization.as_deref(),
+        calibration.calibrated_for.normalization.as_deref(),
+        report,
+    );
+}
+
+fn compare_optional_identity(
+    code: &str,
+    field: &str,
+    embedding_value: Option<&str>,
+    calibration_value: Option<&str>,
+    report: &mut VerificationReport,
+) {
+    match (embedding_value, calibration_value) {
+        (Some(expected), Some(observed)) if expected == observed => {}
+        (None, None) => {}
+        _ => report.error(
+            code,
+            format!("calibration encoder {field} does not match embedding.{field}"),
+        ),
+    }
+}
+
+fn validate_calibration_ordinalization(
+    calibration: &CalibrationProfileRef,
+    artifact: &Artifact,
+    report: &mut VerificationReport,
+) {
+    if calibration.ordinalization.dim() != artifact.dim {
+        report.error(
+            "calibration_ordinalization_dim_mismatch",
+            format!(
+                "calibration ordinalization dim {} does not match artifact.dim {}",
+                calibration.ordinalization.dim(),
+                artifact.dim
+            ),
+        );
+    }
+
+    let compatible = match (artifact.kind, &artifact.params, &calibration.ordinalization) {
+        (
+            ManifestIndexKind::Bitmap,
+            ManifestIndexParams::Bitmap { n_top },
+            CalibrationOrdinalization::TopK { k, .. },
+        ) => k == n_top,
+        (
+            ManifestIndexKind::RankQuant,
+            ManifestIndexParams::RankQuant { bits },
+            CalibrationOrdinalization::Bucket {
+                bits: calibrated_bits,
+                ..
+            },
+        ) => calibrated_bits == bits,
+        (
+            ManifestIndexKind::SignBitmap,
+            ManifestIndexParams::SignBitmap,
+            CalibrationOrdinalization::Sign { .. },
+        ) => true,
+        (
+            ManifestIndexKind::Rank,
+            ManifestIndexParams::Rank,
+            CalibrationOrdinalization::RankPosition { .. }
+            | CalibrationOrdinalization::CallerDefined { .. },
+        ) => true,
+        _ => false,
+    };
+
+    if !compatible {
+        report.error(
+            "calibration_ordinalization_artifact_mismatch",
+            "calibration.ordinalization is incompatible with artifact.kind/artifact.params",
+        );
+    }
+}
+
+fn validate_calibration_profile(
+    calibration: &CalibrationProfileRef,
+    artifact: &Artifact,
+    base_dir: &Path,
+    options: &VerifyOptions,
+    report: &mut VerificationReport,
+) {
+    if matches!(
+        &calibration.null_model,
+        NullModelSpec::UniformHypergeometric
+    ) {
+        if calibration.profile.is_some() {
+            report.error(
+                "calibration_profile_unexpected",
+                "uniform_hypergeometric calibration must not include a profile artifact",
+            );
+        }
+        return;
+    }
+
+    let Some(profile) = &calibration.profile else {
+        report.error(
+            "calibration_profile_required",
+            "non-uniform calibration requires a profile artifact",
+        );
+        return;
+    };
+
+    report.calibration.profile_manifest_path = Some(profile.path.clone());
+    if profile.path.trim().is_empty() {
+        report.error(
+            "calibration_profile_path_empty",
+            "calibration.profile.path must be non-empty",
+        );
+    }
+    if !is_sha256_hex(&profile.sha256) {
+        report.error(
+            "calibration_profile_sha256_invalid",
+            "calibration.profile.sha256 must be a lowercase 64-character hex SHA-256 digest",
+        );
+    }
+    if profile.file_size_bytes == 0 {
+        report.error(
+            "calibration_profile_file_size_zero",
+            "calibration.profile.file_size_bytes must be greater than zero",
+        );
+    }
+    if profile.dim != artifact.dim {
+        report.error(
+            "calibration_profile_dim_mismatch",
+            format!(
+                "calibration profile dim {} does not match artifact.dim {}",
+                profile.dim, artifact.dim
+            ),
+        );
+    }
+    if profile.sample_count == 0 {
+        report.error(
+            "calibration_profile_sample_count_zero",
+            "calibration.profile.sample_count must be greater than zero",
+        );
+    }
+    validate_optional_source_digest(profile.source_digest.as_deref(), report);
+    validate_calibration_parameterization(calibration, profile, report);
+    validate_calibration_profile_shape(profile, &calibration.ordinalization, report);
+
+    if !profile.path.trim().is_empty() {
+        let path = PathBuf::from(&profile.path);
+        if let Some(resolved) = resolve_existing_path(
+            &path,
+            base_dir,
+            options,
+            "calibration_profile",
+            &mut report.errors,
+        ) {
+            report.calibration.profile_canonical_path =
+                Some(path_to_display(&resolved.canonical_path));
+            match sha256_file(&resolved.resolved_path) {
+                Ok(hash) => {
+                    report.calibration.profile_sha256 = Some(hash.sha256.clone());
+                    report.calibration.profile_size_bytes = Some(hash.size_bytes);
+                    if !hex_digest_eq(&hash.sha256, &profile.sha256) {
+                        report.error(
+                            "calibration_profile_sha256_mismatch",
+                            format!(
+                                "calibration profile SHA-256 was {}, manifest declares {}",
+                                hash.sha256, profile.sha256
+                            ),
+                        );
+                    }
+                    if hash.size_bytes != profile.file_size_bytes {
+                        report.error(
+                            "calibration_profile_file_size_mismatch",
+                            format!(
+                                "calibration profile size was {}, manifest declares {}",
+                                hash.size_bytes, profile.file_size_bytes
+                            ),
+                        );
+                    }
+                }
+                Err(err) => report.error(
+                    "calibration_profile_hash_failed",
+                    format!("failed to hash calibration profile: {err}"),
+                ),
+            }
+        }
+    }
+}
+
+fn validate_optional_source_digest(value: Option<&str>, report: &mut VerificationReport) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(digest) = value.strip_prefix("sha256:") else {
+        report.error(
+            "calibration_profile_source_digest_invalid",
+            "calibration.profile.source_digest must be sha256:<lowercase-hex>",
+        );
+        return;
+    };
+    if !is_sha256_hex(digest) {
+        report.error(
+            "calibration_profile_source_digest_invalid",
+            "calibration.profile.source_digest must be sha256:<lowercase-hex>",
+        );
+    }
+}
+
+fn validate_calibration_parameterization(
+    calibration: &CalibrationProfileRef,
+    profile: &ProfileArtifactRef,
+    report: &mut VerificationReport,
+) {
+    match &calibration.null_model {
+        NullModelSpec::WeightedMarginalProfile { parameterization }
+            if *parameterization != profile.parameterization =>
+        {
+            report.error(
+                "calibration_null_parameterization_mismatch",
+                format!(
+                    "null_model parameterization {:?} does not match profile parameterization {:?}",
+                    parameterization, profile.parameterization
+                ),
+            );
+        }
+        NullModelSpec::EmpiricalTailTable { .. }
+            if profile.parameterization != ProfileParameterization::EmpiricalTailTable =>
+        {
+            report.error(
+                "calibration_null_parameterization_mismatch",
+                "empirical_tail_table null_model requires empirical_tail_table profile parameterization",
+            );
+        }
+        _ => {}
+    }
+}
+
+fn validate_calibration_profile_shape(
+    profile: &ProfileArtifactRef,
+    ordinalization: &CalibrationOrdinalization,
+    report: &mut VerificationReport,
+) {
+    if profile.format.trim().is_empty() {
+        report.error(
+            "calibration_profile_format_empty",
+            "calibration.profile.format must be non-empty",
+        );
+    }
+
+    if profile.shape.is_empty() {
+        return;
+    }
+
+    if let Some(expected) = expected_profile_shape(profile.parameterization, ordinalization) {
+        if profile.shape != expected {
+            report.error(
+                "calibration_profile_shape_mismatch",
+                format!(
+                    "calibration profile shape {:?} does not match expected {:?}",
+                    profile.shape, expected
+                ),
+            );
+        }
+    }
+
+    let bytes_per_value = match profile.format.as_str() {
+        "raw_f64_le" => Some(8u64),
+        "raw_f32_le" => Some(4u64),
+        _ => None,
+    };
+    let Some(bytes_per_value) = bytes_per_value else {
+        return;
+    };
+    let Some(values) = profile
+        .shape
+        .iter()
+        .try_fold(1u64, |acc, value| acc.checked_mul(*value as u64))
+    else {
+        report.error(
+            "calibration_profile_shape_mismatch",
+            "calibration.profile.shape product overflows u64",
+        );
+        return;
+    };
+    let Some(expected_bytes) = values.checked_mul(bytes_per_value) else {
+        report.error(
+            "calibration_profile_shape_mismatch",
+            "calibration.profile.shape byte size overflows u64",
+        );
+        return;
+    };
+    if profile.file_size_bytes != expected_bytes {
+        report.error(
+            "calibration_profile_file_size_mismatch",
+            format!(
+                "calibration profile size {} does not match shape/format size {}",
+                profile.file_size_bytes, expected_bytes
+            ),
+        );
+    }
+}
+
+fn expected_profile_shape(
+    parameterization: ProfileParameterization,
+    ordinalization: &CalibrationOrdinalization,
+) -> Option<Vec<usize>> {
+    match parameterization {
+        ProfileParameterization::MarginalTopKFrequency => Some(vec![ordinalization.dim()]),
+        ProfileParameterization::SignFrequency => Some(vec![ordinalization.dim()]),
+        ProfileParameterization::BucketFrequency => match ordinalization {
+            CalibrationOrdinalization::Bucket { dim, bits } => Some(vec![*dim, 1usize << *bits]),
+            _ => None,
+        },
+        ProfileParameterization::RankPositionFrequency => {
+            Some(vec![ordinalization.dim(), ordinalization.dim()])
+        }
+        ProfileParameterization::EmpiricalTailTable => None,
+    }
+}
+
 fn verify_attestations(manifest: &IndexManifest, report: &mut VerificationReport) {
     if manifest.attestations.is_empty() {
         report
@@ -698,6 +1184,8 @@ pub struct IndexManifest {
     pub created_at: String,
     pub artifact: Artifact,
     pub embedding: Embedding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<CalibrationProfileRef>,
     pub row_identity: RowIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildInfo>,
@@ -734,6 +1222,118 @@ pub struct Embedding {
     pub embedding_matrix_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalization: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibrationProfileRef {
+    pub schema_version: String,
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    pub calibrated_for: EncoderSpec,
+    pub ordinalization: CalibrationOrdinalization,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileArtifactRef>,
+    pub null_model: NullModelSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncoderSpec {
+    pub model: String,
+    pub dim: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalization: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CalibrationOrdinalization {
+    TopK { dim: usize, k: usize },
+    Bucket { dim: usize, bits: u8 },
+    Sign { dim: usize },
+    RankPosition { dim: usize },
+    CallerDefined { dim: usize, name: String },
+}
+
+impl CalibrationOrdinalization {
+    pub fn dim(&self) -> usize {
+        match self {
+            Self::TopK { dim, .. }
+            | Self::Bucket { dim, .. }
+            | Self::Sign { dim }
+            | Self::RankPosition { dim }
+            | Self::CallerDefined { dim, .. } => *dim,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TopK { .. } => "top_k",
+            Self::Bucket { .. } => "bucket",
+            Self::Sign { .. } => "sign",
+            Self::RankPosition { .. } => "rank_position",
+            Self::CallerDefined { .. } => "caller_defined",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileArtifactRef {
+    pub path: String,
+    pub sha256: String,
+    pub file_size_bytes: u64,
+    pub dim: usize,
+    pub sample_count: usize,
+    pub parameterization: ProfileParameterization,
+    pub format: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shape: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileParameterization {
+    #[serde(rename = "marginal_topk_frequency")]
+    MarginalTopKFrequency,
+    BucketFrequency,
+    SignFrequency,
+    RankPositionFrequency,
+    EmpiricalTailTable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NullModelSpec {
+    UniformHypergeometric,
+    WeightedMarginalProfile {
+        parameterization: ProfileParameterization,
+    },
+    EmpiricalTailTable {
+        statistic: String,
+    },
+    CallerDefined {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameterization: Option<String>,
+    },
+}
+
+impl NullModelSpec {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::UniformHypergeometric => "uniform_hypergeometric",
+            Self::WeightedMarginalProfile { .. } => "weighted_marginal_profile",
+            Self::EmpiricalTailTable { .. } => "empirical_tail_table",
+            Self::CallerDefined { .. } => "caller_defined",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -834,6 +1434,7 @@ pub struct VerificationReport {
     pub manifest_id: Option<String>,
     pub artifact: ArtifactReport,
     pub row_identity: RowIdentityReport,
+    pub calibration: CalibrationReport,
     pub attestation_shape_checks: Vec<AttestationShapeCheck>,
     pub errors: Vec<ReportIssue>,
     pub warnings: Vec<ReportIssue>,
@@ -848,6 +1449,7 @@ impl VerificationReport {
             manifest_id,
             artifact: ArtifactReport::default(),
             row_identity: RowIdentityReport::default(),
+            calibration: CalibrationReport::default(),
             attestation_shape_checks: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -878,6 +1480,20 @@ pub struct RowIdentityReport {
     pub sha256: Option<String>,
     pub row_count: Option<usize>,
     pub validated_rows: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CalibrationReport {
+    pub present: bool,
+    pub schema_version: Option<String>,
+    pub profile_id: Option<String>,
+    pub calibrated_for_model: Option<String>,
+    pub ordinalization: Option<String>,
+    pub null_model: Option<String>,
+    pub profile_manifest_path: Option<String>,
+    pub profile_canonical_path: Option<String>,
+    pub profile_sha256: Option<String>,
+    pub profile_size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1057,6 +1673,7 @@ pub fn create_manifest_for_index_with_options(
             embedding_matrix_digest: None,
             normalization: None,
         },
+        calibration: None,
         row_identity,
         build: Some(BuildInfo {
             invocation_id,

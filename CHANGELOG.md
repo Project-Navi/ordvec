@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JSON schema, artifact and row-identity verification, attestation shape
   checks, a CLI, and optional SQLite cache/audit support with one active
   manifest pointer.
+- Added optional typed calibration profile references to the v1 manifest
+  schema, with path/hash/identity/compatibility verification but no statistical
+  computation.
 
 ### Documentation
 

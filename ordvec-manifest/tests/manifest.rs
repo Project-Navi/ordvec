@@ -1,8 +1,10 @@
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
-    sha256_file, verify_index_manifest, verify_manifest_with_base, CreateManifestOptions,
-    CreateRowIdentity, ManifestIndexParams, RowIdentity, VerifyOptions,
+    sha256_file, verify_index_manifest, verify_manifest_with_base, CalibrationOrdinalization,
+    CalibrationProfileRef, CreateManifestOptions, CreateRowIdentity, EncoderSpec,
+    ManifestIndexParams, NullModelSpec, ProfileArtifactRef, ProfileParameterization, RowIdentity,
+    VerifyOptions, CALIBRATION_SCHEMA_VERSION,
 };
 use serde_json::json;
 use std::fs;
@@ -84,6 +86,73 @@ fn identity_manifest(dir: &Path) -> (tempfile::TempDir, ordvec_manifest::IndexMa
     )
     .unwrap();
     (temp, manifest, manifest_path)
+}
+
+fn write_profile(path: &Path, size_bytes: usize) -> ordvec_manifest::FileHash {
+    fs::write(path, vec![0u8; size_bytes]).unwrap();
+    sha256_file(path).unwrap()
+}
+
+fn uniform_calibration(
+    manifest: &ordvec_manifest::IndexManifest,
+    ordinalization: CalibrationOrdinalization,
+) -> CalibrationProfileRef {
+    CalibrationProfileRef {
+        schema_version: CALIBRATION_SCHEMA_VERSION.to_string(),
+        profile_id: "urn:uuid:7c66ad6e-bdde-49a8-b420-f1136d04f5bd".to_string(),
+        created_at: Some("2026-05-29T06:00:00Z".to_string()),
+        calibrated_for: EncoderSpec {
+            model: manifest.embedding.model.clone(),
+            dim: manifest.embedding.dim,
+            model_revision: manifest.embedding.model_revision.clone(),
+            normalization: manifest.embedding.normalization.clone(),
+        },
+        ordinalization,
+        profile: None,
+        null_model: NullModelSpec::UniformHypergeometric,
+    }
+}
+
+fn weighted_calibration(
+    manifest: &ordvec_manifest::IndexManifest,
+    path: impl Into<String>,
+    hash: ordvec_manifest::FileHash,
+    ordinalization: CalibrationOrdinalization,
+    parameterization: ProfileParameterization,
+    shape: Vec<usize>,
+) -> CalibrationProfileRef {
+    CalibrationProfileRef {
+        schema_version: CALIBRATION_SCHEMA_VERSION.to_string(),
+        profile_id: "urn:uuid:7c66ad6e-bdde-49a8-b420-f1136d04f5bd".to_string(),
+        created_at: Some("2026-05-29T06:00:00Z".to_string()),
+        calibrated_for: EncoderSpec {
+            model: manifest.embedding.model.clone(),
+            dim: manifest.embedding.dim,
+            model_revision: manifest.embedding.model_revision.clone(),
+            normalization: manifest.embedding.normalization.clone(),
+        },
+        ordinalization,
+        profile: Some(ProfileArtifactRef {
+            path: path.into(),
+            sha256: hash.sha256,
+            file_size_bytes: hash.size_bytes,
+            dim: manifest.artifact.dim,
+            sample_count: 100,
+            parameterization,
+            format: "raw_f64_le".to_string(),
+            shape,
+            source_digest: None,
+        }),
+        null_model: NullModelSpec::WeightedMarginalProfile { parameterization },
+    }
+}
+
+fn error_codes(report: &ordvec_manifest::VerificationReport) -> Vec<&str> {
+    report
+        .errors
+        .iter()
+        .map(|issue| issue.code.as_str())
+        .collect()
 }
 
 #[test]
@@ -212,6 +281,320 @@ fn schema_enforces_lowercase_sha256_and_optional_field_shapes() {
             report.errors
         );
     }
+}
+
+#[test]
+fn calibration_schema_shape_is_strict_and_optional() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, manifest, _manifest_path) = identity_manifest(root.path());
+    let report = verify_manifest_with_base(manifest.clone(), temp.path(), VerifyOptions::default());
+    assert!(report.ok, "{:?}", report.errors);
+    assert!(!report.calibration.present);
+
+    let mut with_unknown = manifest.clone();
+    with_unknown.calibration = Some(uniform_calibration(
+        &with_unknown,
+        CalibrationOrdinalization::Bucket {
+            dim: with_unknown.artifact.dim,
+            bits: 2,
+        },
+    ));
+    let mut value = serde_json::to_value(&with_unknown).unwrap();
+    value["calibration"]
+        .as_object_mut()
+        .unwrap()
+        .insert("unknown".to_string(), json!(true));
+    let parsed = serde_json::from_value::<ordvec_manifest::IndexManifest>(value);
+    assert!(parsed.is_err(), "calibration must reject unknown fields");
+
+    let mut bad = manifest;
+    let mut calibration = uniform_calibration(
+        &bad,
+        CalibrationOrdinalization::Bucket {
+            dim: bad.artifact.dim,
+            bits: 2,
+        },
+    );
+    calibration.schema_version = "ordvec.calibration.v2".to_string();
+    calibration.created_at = Some("not-rfc3339".to_string());
+    bad.calibration = Some(calibration);
+    let report = verify_manifest_with_base(bad, temp.path(), VerifyOptions::default());
+    for code in [
+        "calibration_schema_version_unsupported",
+        "calibration_created_at_invalid",
+    ] {
+        assert!(
+            error_codes(&report).contains(&code),
+            "missing {code}: {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn calibration_encoder_identity_must_match_embedding() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
+    manifest.embedding.model_revision = Some("rev-a".to_string());
+    manifest.embedding.normalization = Some("l2".to_string());
+    let mut calibration = uniform_calibration(
+        &manifest,
+        CalibrationOrdinalization::Bucket {
+            dim: manifest.artifact.dim,
+            bits: 2,
+        },
+    );
+    calibration.calibrated_for.model = "other-model".to_string();
+    calibration.calibrated_for.dim += 1;
+    calibration.calibrated_for.model_revision = Some("rev-b".to_string());
+    calibration.calibrated_for.normalization = Some("as_provided".to_string());
+    manifest.calibration = Some(calibration);
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    for code in [
+        "calibration_encoder_model_mismatch",
+        "calibration_encoder_dim_mismatch",
+        "calibration_encoder_model_revision_mismatch",
+        "calibration_encoder_normalization_mismatch",
+    ] {
+        assert!(
+            error_codes(&report).contains(&code),
+            "missing {code}: {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn calibration_ordinalization_matches_artifact_formats() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let bitmap_case = tempfile::tempdir_in(temp.path()).unwrap();
+    let bitmap = write_index_kind(bitmap_case.path(), FixtureKind::Bitmap);
+    let bitmap_manifest_path = bitmap_case.path().join("manifest.json");
+    let mut bitmap_manifest = create_manifest_for_index(
+        &bitmap,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &bitmap_manifest_path,
+    )
+    .unwrap();
+    bitmap_manifest.calibration = Some(uniform_calibration(
+        &bitmap_manifest,
+        CalibrationOrdinalization::TopK {
+            dim: bitmap_manifest.artifact.dim,
+            k: 16,
+        },
+    ));
+    let report = verify_manifest_with_base(
+        bitmap_manifest.clone(),
+        bitmap_case.path(),
+        VerifyOptions::default(),
+    );
+    assert!(report.ok, "{:?}", report.errors);
+    bitmap_manifest.calibration = Some(uniform_calibration(
+        &bitmap_manifest,
+        CalibrationOrdinalization::TopK {
+            dim: bitmap_manifest.artifact.dim,
+            k: 8,
+        },
+    ));
+    let report = verify_manifest_with_base(
+        bitmap_manifest,
+        bitmap_case.path(),
+        VerifyOptions::default(),
+    );
+    assert!(error_codes(&report).contains(&"calibration_ordinalization_artifact_mismatch"));
+
+    let rq_case = tempfile::tempdir_in(temp.path()).unwrap();
+    let rank_quant = write_index_kind(rq_case.path(), FixtureKind::RankQuant);
+    let rq_manifest_path = rq_case.path().join("manifest.json");
+    let mut rq_manifest = create_manifest_for_index(
+        &rank_quant,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &rq_manifest_path,
+    )
+    .unwrap();
+    rq_manifest.calibration = Some(uniform_calibration(
+        &rq_manifest,
+        CalibrationOrdinalization::Bucket {
+            dim: rq_manifest.artifact.dim,
+            bits: 2,
+        },
+    ));
+    let report = verify_manifest_with_base(
+        rq_manifest.clone(),
+        rq_case.path(),
+        VerifyOptions::default(),
+    );
+    assert!(report.ok, "{:?}", report.errors);
+    rq_manifest.calibration = Some(uniform_calibration(
+        &rq_manifest,
+        CalibrationOrdinalization::Bucket {
+            dim: rq_manifest.artifact.dim,
+            bits: 4,
+        },
+    ));
+    let report = verify_manifest_with_base(rq_manifest, rq_case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_ordinalization_artifact_mismatch"));
+
+    let sign_case = tempfile::tempdir_in(temp.path()).unwrap();
+    let sign = write_index_kind(sign_case.path(), FixtureKind::SignBitmap);
+    let sign_manifest_path = sign_case.path().join("manifest.json");
+    let mut sign_manifest = create_manifest_for_index(
+        &sign,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &sign_manifest_path,
+    )
+    .unwrap();
+    sign_manifest.calibration = Some(uniform_calibration(
+        &sign_manifest,
+        CalibrationOrdinalization::Sign {
+            dim: sign_manifest.artifact.dim,
+        },
+    ));
+    let report =
+        verify_manifest_with_base(sign_manifest, sign_case.path(), VerifyOptions::default());
+    assert!(report.ok, "{:?}", report.errors);
+
+    let rank_case = tempfile::tempdir_in(temp.path()).unwrap();
+    let rank = write_index_kind(rank_case.path(), FixtureKind::Rank);
+    let rank_manifest_path = rank_case.path().join("manifest.json");
+    let mut rank_manifest = create_manifest_for_index(
+        &rank,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &rank_manifest_path,
+    )
+    .unwrap();
+    rank_manifest.calibration = Some(uniform_calibration(
+        &rank_manifest,
+        CalibrationOrdinalization::RankPosition {
+            dim: rank_manifest.artifact.dim,
+        },
+    ));
+    let report =
+        verify_manifest_with_base(rank_manifest, rank_case.path(), VerifyOptions::default());
+    assert!(report.ok, "{:?}", report.errors);
+}
+
+#[test]
+fn calibration_profile_artifact_checks_are_enforced() {
+    let temp = tempfile::tempdir().unwrap();
+    let case = tempfile::tempdir_in(temp.path()).unwrap();
+    let profile_dir = case.path().join("profiles");
+    fs::create_dir(&profile_dir).unwrap();
+    let index = write_index_kind(case.path(), FixtureKind::Bitmap);
+    let manifest_path = case.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    let profile_hash = write_profile(
+        &profile_dir.join("profile.f64"),
+        manifest.artifact.dim * std::mem::size_of::<f64>(),
+    );
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "profiles/profile.f64",
+        profile_hash.clone(),
+        CalibrationOrdinalization::TopK {
+            dim: manifest.artifact.dim,
+            k: 16,
+        },
+        ProfileParameterization::MarginalTopKFrequency,
+        vec![manifest.artifact.dim],
+    ));
+    let report = verify_manifest_with_base(manifest.clone(), case.path(), VerifyOptions::default());
+    assert!(report.ok, "{:?}", report.errors);
+    assert!(report.calibration.present);
+    assert_eq!(
+        report.calibration.profile_sha256.as_deref(),
+        Some(profile_hash.sha256.as_str())
+    );
+
+    let mut missing_profile = manifest.clone();
+    missing_profile.calibration.as_mut().unwrap().profile = None;
+    let report = verify_manifest_with_base(missing_profile, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_required"));
+
+    let mut unexpected_profile = manifest.clone();
+    unexpected_profile.calibration.as_mut().unwrap().null_model =
+        NullModelSpec::UniformHypergeometric;
+    let report =
+        verify_manifest_with_base(unexpected_profile, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_unexpected"));
+
+    let mut hash_mismatch = manifest.clone();
+    hash_mismatch
+        .calibration
+        .as_mut()
+        .unwrap()
+        .profile
+        .as_mut()
+        .unwrap()
+        .sha256 = "b".repeat(64);
+    let report = verify_manifest_with_base(hash_mismatch, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_sha256_mismatch"));
+
+    let mut size_mismatch = manifest.clone();
+    size_mismatch
+        .calibration
+        .as_mut()
+        .unwrap()
+        .profile
+        .as_mut()
+        .unwrap()
+        .file_size_bytes += 8;
+    let report = verify_manifest_with_base(size_mismatch, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_file_size_mismatch"));
+
+    let mut zero_sample = manifest.clone();
+    zero_sample
+        .calibration
+        .as_mut()
+        .unwrap()
+        .profile
+        .as_mut()
+        .unwrap()
+        .sample_count = 0;
+    let report = verify_manifest_with_base(zero_sample, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_sample_count_zero"));
+
+    let outside = temp.path().join("outside-profile.f64");
+    let outside_hash = write_profile(&outside, manifest.artifact.dim * std::mem::size_of::<f64>());
+    let mut escaped = manifest.clone();
+    let escaped_profile = escaped
+        .calibration
+        .as_mut()
+        .unwrap()
+        .profile
+        .as_mut()
+        .unwrap();
+    escaped_profile.path = "../outside-profile.f64".to_string();
+    escaped_profile.sha256 = outside_hash.sha256.clone();
+    escaped_profile.file_size_bytes = outside_hash.size_bytes;
+    let report = verify_manifest_with_base(escaped, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_path_escape_rejected"));
+
+    let mut absolute = manifest;
+    let absolute_profile = absolute
+        .calibration
+        .as_mut()
+        .unwrap()
+        .profile
+        .as_mut()
+        .unwrap();
+    absolute_profile.path = outside.display().to_string();
+    absolute_profile.sha256 = outside_hash.sha256;
+    absolute_profile.file_size_bytes = outside_hash.size_bytes;
+    let report = verify_manifest_with_base(absolute, case.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"calibration_profile_absolute_path_rejected"));
 }
 
 #[test]
@@ -778,4 +1161,70 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
         .warnings
         .iter()
         .any(|issue| issue.code == "sqlite_activation_forced"));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_cache_key_includes_calibration_profile_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profiles");
+    fs::create_dir(&profile_dir).unwrap();
+    let index = write_index_kind(temp.path(), FixtureKind::Bitmap);
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    let profile_path = profile_dir.join("profile.f64");
+    let profile_hash = write_profile(
+        &profile_path,
+        manifest.artifact.dim * std::mem::size_of::<f64>(),
+    );
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "profiles/profile.f64",
+        profile_hash,
+        CalibrationOrdinalization::TopK {
+            dim: manifest.artifact.dim,
+            k: 16,
+        },
+        ProfileParameterization::MarginalTopKFrequency,
+        vec![manifest.artifact.dim],
+    ));
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("registry.sqlite");
+
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    fs::write(
+        &profile_path,
+        vec![1u8; manifest.artifact.dim * std::mem::size_of::<f64>()],
+    )
+    .unwrap();
+    let cached = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(!cached.ok, "profile drift must force fresh verification");
+    assert!(error_codes(&cached).contains(&"calibration_profile_sha256_mismatch"));
 }

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use ordvec_manifest::{
     create_manifest_for_index_with_options, load_manifest_file, sha256_file, verify_manifest,
     write_manifest_file, CreateManifestOptions, CreateRowIdentity, ManifestDocument, ManifestError,
-    VerifyOptions,
+    NullModelSpec, ProfileParameterization, VerifyOptions,
 };
 use serde_json::json;
 use std::fs;
@@ -150,6 +150,7 @@ fn run() -> Result<i32, ManifestError> {
                 println!("schema_version: {}", document.manifest.schema_version);
                 println!("artifact: {}", document.manifest.artifact.path);
                 println!("row_identity: {}", row_identity_label(&document));
+                println!("calibration: {}", calibration_label(&document));
             }
             Ok(0)
         }
@@ -321,8 +322,35 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), ManifestError> {
 }
 
 fn row_identity_label(document: &ManifestDocument) -> &'static str {
-    match document.manifest.row_identity {
+    match &document.manifest.row_identity {
         ordvec_manifest::RowIdentity::RowIdIdentity { .. } => "row_id_identity",
         ordvec_manifest::RowIdentity::Jsonl { .. } => "jsonl",
+    }
+}
+
+fn calibration_label(document: &ManifestDocument) -> String {
+    let Some(calibration) = &document.manifest.calibration else {
+        return "absent".to_string();
+    };
+    match &calibration.null_model {
+        NullModelSpec::UniformHypergeometric => "uniform_hypergeometric".to_string(),
+        NullModelSpec::WeightedMarginalProfile { parameterization } => {
+            format!(
+                "weighted_marginal_profile / {}",
+                profile_parameterization_label(*parameterization)
+            )
+        }
+        NullModelSpec::EmpiricalTailTable { .. } => "empirical_tail_table".to_string(),
+        NullModelSpec::CallerDefined { name, .. } => format!("caller_defined / {name}"),
+    }
+}
+
+fn profile_parameterization_label(parameterization: ProfileParameterization) -> &'static str {
+    match parameterization {
+        ProfileParameterization::MarginalTopKFrequency => "marginal_topk_frequency",
+        ProfileParameterization::BucketFrequency => "bucket_frequency",
+        ProfileParameterization::SignFrequency => "sign_frequency",
+        ProfileParameterization::RankPositionFrequency => "rank_position_frequency",
+        ProfileParameterization::EmpiricalTailTable => "empirical_tail_table",
     }
 }

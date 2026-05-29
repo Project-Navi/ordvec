@@ -59,12 +59,24 @@ The manifest verifier checks:
   `SignBitmap`) without allocating the payload;
 - declared dimension, vector count, bytes-per-vector, format version, and
   format parameters against the probed metadata;
+- the `embedding` block as the encoder/vector representation that produced
+  the index artifact;
 - row identity, either explicit `row_id_identity` or a strict JSONL row map
   whose `row_id` equals the zero-based line number and whose `db_id` is
   non-empty, NUL-free, and unique by default;
+- optional `calibration` profile references, checking profile identity,
+  path/hash integrity, encoder identity, and ordinalization compatibility;
 - attestation **shape** only: predicate type, builder id when present, and at
   least one subject SHA-256 matching the artifact when attestations are
   supplied.
+
+When present, `calibration` binds an index artifact to a hashed ordinal profile
+used to interpret overlap, bucket, sign, or rank evidence under a calibrated
+null. The verifier checks profile identity, path/hash integrity, encoder
+identity, and ordinalization compatibility; it does not judge whether the null
+model is scientifically adequate and does not compute likelihood ratios or tail
+probabilities. Calibration profiles must match the encoder identity declared by
+`embedding`; cross-encoder calibration is rejected by default.
 
 Recipes that consume sidecar manifests should run the verifier first, then
 load/search/rerank only if verification succeeds.

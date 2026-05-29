@@ -107,6 +107,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
                 options_sha256 TEXT,
                 artifact_sha256 TEXT,
                 row_identity_sha256 TEXT,
+                calibration_profile_sha256 TEXT,
                 report_json TEXT NOT NULL
              );
              INSERT INTO verification_reports(
@@ -129,6 +130,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
             options_sha256 TEXT,
             artifact_sha256 TEXT,
             row_identity_sha256 TEXT,
+            calibration_profile_sha256 TEXT,
             report_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS verification_reports_cache_idx
@@ -138,6 +140,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
             options_sha256,
             artifact_sha256,
             row_identity_sha256,
+            calibration_profile_sha256,
             report_id
           );
         CREATE TABLE IF NOT EXISTS active_manifest(
@@ -171,8 +174,9 @@ fn store_report(
             options_sha256,
             artifact_sha256,
             row_identity_sha256,
+            calibration_profile_sha256,
             report_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             document.manifest.manifest_id,
             manifest_path.display().to_string(),
@@ -182,6 +186,7 @@ fn store_report(
             cache_key.map(|key| key.options_sha256.as_str()),
             cache_key.map(|key| key.artifact_sha256.as_str()),
             cache_key.and_then(|key| key.row_identity_sha256.as_deref()),
+            cache_key.and_then(|key| key.calibration_profile_sha256.as_deref()),
             report_json,
         ],
     )
@@ -207,6 +212,10 @@ fn load_cached_report(
                  (row_identity_sha256 IS NULL AND ?5 IS NULL)
                  OR row_identity_sha256 = ?5
                )
+               AND (
+                 (calibration_profile_sha256 IS NULL AND ?6 IS NULL)
+                 OR calibration_profile_sha256 = ?6
+               )
              ORDER BY report_id DESC
              LIMIT 1",
             params![
@@ -215,6 +224,7 @@ fn load_cached_report(
                 cache_key.options_sha256.as_str(),
                 cache_key.artifact_sha256.as_str(),
                 cache_key.row_identity_sha256.as_deref(),
+                cache_key.calibration_profile_sha256.as_deref(),
             ],
             |row| row.get(0),
         )
@@ -231,6 +241,7 @@ struct CacheKey {
     options_sha256: String,
     artifact_sha256: String,
     row_identity_sha256: Option<String>,
+    calibration_profile_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -306,12 +317,14 @@ fn current_cache_key(
             }
         }
     };
+    let calibration_profile_sha256 = current_calibration_profile_sha256(document, options)?;
 
     Ok(Some(CacheKey {
         manifest_sha256,
         options_sha256,
         artifact_sha256,
         row_identity_sha256,
+        calibration_profile_sha256,
     }))
 }
 
@@ -339,12 +352,56 @@ fn cache_key_from_report(
             Some(sha256)
         }
     };
+    let calibration_profile_sha256 = if document
+        .manifest
+        .calibration
+        .as_ref()
+        .and_then(|calibration| calibration.profile.as_ref())
+        .is_some()
+    {
+        let Some(sha256) = report.calibration.profile_sha256.clone() else {
+            return Ok(None);
+        };
+        Some(sha256)
+    } else {
+        None
+    };
     Ok(Some(CacheKey {
         manifest_sha256,
         options_sha256,
         artifact_sha256,
         row_identity_sha256,
+        calibration_profile_sha256,
     }))
+}
+
+fn current_calibration_profile_sha256(
+    document: &ManifestDocument,
+    options: &VerifyOptions,
+) -> Result<Option<String>, ManifestError> {
+    let Some(profile) = document
+        .manifest
+        .calibration
+        .as_ref()
+        .and_then(|calibration| calibration.profile.as_ref())
+    else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&profile.path);
+    let mut path_errors = Vec::<ReportIssue>::new();
+    let Some(resolved) = resolve_existing_path(
+        &path,
+        &document.base_dir,
+        options,
+        "calibration_profile",
+        &mut path_errors,
+    ) else {
+        return Ok(None);
+    };
+    match sha256_file(&resolved.resolved_path) {
+        Ok(hash) => Ok(Some(hash.sha256)),
+        Err(_) => Ok(None),
+    }
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -377,7 +434,10 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         .collect::<Result<Vec<_>, _>>()
         .map_err(sqlite_err)?;
     Ok(!columns.iter().any(|column| column == "report_id")
-        || !columns.iter().any(|column| column == "manifest_sha256"))
+        || !columns.iter().any(|column| column == "manifest_sha256")
+        || !columns
+            .iter()
+            .any(|column| column == "calibration_profile_sha256"))
 }
 
 fn sqlite_err(err: rusqlite::Error) -> ManifestError {
