@@ -42,6 +42,8 @@
 #     `*.sigstore.json` bundle on the Release (`gh attestation verify`; also the
 #     Scorecard signing probe -> 8, a backup if the .intoto.jsonl ever regresses).
 #   * gh-action-pypi-publish -> PEP 740 attestations on PyPI (Integrity API).
+#   * post-publish PyPI JSON hash check -> every served wheel/sdist digest
+#     matches the staged dist files.
 #   * crates.io / PyPI publish via Trusted Publishing (OIDC) — NO stored tokens.
 #
 # Fail-closed: `release-assets-draft` and both publishes `needs:` attest +
@@ -270,10 +272,9 @@ jobs:
           # could inject code into the shipped wheel (zizmor cache-poisoning,
           # HIGH); the speedup isn't worth that risk on the release path. The CI
           # path (`python.yml`) keeps sccache on for the PR/main cadence.
-      # Prove the freshly-built wheel runs before it can be published. The
-      # linux/aarch64 wheel is cross-built under QEMU and can't execute on the x86
-      # host, so it's skipped (covered by python.yml's native arm leg + the
-      # macos-arm64 leg here).
+      # Prove each native wheel runs before it can be published. The
+      # linux/aarch64 wheel is cross-built here and smoke-tested on a native
+      # ubuntu-24.04-arm runner by `smoke-linux-aarch64-wheel` below.
       - name: Set up Python to test the built wheel
         if: ${{ !(matrix.platform.runner == 'ubuntu-latest' && matrix.platform.target == 'aarch64') }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -284,14 +285,77 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          WHEEL="$(python - <<'PY'
+          from pathlib import Path
+          wheels = sorted(Path("ordvec-python/dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {wheels}")
+          print(wheels[0])
+          PY
+          )"
           python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
-          python -m pip install ordvec-python/dist/*.whl
+          python -m pip install --no-index "$WHEEL"
           python -m pytest ordvec-python/tests -q
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
           path: ordvec-python/dist/*.whl
           if-no-files-found: error
+
+  smoke-linux-aarch64-wheel:
+    name: smoke linux/aarch64 wheel
+    needs: [guard, build-wheels]
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Set up Python to test the built wheel
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Download the exact linux/aarch64 wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheels-ubuntu-latest-aarch64
+          path: wheelhouse
+      - name: Install exact wheel and run tiny RankQuant/Bitmap smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL="$(python - <<'PY'
+          from pathlib import Path
+          wheels = sorted(Path("wheelhouse").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one linux/aarch64 wheel, found {wheels}")
+          print(wheels[0])
+          PY
+          )"
+          python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
+          python -m pip install --no-index "$WHEEL"
+          python - <<'PY'
+          import numpy as np
+          from ordvec import Bitmap, RankQuant
+
+          docs8 = np.arange(32, dtype=np.float32).reshape(4, 8)
+          rq = RankQuant(8, 2)
+          rq.add(docs8)
+          scores, ids = rq.search_asymmetric(docs8[:1], 2)
+          assert scores.shape == (1, 2)
+          assert ids.shape == (1, 2)
+
+          docs64 = np.arange(256, dtype=np.float32).reshape(4, 64)
+          bm = Bitmap(64, 16)
+          bm.add(docs64)
+          scores, ids = bm.search(docs64[:1], 2)
+          assert scores.shape == (1, 2)
+          assert ids.shape == (1, 2)
+          PY
 
   build-sdist:
     name: build sdist + SBOM
@@ -438,7 +502,7 @@ jobs:
 
   release-assets-draft:
     name: stage all assets on the DRAFT Release (does NOT un-draft)
-    needs: [guard, notes, attest, provenance, require-ci-green]
+    needs: [guard, notes, attest, provenance, require-ci-green, smoke-linux-aarch64-wheel]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -604,6 +668,51 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist
+      - name: Post-publish PyPI hashes match staged dist
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          dist = Path("dist")
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(dist.iterdir())
+              if path.is_file() and (path.name.endswith(".whl") or path.name.endswith(".tar.gz"))
+          }
+          if not local:
+              raise SystemExit("no local wheel/sdist files found in dist")
+
+          url = f"https://pypi.org/pypi/ordvec/{version}/json"
+          last_error = None
+          for attempt in range(1, 25):
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as response:
+                      payload = json.load(response)
+                  remote = {
+                      item["filename"]: item["digests"]["sha256"]
+                      for item in payload.get("urls", [])
+                  }
+                  if remote == local:
+                      print(f"OK: PyPI-served hashes match staged dist for ordvec {version}")
+                      break
+                  last_error = f"local={local!r} remote={remote!r}"
+              except Exception as exc:  # noqa: BLE001 - diagnostic for CI logs.
+                  last_error = repr(exc)
+              print(f"waiting for PyPI JSON/hash propagation ({attempt}/24): {last_error}", file=sys.stderr)
+              time.sleep(5)
+          else:
+              raise SystemExit(f"PyPI post-publish hash verification failed for {url}: {last_error}")
+          PY
 
   publish-github-release:
     name: un-draft the GitHub Release (only after BOTH registry publishes succeed)

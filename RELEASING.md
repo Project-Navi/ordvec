@@ -149,10 +149,14 @@ filename. Until either is updated, the corresponding gated publish fails
    - Once **both** publishes succeed, `publish-github-release` un-drafts the
      GitHub Release automatically. If one publish fails, the Release stays
      DRAFT — re-run the failed job, the un-draft then completes.
+   - `publish-pypi` also queries PyPI after upload and compares every served
+     wheel/sdist SHA-256 digest against the staged `dist/` files before the
+     GitHub Release can un-draft.
 7. Verify each published artifact and its provenance:
    - crates.io / docs.rs;
-   - PyPI (`pip download ordvec==X.Y.Z` and inspect, plus check the PEP 740
-     attestation at `GET https://pypi.org/integrity/ordvec/X.Y.Z/<file>/provenance`);
+   - PyPI (confirm the post-publish hash-verification log, optionally
+     `pip download ordvec==X.Y.Z` and inspect, plus check the PEP 740 attestation
+     at `GET https://pypi.org/integrity/ordvec/X.Y.Z/<file>/provenance`);
    - the GitHub Release page (`.crate`, wheels, sdist, `*.sigstore.json`,
      `*.intoto.jsonl` all present);
    - `gh attestation verify <file> -R Fieldnote-Echo/ordvec` on a downloaded

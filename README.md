@@ -109,7 +109,7 @@ Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ```toml
 [dependencies]
-ordvec = "0.2"
+ordvec = "0.3"
 
 # Or, to track unreleased `main`, use a git dependency instead:
 # ordvec = { git = "https://github.com/Fieldnote-Echo/ordvec" }
@@ -146,6 +146,7 @@ pip install ordvec
 
 Wheels target CPython 3.10+ (abi3); to build from source instead, see
 [`ordvec-python/`](https://github.com/Fieldnote-Echo/ordvec/tree/main/ordvec-python).
+The runtime dependency floor is `numpy>=2.2`.
 
 ## Documentation
 
@@ -154,12 +155,13 @@ Wheels target CPython 3.10+ (abi3); to build from source instead, see
 - **Design alternatives evaluated and cut:**
   [`docs/ALTERNATIVES_CONSIDERED.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/ALTERNATIVES_CONSIDERED.md)
 - **Index-file trust model:**
-  [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md),
-  [`THREAT_MODEL.md`](THREAT_MODEL.md)
-- **Repo-local manifest verifier:**
-  [`ordvec-manifest/`](ordvec-manifest/) (`cargo run -p ordvec-manifest -- verify --manifest ...`)
-- **C ABI:**
-  [`docs/c-api.md`](docs/c-api.md)
+  [`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md),
+  [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)
+- **Repo-local manifest verifier, C ABI, and Go wrapper:**
+  available from the full GitHub checkout. These sidecars are not part of the
+  published core `.crate`; use the GitHub checkout for `ordvec-manifest/`,
+  `ordvec-ffi/`, `ordvec-go/`, and
+  [`docs/c-api.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/c-api.md).
 - **Formal proof spine:** [`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization),
   including its [`proof-spine`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/proof-spine.md),
   [`theorem-map`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/theorem-map.md),
@@ -217,13 +219,14 @@ checksum, MAC, or signature — by design.** The loaders validate *structure*
 (magic, version, bounds, exact-length payload) but not *origin*: a
 structurally valid file can still be untrusted. If an index file crosses a
 trust boundary (network transfer, shared storage), verify it before loading.
-This repo includes a publish=false sidecar CLI, `ordvec-manifest`, that binds an
-index file to a JSON manifest by SHA-256, header metadata, row identity, and
-attestation shape checks. It does not sign artifacts, manage keys, or decide
-deployment trust policy. No in-format crypto is shipped because it would add key
-management the library can't own. See
-[`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md) and
-[`THREAT_MODEL.md`](THREAT_MODEL.md).
+The full GitHub checkout includes a publish=false sidecar CLI,
+`ordvec-manifest`, that binds an index file to a JSON manifest by SHA-256,
+header metadata, row identity, and attestation shape checks. It does not sign
+artifacts, manage keys, or decide deployment trust policy. No in-format crypto
+is shipped because it would add key management the library can't own. See
+[`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md)
+and [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)
+in the full repository.
 
 ## Provenance
 

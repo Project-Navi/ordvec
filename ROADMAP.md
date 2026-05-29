@@ -36,12 +36,15 @@ edge pipelines — compose, not a competitor to them.
 The throughline is **"be a good neighbour"**: ordvec should embed _natively_
 into more hosts rather than forcing callers to adapt to it.
 
-- **Publish.** A coordinated first release to crates.io (`ordvec`) and PyPI
-  (`ordvec`), carrying SLSA build provenance and SBOMs (the release machinery is
-  already in place). Unblocks `docs.rs` and the registry badges.
-- **Cross-stack embedding via a C ABI.** A `cdylib` plus a generated C header so
-  non-Rust / non-Python edge runtimes can link ordvec directly — the single
-  largest reach multiplier beyond Rust and Python.
+- **Distribution baseline.** ordvec now has coordinated crates.io / PyPI
+  release machinery with SLSA build provenance, SBOM artifacts, registry
+  trusted publishing, and post-publish byte checks. Ongoing work here is
+  platform breadth, not the first publish path.
+- **Cross-stack embedding via C and Go.** The repo now carries a base
+  publish=false C ABI (`ordvec-ffi`) plus a thin Go wrapper (`ordvec-go`) for
+  loading persisted `RankQuant` / `Bitmap` indexes and running synchronous
+  search. Next ABI work is the v2 builder/add surface, richer batched APIs, and
+  compatibility policy.
 - **Adapters.** Thin integration layers for host retrieval / RAG systems. ordvec
   factored out of [turbovec](https://github.com/RyanCodrai/turbovec); natural
   next targets are mainstream RAG frameworks (via the Python binding) and

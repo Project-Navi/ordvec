@@ -42,8 +42,9 @@ recall, monotonicity, and null fit remain empirical diagnostics.
 pip install ordvec
 ```
 
-Wheels target CPython 3.10+ (abi3). Building from source needs a Rust toolchain
-(MSRV 1.89) and [maturin](https://www.maturin.rs/).
+Wheels target CPython 3.10+ (abi3) and require `numpy>=2.2`. Building from
+source needs a Rust toolchain (MSRV 1.89) and
+[maturin](https://www.maturin.rs/).
 
 ## Provenance & license
 

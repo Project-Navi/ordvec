@@ -5,7 +5,9 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
+
+## 0.3.0 - 2026-05-29
 
 ### Added
 
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added optional typed calibration profile references to the v1 manifest
   schema, with path/hash/identity/compatibility verification but no statistical
   computation.
+- Added the repo-local, publish=false `ordvec-ffi` crate with the base C ABI
+  for loading persisted `RankQuant` and `Bitmap` indexes and running
+  synchronous search through opaque handles.
+- Added the repo-local `ordvec-go` cgo wrapper over the base C ABI.
 
 ### Documentation
 
@@ -26,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hypergeometric calibration, while preserving the real-encoder caveats.
 - Documented sidecar manifest verification as a pre-load provenance check that
   does not sign, manage keys, call networks, or decide trust policy.
+
+### Fixed
+
+- Hardened Python `add()` input boundaries so attempts to grow an index beyond
+  `MAX_VECTORS` raise `ValueError` before crossing into Rust core asserts.
+- Corrected Python package dependency wording to the published metadata:
+  CPython 3.10+ with `numpy>=2.2`.
+
+### Security
+
+- Hardened the tag-triggered release workflow with exact Linux/aarch64 wheel
+  smoke coverage, post-publish PyPI hash verification, reproducible
+  release-required fuzz installation, and stricter local release-order
+  invariants for OIDC and publish steps.
 
 ## [0.2.0] - 2026-05-26
 
@@ -64,7 +84,7 @@ internal history.
   range, matching the fail-loud contract of `pack_buckets` / `bucket_centre`.
   Valid rank vectors (a permutation of `[0, d)`) are unaffected.
 - **Python bindings (`ordvec-python`):** raised the floor to **Python 3.10** and
-  **numpy 2.0**; the abi3 wheel target moves to `abi3-py310`. Python 3.9 reached
+  **numpy 2.2**; the abi3 wheel target moves to `abi3-py310`. Python 3.9 reached
   end-of-life (October 2025) and pytest's CVE-2025-71176 fix dropped 3.9 support.
 
 ### Deprecated
@@ -140,6 +160,5 @@ system dependencies** — no BLAS, no `ndarray`, no `faer`.
   AVX-512 intrinsics this crate relies on were stabilized.
 - Dual-licensed under **MIT OR Apache-2.0**.
 
-[Unreleased]: https://github.com/Fieldnote-Echo/ordvec/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Fieldnote-Echo/ordvec/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Fieldnote-Echo/ordvec/releases/tag/v0.1.0

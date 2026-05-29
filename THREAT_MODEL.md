@@ -1,6 +1,6 @@
 # Threat Model — `ordvec`
 
-> **Status:** v0.2.0 (pre-1.0), 2026-05-28. This is the maintained threat model
+> **Status:** v0.3.0 (pre-1.0), 2026-05-29. This is the maintained threat model
 > for the `ordvec` Rust crate, C ABI, Go wrapper, PyO3/maturin Python bindings,
 > and the repo-local `ordvec-manifest` sidecar verifier. It is reviewed when the
 > attack surface changes (new persistence formats, new `unsafe` kernels, new
@@ -467,7 +467,7 @@ blast radius of a compromised dependency separately.
 | THREAT-FFI-003 | FFI | Binding | Accidental telemetry through ABI stats | Low | Low | **Mitigated** — caller-owned stats, no logging |
 | THREAT-FFI-004 | FFI | Binding | Concurrent input mutation during released-GIL call | Medium | Medium | **P2** — documented contract |
 | THREAT-FFI-005 | FFI | Binding | Unsanitized path forwarding | Medium | Medium | **P2** — documented contract |
-| THREAT-SUPPLY-001 | Supply chain | Config | Release config / single-owner | Low | Critical | **Mitigated** (reviewer + main-only); residual = account compromise / 2nd owner |
+| THREAT-SUPPLY-001 | Supply chain | Config | Release config / single-owner | Low | Critical | **Mitigated** (reviewer-gated release-tag deployment + `require-ci-green` main-SHA gate); residual = account compromise / 2nd owner |
 | THREAT-SUPPLY-002 | Supply chain | Config | Release immutability / tag integrity | Low | High | **Mitigated** — registries immutable; GitHub immutable releases on + `main` protected |
 | THREAT-SUPPLY-003 | Supply chain | Config | Typosquatting adjacent names | Medium | Medium | P3 |
 | THREAT-QUERY-001 | Resource | Deployment | Batch / `k` exhaustion in serving | Medium | Medium | **P2** — deployment docs |
@@ -491,8 +491,9 @@ blast radius of a compromised dependency separately.
 across all SIMD modules (SIMD-001); the `fastscan_b2` fuzz target (FUZZ-001)
 plus a CI `fuzz.yml` — PR smoke + weekly sweep (FUZZ-002); the `rank_to_bucket`
 primitive made fail-loud (`rank < d`) to match the rest of the bucket API, with
-matching binding guards; release-environment reviewers + main-only deployment
-(SUPPLY-001); **GitHub immutable releases enabled + `main` branch protection**
+matching binding guards; reviewer-gated release-tag deployment plus the
+`require-ci-green` main-SHA gate (SUPPLY-001); **GitHub immutable releases
+enabled + `main` branch protection**
 (SUPPLY-002); [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md) (DESER-002);
 [`RELEASING.md`](RELEASING.md) (SUPPLY-001).
 

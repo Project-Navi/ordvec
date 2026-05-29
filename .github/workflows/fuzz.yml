@@ -12,10 +12,11 @@ name: fuzz
 #     across ALL seven targets.
 #
 # This runs UNATTENDED on a cron schedule, so every third-party action is
-# SHA-pinned and cargo-fuzz is version-pinned — a fuzz smoke must not itself
-# become a supply-chain hole. Read-only token; the only `run:` interpolation is
-# the matrix target name, passed through `env:` (never inlined into the shell)
-# so there is no template-injection surface (THREAT-CICD-001).
+# SHA-pinned, cargo-fuzz is installed with its bundled lockfile on a pinned
+# Rust toolchain, and fuzzing runs on a pinned nightly — a fuzz smoke must not
+# itself become a supply-chain hole. Read-only token; the only `run:`
+# interpolation is the matrix target name, passed through `env:` (never inlined
+# into the shell) so there is no template-injection surface (THREAT-CICD-001).
 
 on:
   pull_request:
@@ -27,6 +28,11 @@ on:
 
 permissions:
   contents: read
+
+env:
+  CARGO_FUZZ_VERSION: "0.13.1"
+  CARGO_FUZZ_INSTALL_TOOLCHAIN: "1.89.0"
+  FUZZ_NIGHTLY: "nightly-2025-08-15"
 
 concurrency:
   group: fuzz-${{ github.workflow }}-${{ github.ref }}
@@ -52,19 +58,18 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.89.0; cargo-fuzz locked install
+        with:
+          toolchain: ${{ env.CARGO_FUZZ_INSTALL_TOOLCHAIN }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly; channel via toolchain: below
         with:
-          toolchain: nightly
+          toolchain: ${{ env.FUZZ_NIGHTLY }}
       - name: Install cargo-fuzz (version-pinned)
-        # NB: no `--locked` — cargo-fuzz 0.13.1's bundled Cargo.lock pins an old
-        # rustix (0.36.x) that no longer compiles on current nightly. The tool
-        # itself stays version-pinned; its build deps resolve to compatible
-        # versions.
-        run: cargo install cargo-fuzz --version 0.13.1
+        run: cargo "+${CARGO_FUZZ_INSTALL_TOOLCHAIN}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Smoke
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo +nightly fuzz run "$TARGET" -- -max_total_time=60 -rss_limit_mb=4096
+        run: cargo "+${FUZZ_NIGHTLY}" fuzz run "$TARGET" -- -max_total_time=60 -rss_limit_mb=4096
 
   # Weekly full sweep over all seven targets at a larger time budget.
   weekly:
@@ -90,16 +95,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.89.0; cargo-fuzz locked install
+        with:
+          toolchain: ${{ env.CARGO_FUZZ_INSTALL_TOOLCHAIN }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly; channel via toolchain: below
         with:
-          toolchain: nightly
+          toolchain: ${{ env.FUZZ_NIGHTLY }}
       - name: Install cargo-fuzz (version-pinned)
-        # NB: no `--locked` — cargo-fuzz 0.13.1's bundled Cargo.lock pins an old
-        # rustix (0.36.x) that no longer compiles on current nightly. The tool
-        # itself stays version-pinned; its build deps resolve to compatible
-        # versions.
-        run: cargo install cargo-fuzz --version 0.13.1
+        run: cargo "+${CARGO_FUZZ_INSTALL_TOOLCHAIN}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Fuzz
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo +nightly fuzz run "$TARGET" -- -max_total_time=300 -rss_limit_mb=4096
+        run: cargo "+${FUZZ_NIGHTLY}" fuzz run "$TARGET" -- -max_total_time=300 -rss_limit_mb=4096

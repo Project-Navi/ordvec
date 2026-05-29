@@ -52,10 +52,23 @@ job_needs() {
   printf '%s\n' "$body" | grep -qE "(^[[:space:]]+needs:.*\\b${needed}\\b|^[[:space:]]+-[[:space:]]+${needed}[[:space:]]*$)"
 }
 
+job_line() {
+  local jobname="$1" pattern="$2"
+  job_body "$jobname" | grep -nE "$pattern" | head -1 | cut -d: -f1
+}
+
+require_job_line() {
+  local jobname="$1" pattern="$2" description="$3" line
+  line="$(job_line "$jobname" "$pattern")"
+  [ -n "$line" ] || fail "$jobname must contain $description"
+  printf '%s\n' "$line"
+}
+
 # ----------------------------------------------------------------------
 # (1) release-assets-draft needs attest + provenance + require-ci-green + notes
+#     + exact linux/aarch64 wheel smoke
 # ----------------------------------------------------------------------
-for dep in attest provenance require-ci-green notes; do
+for dep in attest provenance require-ci-green notes smoke-linux-aarch64-wheel; do
   job_needs release-assets-draft "$dep" \
     || fail "release-assets-draft must \`needs: $dep\` (fail-closed on missing provenance/CI)"
 done
@@ -142,6 +155,23 @@ printf '%s\n' "$pcb" | grep -qE 'sha256sum' \
   || fail "publish-crate must sha256sum-compare the repackaged .crate vs the attested .crate before publishing"
 printf '%s\n' "$pcb" | grep -qE 'crates\.io/api/v1/crates/ordvec|static\.crates\.io/crates/ordvec' \
   || fail "publish-crate must download the just-published .crate from crates.io after \`cargo publish\` (post-publish byte-identity proof; pre-publish alone cannot inspect cargo publish's internal packaging)"
+
+pre_line="$(require_job_line publish-crate '^[[:space:]]+- name:[[:space:]]*Verify byte-identity vs the attested \.crate' 'a pre-publish byte-identity verification step')"
+oidc_line="$(require_job_line publish-crate '^[[:space:]]+- name:[[:space:]]*Mint a short-lived crates\.io credential' 'an OIDC credential mint step')"
+publish_line="$(require_job_line publish-crate '^[[:space:]]+- name:[[:space:]]*cargo publish' 'a cargo publish step')"
+post_line="$(require_job_line publish-crate '^[[:space:]]+- name:[[:space:]]*Post-publish byte-identity' 'a post-publish crates.io byte-identity step')"
+[ "$pre_line" -lt "$oidc_line" ] \
+  || fail "publish-crate must verify byte-identity BEFORE minting the crates.io OIDC credential"
+[ "$oidc_line" -lt "$publish_line" ] \
+  || fail "publish-crate must mint the crates.io OIDC credential BEFORE \`cargo publish\`"
+[ "$publish_line" -lt "$post_line" ] \
+  || fail "publish-crate must run the crates.io post-publish download/compare AFTER \`cargo publish\`"
+
+ppb="$(job_body publish-pypi)"
+printf '%s\n' "$ppb" | grep -qE 'Post-publish PyPI hashes match staged dist' \
+  || fail "publish-pypi must verify PyPI-served wheel/sdist hashes after publish"
+printf '%s\n' "$ppb" | grep -qE 'pypi\.org/pypi/ordvec/.+/json|pypi\.org/pypi/ordvec/' \
+  || fail "publish-pypi must query PyPI after publish for served file hashes"
 
 # ----------------------------------------------------------------------
 # (10) publish-github-release un-drafts ONLY AFTER both registry publishes succeed.

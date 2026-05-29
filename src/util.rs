@@ -22,10 +22,11 @@ pub(crate) fn cmp_finite_f32_then_index(
     rhs_value: f32,
     rhs_index: usize,
 ) -> std::cmp::Ordering {
-    lhs_value
-        .partial_cmp(&rhs_value)
-        .expect("ordvec: finite f32 comparator received non-finite value")
-        .then_with(|| lhs_index.cmp(&rhs_index))
+    if lhs_value == rhs_value {
+        lhs_index.cmp(&rhs_index)
+    } else {
+        lhs_value.total_cmp(&rhs_value)
+    }
 }
 
 /// Result-buffer length `nq * k`, panicking loudly on usize overflow

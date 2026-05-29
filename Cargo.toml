@@ -1,6 +1,6 @@
 [package]
 name = "ordvec"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; also clears the 1.87 floor from u64::is_multiple_of
 description = "Training-free ordinal & sign quantization for vector retrieval"
@@ -14,12 +14,37 @@ categories = ["algorithms", "science", "compression"]
 # Keep dev/internal files out of the published crate — they stay in the repo
 # but aren't useful to crate consumers.
 exclude = [
+    ".agents/",
+    ".claude/",
+    ".codex/",
     ".github/",
     ".gitignore",
+    ".playwright-mcp/",
     "CLAUDE.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "DCO",
+    "GOVERNANCE.md",
+    "RELEASING.md",
+    "ROADMAP.md",
+    "SECURITY.md",
+    "cliff.toml",
+    "THREAT_MODEL.md",
+    "codecov.yml",
     "deny.toml",
     "docs/ALTERNATIVES_CONSIDERED.md",
     "docs/FOLLOWUP_BODY_KERNEL_TIE_BREAK.md",
+    "docs/INDEX_PROVENANCE.md",
+    "docs/c-api.md",
+    "fuzz/",
+    "ordvec-ffi/",
+    "ordvec-go/",
+    "ordvec-manifest/",
+    "ordvec-python/",
+    "tests/__pycache__/",
+    "tests/release_publish_invariants.py",
+    "tests/release_publish_invariants.sh",
+    "tests/release_signed_release_invariants.sh",
 ]
 
 # docs.rs build configuration: build with default features only, so the

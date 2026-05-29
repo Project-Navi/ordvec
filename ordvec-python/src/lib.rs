@@ -76,6 +76,27 @@ fn check_width(got: usize, dim: usize) -> PyResult<()> {
     Ok(())
 }
 
+/// Mirror the core `add` capacity guard before releasing the GIL and entering
+/// Rust core asserts. Public Python `add()` methods should raise `ValueError`
+/// for over-capacity input, not a pyo3 `PanicException`.
+fn check_add_capacity(current: usize, adding: usize, elems_per_vec: usize) -> PyResult<()> {
+    let new_n = current
+        .checked_add(adding)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("n_vectors overflows usize"))?;
+    let max = ordvec_core::rank_io::MAX_VECTORS;
+    if new_n > max {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "index would exceed MAX_VECTORS ({max}); had {current}, adding {adding}"
+        )));
+    }
+    new_n.checked_mul(elems_per_vec).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(
+            "index buffer length (n_vectors * elems_per_vec) overflows usize",
+        )
+    })?;
+    Ok(())
+}
+
 /// Reject a `bits` value outside the `{1, 2, 4}` packing domain (used by the
 /// RankQuant pack/unpack/norm primitives) as a clean `ValueError` rather than
 /// letting the core `assert!` surface as a `PanicException`.
@@ -411,6 +432,7 @@ impl Rank {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
+        check_add_capacity(self.inner.len(), arr.nrows(), self.inner.dim())?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -591,6 +613,7 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
+        check_add_capacity(self.inner.len(), arr.nrows(), self.inner.bytes_per_vec())?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -812,6 +835,7 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
+        check_add_capacity(self.inner.len(), arr.nrows(), self.inner.dim() / 64)?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -1156,6 +1180,7 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
+        check_add_capacity(self.inner.len(), arr.nrows(), self.inner.dim() / 64)?;
         // Release the GIL around the parallel rank-transform / pack so other
         // Python threads run during a bulk add. `slice` (`&[f32]`) and
         // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
@@ -1661,4 +1686,28 @@ fn _ordvec(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("MAX_VECTORS", ordvec_core::rank_io::MAX_VECTORS)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_add_capacity;
+    use ordvec_core::rank_io::MAX_VECTORS;
+
+    #[test]
+    fn add_capacity_allows_exact_ceiling() {
+        check_add_capacity(MAX_VECTORS - 1, 1, 1).unwrap();
+        check_add_capacity(MAX_VECTORS, 0, 1).unwrap();
+    }
+
+    #[test]
+    fn add_capacity_rejects_vector_count_overflow() {
+        let err = check_add_capacity(MAX_VECTORS, 1, 1).unwrap_err();
+        assert!(err.to_string().contains("MAX_VECTORS"));
+    }
+
+    #[test]
+    fn add_capacity_rejects_buffer_length_overflow() {
+        let err = check_add_capacity(0, MAX_VECTORS, usize::MAX).unwrap_err();
+        assert!(err.to_string().contains("buffer length"));
+    }
 }
