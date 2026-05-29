@@ -548,6 +548,7 @@ fn verify_calibration(
     validate_calibration_shape(calibration, report);
     validate_calibration_encoder(calibration, &document.manifest.embedding, report);
     validate_calibration_ordinalization(calibration, &document.manifest.artifact, report);
+    validate_calibration_null_model_ordinalization(calibration, report);
     validate_calibration_profile(
         calibration,
         &document.manifest.artifact,
@@ -773,6 +774,30 @@ fn validate_calibration_ordinalization(
     }
 }
 
+fn validate_calibration_null_model_ordinalization(
+    calibration: &CalibrationProfileRef,
+    report: &mut VerificationReport,
+) {
+    if matches!(
+        (&calibration.null_model, &calibration.ordinalization),
+        (
+            NullModelSpec::UniformHypergeometric,
+            CalibrationOrdinalization::TopK { .. }
+        )
+    ) {
+        return;
+    }
+    if matches!(
+        &calibration.null_model,
+        NullModelSpec::UniformHypergeometric
+    ) {
+        report.error(
+            "calibration_null_model_ordinalization_mismatch",
+            "uniform_hypergeometric calibration requires top_k ordinalization",
+        );
+    }
+}
+
 fn validate_calibration_profile(
     calibration: &CalibrationProfileRef,
     artifact: &Artifact,
@@ -927,6 +952,42 @@ fn validate_calibration_parameterization(
             );
         }
         _ => {}
+    }
+    if !profile_parameterization_matches_ordinalization(
+        profile.parameterization,
+        &calibration.ordinalization,
+    ) {
+        report.error(
+            "calibration_profile_parameterization_ordinalization_mismatch",
+            "calibration profile parameterization is incompatible with calibration ordinalization",
+        );
+    }
+}
+
+fn profile_parameterization_matches_ordinalization(
+    parameterization: ProfileParameterization,
+    ordinalization: &CalibrationOrdinalization,
+) -> bool {
+    match ordinalization {
+        CalibrationOrdinalization::TopK { .. } => matches!(
+            parameterization,
+            ProfileParameterization::MarginalTopKFrequency
+                | ProfileParameterization::EmpiricalTailTable
+        ),
+        CalibrationOrdinalization::Bucket { .. } => matches!(
+            parameterization,
+            ProfileParameterization::BucketFrequency | ProfileParameterization::EmpiricalTailTable
+        ),
+        CalibrationOrdinalization::Sign { .. } => matches!(
+            parameterization,
+            ProfileParameterization::SignFrequency | ProfileParameterization::EmpiricalTailTable
+        ),
+        CalibrationOrdinalization::RankPosition { .. } => matches!(
+            parameterization,
+            ProfileParameterization::RankPositionFrequency
+                | ProfileParameterization::EmpiricalTailTable
+        ),
+        CalibrationOrdinalization::CallerDefined { .. } => true,
     }
 }
 

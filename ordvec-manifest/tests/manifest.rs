@@ -409,6 +409,7 @@ fn calibration_ordinalization_matches_artifact_formats() {
     let rq_case = tempfile::tempdir_in(temp.path()).unwrap();
     let rank_quant = write_index_kind(rq_case.path(), FixtureKind::RankQuant);
     let rq_manifest_path = rq_case.path().join("manifest.json");
+    let rq_profile_hash = write_profile(&rq_case.path().join("bucket.f64"), 16 * 4 * 8);
     let mut rq_manifest = create_manifest_for_index(
         &rank_quant,
         CreateRowIdentity::RowIdIdentity,
@@ -416,12 +417,16 @@ fn calibration_ordinalization_matches_artifact_formats() {
         &rq_manifest_path,
     )
     .unwrap();
-    rq_manifest.calibration = Some(uniform_calibration(
+    rq_manifest.calibration = Some(weighted_calibration(
         &rq_manifest,
+        "bucket.f64",
+        rq_profile_hash.clone(),
         CalibrationOrdinalization::Bucket {
             dim: rq_manifest.artifact.dim,
             bits: 2,
         },
+        ProfileParameterization::BucketFrequency,
+        vec![rq_manifest.artifact.dim, 4],
     ));
     let report = verify_manifest_with_base(
         rq_manifest.clone(),
@@ -429,12 +434,16 @@ fn calibration_ordinalization_matches_artifact_formats() {
         VerifyOptions::default(),
     );
     assert!(report.ok, "{:?}", report.errors);
-    rq_manifest.calibration = Some(uniform_calibration(
+    rq_manifest.calibration = Some(weighted_calibration(
         &rq_manifest,
+        "bucket.f64",
+        rq_profile_hash,
         CalibrationOrdinalization::Bucket {
             dim: rq_manifest.artifact.dim,
             bits: 4,
         },
+        ProfileParameterization::BucketFrequency,
+        vec![rq_manifest.artifact.dim, 4],
     ));
     let report = verify_manifest_with_base(rq_manifest, rq_case.path(), VerifyOptions::default());
     assert!(error_codes(&report).contains(&"calibration_ordinalization_artifact_mismatch"));
@@ -442,6 +451,7 @@ fn calibration_ordinalization_matches_artifact_formats() {
     let sign_case = tempfile::tempdir_in(temp.path()).unwrap();
     let sign = write_index_kind(sign_case.path(), FixtureKind::SignBitmap);
     let sign_manifest_path = sign_case.path().join("manifest.json");
+    let sign_profile_hash = write_profile(&sign_case.path().join("sign.f64"), 64 * 8);
     let mut sign_manifest = create_manifest_for_index(
         &sign,
         CreateRowIdentity::RowIdIdentity,
@@ -449,11 +459,15 @@ fn calibration_ordinalization_matches_artifact_formats() {
         &sign_manifest_path,
     )
     .unwrap();
-    sign_manifest.calibration = Some(uniform_calibration(
+    sign_manifest.calibration = Some(weighted_calibration(
         &sign_manifest,
+        "sign.f64",
+        sign_profile_hash,
         CalibrationOrdinalization::Sign {
             dim: sign_manifest.artifact.dim,
         },
+        ProfileParameterization::SignFrequency,
+        vec![sign_manifest.artifact.dim],
     ));
     let report =
         verify_manifest_with_base(sign_manifest, sign_case.path(), VerifyOptions::default());
@@ -462,6 +476,7 @@ fn calibration_ordinalization_matches_artifact_formats() {
     let rank_case = tempfile::tempdir_in(temp.path()).unwrap();
     let rank = write_index_kind(rank_case.path(), FixtureKind::Rank);
     let rank_manifest_path = rank_case.path().join("manifest.json");
+    let rank_profile_hash = write_profile(&rank_case.path().join("rank-position.f64"), 8 * 8 * 8);
     let mut rank_manifest = create_manifest_for_index(
         &rank,
         CreateRowIdentity::RowIdIdentity,
@@ -469,15 +484,81 @@ fn calibration_ordinalization_matches_artifact_formats() {
         &rank_manifest_path,
     )
     .unwrap();
-    rank_manifest.calibration = Some(uniform_calibration(
+    rank_manifest.calibration = Some(weighted_calibration(
         &rank_manifest,
+        "rank-position.f64",
+        rank_profile_hash,
         CalibrationOrdinalization::RankPosition {
             dim: rank_manifest.artifact.dim,
         },
+        ProfileParameterization::RankPositionFrequency,
+        vec![rank_manifest.artifact.dim, rank_manifest.artifact.dim],
     ));
     let report =
         verify_manifest_with_base(rank_manifest, rank_case.path(), VerifyOptions::default());
     assert!(report.ok, "{:?}", report.errors);
+}
+
+#[test]
+fn uniform_hypergeometric_requires_top_k_ordinalization() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let bitmap_case = tempfile::tempdir_in(temp.path()).unwrap();
+    let bitmap = write_index_kind(bitmap_case.path(), FixtureKind::Bitmap);
+    let bitmap_manifest_path = bitmap_case.path().join("manifest.json");
+    let mut bitmap_manifest = create_manifest_for_index(
+        &bitmap,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &bitmap_manifest_path,
+    )
+    .unwrap();
+    bitmap_manifest.calibration = Some(uniform_calibration(
+        &bitmap_manifest,
+        CalibrationOrdinalization::TopK {
+            dim: bitmap_manifest.artifact.dim,
+            k: 16,
+        },
+    ));
+    let report = verify_manifest_with_base(
+        bitmap_manifest,
+        bitmap_case.path(),
+        VerifyOptions::default(),
+    );
+    assert!(report.ok, "{:?}", report.errors);
+
+    for (kind, ordinalization) in [
+        (
+            FixtureKind::RankQuant,
+            CalibrationOrdinalization::Bucket { dim: 16, bits: 2 },
+        ),
+        (
+            FixtureKind::SignBitmap,
+            CalibrationOrdinalization::Sign { dim: 64 },
+        ),
+        (
+            FixtureKind::Rank,
+            CalibrationOrdinalization::RankPosition { dim: 8 },
+        ),
+    ] {
+        let case = tempfile::tempdir_in(temp.path()).unwrap();
+        let index = write_index_kind(case.path(), kind);
+        let manifest_path = case.path().join("manifest.json");
+        let mut manifest = create_manifest_for_index(
+            &index,
+            CreateRowIdentity::RowIdIdentity,
+            "test-embedding",
+            &manifest_path,
+        )
+        .unwrap();
+        manifest.calibration = Some(uniform_calibration(&manifest, ordinalization));
+        let report = verify_manifest_with_base(manifest, case.path(), VerifyOptions::default());
+        assert!(
+            error_codes(&report).contains(&"calibration_null_model_ordinalization_mismatch"),
+            "expected uniform_hypergeometric rejection: {:?}",
+            report.errors
+        );
+    }
 }
 
 #[test]
@@ -565,6 +646,22 @@ fn calibration_profile_artifact_checks_are_enforced() {
         .sample_count = 0;
     let report = verify_manifest_with_base(zero_sample, case.path(), VerifyOptions::default());
     assert!(error_codes(&report).contains(&"calibration_profile_sample_count_zero"));
+
+    let mut wrong_parameterization = manifest.clone();
+    let wrong_calibration = wrong_parameterization.calibration.as_mut().unwrap();
+    let wrong_profile = wrong_calibration.profile.as_mut().unwrap();
+    wrong_profile.parameterization = ProfileParameterization::BucketFrequency;
+    wrong_profile.shape.clear();
+    wrong_calibration.null_model = NullModelSpec::WeightedMarginalProfile {
+        parameterization: ProfileParameterization::BucketFrequency,
+    };
+    let report = verify_manifest_with_base(
+        wrong_parameterization,
+        case.path(),
+        VerifyOptions::default(),
+    );
+    assert!(error_codes(&report)
+        .contains(&"calibration_profile_parameterization_ordinalization_mismatch"));
 
     let outside = temp.path().join("outside-profile.f64");
     let outside_hash = write_profile(&outside, manifest.artifact.dim * std::mem::size_of::<f64>());

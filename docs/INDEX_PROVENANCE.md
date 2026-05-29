@@ -76,7 +76,9 @@ null. The verifier checks profile identity, path/hash integrity, encoder
 identity, and ordinalization compatibility; it does not judge whether the null
 model is scientifically adequate and does not compute likelihood ratios or tail
 probabilities. Calibration profiles must match the encoder identity declared by
-`embedding`; cross-encoder calibration is rejected by default.
+`embedding`; cross-encoder calibration is rejected by default. The
+`uniform_hypergeometric` null is reserved for top-K overlap calibration and is
+not accepted for bucket, sign, or rank-position ordinalizations.
 
 Recipes that consume sidecar manifests should run the verifier first, then
 load/search/rerank only if verification succeeds.
