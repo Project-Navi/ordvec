@@ -67,6 +67,24 @@ fn create_then_verify_identity_manifest() {
 }
 
 #[test]
+fn create_manifest_creates_output_parent_for_programmatic_callers() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("nested").join("manifest.json");
+
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    assert!(manifest_path.parent().unwrap().is_dir());
+    assert_eq!(manifest.row_identity.row_count(), 2);
+}
+
+#[test]
 fn schema_rejects_unknown_fields_and_bad_extension_keys() {
     let root = tempfile::tempdir().unwrap();
     let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
@@ -379,6 +397,7 @@ fn cli_create_verify_and_exit_codes() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
+    use rusqlite::Connection;
     use std::fs::OpenOptions;
 
     let temp = tempfile::tempdir().unwrap();
@@ -404,10 +423,31 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
         &document,
         &manifest_path,
         VerifyOptions::default(),
-        false,
+        true,
     )
     .unwrap();
     assert!(report.ok, "{:?}", report.errors);
+
+    let second_fresh = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert!(second_fresh.ok, "{:?}", second_fresh.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        count >= 2,
+        "rapid verifications must preserve report history"
+    );
 
     OpenOptions::new()
         .append(true)
@@ -424,7 +464,10 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
         true,
     )
     .unwrap();
-    assert!(cached.ok, "{:?}", cached.errors);
+    assert!(
+        !cached.ok,
+        "cache key mismatch must force fresh verification"
+    );
 
     let fresh = ordvec_manifest::sqlite::verify_with_registry(
         &db,
@@ -455,4 +498,19 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
     )
     .unwrap();
     assert!(!forced.ok);
+
+    let bin = env!("CARGO_BIN_EXE_ordvec-manifest");
+    let output = Command::new(bin)
+        .args([
+            "sqlite",
+            "activate",
+            "--db",
+            db.to_str().unwrap(),
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
 }

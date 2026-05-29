@@ -264,7 +264,7 @@ fn run_sqlite(command: SqliteCommands) -> Result<i32, ManifestError> {
                 force,
             )?;
             emit_report(&report, as_json)?;
-            Ok(if report.ok || force {
+            Ok(if report.ok {
                 0
             } else {
                 EXIT_VERIFICATION_FAILED

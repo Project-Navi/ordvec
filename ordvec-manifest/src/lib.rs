@@ -61,7 +61,8 @@ pub struct ManifestDocument {
 pub fn load_manifest_file(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
     let path = path.as_ref();
     let file = File::open(path)?;
-    let manifest: IndexManifest = serde_json::from_reader(file)?;
+    let reader = BufReader::new(file);
+    let manifest: IndexManifest = serde_json::from_reader(reader)?;
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -746,7 +747,7 @@ impl VerificationReport {
     fn new(manifest_id: Option<String>) -> Self {
         Self {
             ok: false,
-            checked_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            checked_at: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
             manifest_id,
             artifact: ArtifactReport::default(),
             row_identity: RowIdentityReport::default(),
@@ -872,6 +873,9 @@ pub fn create_manifest_for_index(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    if !out_base.exists() {
+        fs::create_dir_all(out_base)?;
+    }
     let metadata = probe_index_metadata(index_path)?;
     let index_hash = sha256_file(index_path)?;
     let artifact = Artifact {
@@ -1042,7 +1046,7 @@ fn manifest_relative_path(path: &Path, base_dir: &Path) -> String {
 
 fn path_to_manifest_string(path: &Path) -> String {
     if path.is_absolute() {
-        return path.display().to_string();
+        return path.display().to_string().replace('\\', "/");
     }
     let parts = path
         .components()

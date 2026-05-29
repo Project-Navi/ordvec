@@ -1057,6 +1057,73 @@ mod tests {
     }
 
     #[test]
+    fn probe_rejects_format_specific_header_errors() {
+        let mut bad_bits = Vec::new();
+        bad_bits.extend_from_slice(b"TVRQ");
+        bad_bits.push(VERSION);
+        bad_bits.push(3);
+        bad_bits.extend_from_slice(&8u32.to_le_bytes());
+        bad_bits.extend_from_slice(&0u32.to_le_bytes());
+        let path = forge("probe_bad_bits.tvrq", &bad_bits);
+        assert_eq!(
+            probe_index_metadata(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).ok();
+
+        let mut bad_rq_dim = Vec::new();
+        bad_rq_dim.extend_from_slice(b"TVRQ");
+        bad_rq_dim.push(VERSION);
+        bad_rq_dim.push(4);
+        bad_rq_dim.extend_from_slice(&8u32.to_le_bytes());
+        bad_rq_dim.extend_from_slice(&0u32.to_le_bytes());
+        let path = forge("probe_bad_rq_dim.tvrq", &bad_rq_dim);
+        assert_eq!(
+            probe_index_metadata(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).ok();
+
+        let mut bad_bitmap_dim = Vec::new();
+        bad_bitmap_dim.extend_from_slice(b"TVBM");
+        bad_bitmap_dim.push(VERSION);
+        bad_bitmap_dim.extend_from_slice(&100u32.to_le_bytes());
+        bad_bitmap_dim.extend_from_slice(&10u32.to_le_bytes());
+        bad_bitmap_dim.extend_from_slice(&0u32.to_le_bytes());
+        let path = forge("probe_bad_bitmap_dim.tvbm", &bad_bitmap_dim);
+        assert_eq!(
+            probe_index_metadata(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).ok();
+
+        let mut bad_n_top = Vec::new();
+        bad_n_top.extend_from_slice(b"TVBM");
+        bad_n_top.push(VERSION);
+        bad_n_top.extend_from_slice(&64u32.to_le_bytes());
+        bad_n_top.extend_from_slice(&64u32.to_le_bytes());
+        bad_n_top.extend_from_slice(&0u32.to_le_bytes());
+        let path = forge("probe_bad_n_top.tvbm", &bad_n_top);
+        assert_eq!(
+            probe_index_metadata(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).ok();
+
+        let mut bad_sign_dim = Vec::new();
+        bad_sign_dim.extend_from_slice(b"TVSB");
+        bad_sign_dim.push(VERSION);
+        bad_sign_dim.extend_from_slice(&32u32.to_le_bytes());
+        bad_sign_dim.extend_from_slice(&0u32.to_le_bytes());
+        let path = forge("probe_bad_sign_dim.tvsb", &bad_sign_dim);
+        assert_eq!(
+            probe_index_metadata(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn probe_does_not_validate_payload_row_invariants() {
         let mut forged = Vec::new();
         forged.extend_from_slice(b"TVBM");
