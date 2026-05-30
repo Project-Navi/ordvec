@@ -26,6 +26,10 @@ PROJECT = "ordvec"
 DIST_SUFFIXES = (".whl", ".tar.gz")
 
 
+class PyPIReadError(RuntimeError):
+    """PyPI returned an unusable response for a retryable read."""
+
+
 def fail(message: str) -> None:
     print(f"::error::{message}", file=sys.stderr)
     raise SystemExit(1)
@@ -69,9 +73,9 @@ def fetch_pypi_payload(version: str) -> dict[str, Any] | None:
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
-        fail(f"could not read {url}: HTTP {exc.code}")
+        raise PyPIReadError(f"could not read {url}: HTTP {exc.code}") from exc
     except Exception as exc:  # noqa: BLE001 - release diagnostics should be direct.
-        fail(f"could not read {url}: {exc!r}")
+        raise PyPIReadError(f"could not read {url}: {exc!r}") from exc
     raise AssertionError("unreachable")
 
 
@@ -92,7 +96,7 @@ def pypi_dist_map(payload: dict[str, Any]) -> dict[str, dict[str, str]]:
             continue
         dist[filename] = {"url": url, "sha256": sha256}
     if not dist:
-        fail("PyPI JSON did not contain any wheel/sdist files")
+        raise PyPIReadError("PyPI JSON did not contain any wheel/sdist files")
     return dist
 
 
@@ -129,7 +133,10 @@ def ensure_same_filenames(local: dict[str, Path], remote: dict[str, dict[str, st
 def canonicalize(version: str, built_dir: Path, out_dir: Path) -> None:
     built = dist_files(built_dir)
     prepare_empty_dir(out_dir)
-    payload = fetch_pypi_payload(version)
+    try:
+        payload = fetch_pypi_payload(version)
+    except PyPIReadError as exc:
+        fail(str(exc))
 
     if payload is None:
         for filename, path in built.items():
@@ -139,7 +146,10 @@ def canonicalize(version: str, built_dir: Path, out_dir: Path) -> None:
         print(f"OK: PyPI has no {PROJECT} {version}; canonical dist uses current build")
         return
 
-    remote = pypi_dist_map(payload)
+    try:
+        remote = pypi_dist_map(payload)
+    except PyPIReadError as exc:
+        fail(str(exc))
     ensure_same_filenames(built, remote)
 
     mismatched: list[str] = []
@@ -179,13 +189,17 @@ def verify(version: str, dist_dir: Path, attempts: int, sleep_seconds: float) ->
     url = f"https://pypi.org/pypi/{PROJECT}/{version}/json"
     last_error = "not checked"
     for attempt in range(1, attempts + 1):
-        remote = remote_hashes(version)
-        if remote == local:
-            print(f"OK: PyPI-served hashes match canonical dist for {PROJECT} {version}")
-            return
-        last_error = f"local={local!r} remote={remote!r}"
+        try:
+            remote = remote_hashes(version)
+            if remote == local:
+                print(f"OK: PyPI-served hashes match canonical dist for {PROJECT} {version}")
+                return
+            last_error = f"local={local!r} remote={remote!r}"
+        except PyPIReadError as exc:
+            last_error = str(exc)
         print(f"waiting for PyPI JSON/hash propagation ({attempt}/{attempts}): {last_error}", file=sys.stderr)
-        time.sleep(sleep_seconds)
+        if attempt != attempts:
+            time.sleep(sleep_seconds)
     fail(f"PyPI hash verification failed for {url}: {last_error}")
 
 
