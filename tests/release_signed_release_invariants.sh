@@ -7,16 +7,20 @@
 # unsigned releases may keep the score below 10 temporarily. The same graph
 # keeps the build-attest-publish chain honest:
 #
-#     build-{crate,wheels,sdist}                  (artifacts)
+#     build-{crate,wheels,sdist}                  (raw artifacts)
 #         |
-#         +-> attest         (id-token + attestations + .sigstore.json)
-#         +-> provenance     (slsa-github-generator @vX.Y.Z, .intoto.jsonl)
+#         +-> pypi-canonical-dist (current build, or verified immutable PyPI files)
+#         |
+#         +-> attest         (id-token + attestations + .sigstore.json;
+#         |                   crate-only when PyPI files already exist)
+#         +-> provenance     (slsa-github-generator @vX.Y.Z, .intoto.jsonl;
+#         |                   crate-only when PyPI files already exist)
 #         |
 #         v
-#     release-assets-draft   (uploads .crate/.whl/.tar.gz/.sigstore.json/.intoto.jsonl to DRAFT release)
+#     release-assets-draft   (uploads .crate/canonical .whl/.tar.gz/.sigstore.json/.intoto.jsonl to DRAFT release)
 #         |
 #         +--> publish-crate (byte-identity check vs attested .crate, then cargo publish)
-#         +--> publish-pypi  (Trusted Publishing)
+#         +--> publish-pypi  (Trusted Publishing, or existing-file verification)
 #               |
 #               v
 #         publish-github-release (un-draft, ONLY after both publishes succeed)
@@ -70,7 +74,7 @@ require_job_line() {
 # (1) release-assets-draft needs attest + provenance + require-ci-green + notes
 #     + exact linux/aarch64 wheel smoke
 # ----------------------------------------------------------------------
-for dep in attest provenance require-ci-green notes smoke-linux-aarch64-wheel; do
+for dep in attest provenance pypi-canonical-dist require-ci-green notes smoke-linux-aarch64-wheel; do
   job_needs release-assets-draft "$dep" \
     || fail "release-assets-draft must \`needs: $dep\` (fail-closed on missing provenance/CI)"
 done
@@ -84,6 +88,8 @@ for ext in '\.crate' '\.whl' '\.tar\.gz' '\.sigstore\.json' '\.intoto\.jsonl'; d
   printf '%s\n' "$body_draft" | grep -qE "dist/\*${ext}([^a-zA-Z]|$)" \
     || fail "release-assets-draft must \`gh release upload\` dist/*$(printf '%s' "$ext" | sed 's/\\//g')"
 done
+printf '%s\n' "$body_draft" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
+  || fail "release-assets-draft must upload canonical Python dist, not raw rebuilt wheel/sdist artifacts"
 printf '%s\n' "$body_draft" | grep -qE "$github_repo_env_re" \
   || fail "release-assets-draft must set \`GH_REPO: \${{ github.repository }}\` (no checkout, so gh release upload needs explicit repo context)"
 
@@ -172,11 +178,21 @@ post_line="$(require_job_line publish-crate '^[[:space:]]+- name:[[:space:]]*Pos
 [ "$publish_line" -lt "$post_line" ] \
   || fail "publish-crate must run the crates.io post-publish download/compare AFTER \`cargo publish\`"
 
+pcd="$(job_body pypi-canonical-dist)"
+printf '%s\n' "$pcd" | grep -qE 'release_pypi_canonical_dist\.py canonicalize' \
+  || fail "pypi-canonical-dist must canonicalize Python artifacts before attestation/release upload"
+printf '%s\n' "$pcd" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
+  || fail "pypi-canonical-dist must upload the canonical Python dist artifact"
+
 ppb="$(job_body publish-pypi)"
-printf '%s\n' "$ppb" | grep -qE 'Post-publish PyPI hashes match staged dist' \
-  || fail "publish-pypi must verify PyPI-served wheel/sdist hashes after publish"
-printf '%s\n' "$ppb" | grep -qE 'pypi\.org/pypi/ordvec/.+/json|pypi\.org/pypi/ordvec/' \
-  || fail "publish-pypi must query PyPI after publish for served file hashes"
+job_needs publish-pypi pypi-canonical-dist \
+  || fail "publish-pypi must \`needs: pypi-canonical-dist\` (publish/verify exactly the canonical files)"
+printf '%s\n' "$ppb" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
+  || fail "publish-pypi must consume pypi-canonical-dist, not raw rebuilt wheel/sdist artifacts"
+printf '%s\n' "$ppb" | grep -qE 'release_pypi_canonical_dist\.py verify' \
+  || fail "publish-pypi must verify PyPI-served wheel/sdist hashes against canonical dist"
+grep -q 'pypi.org/pypi' tests/release_pypi_canonical_dist.py \
+  || fail "release_pypi_canonical_dist.py must query PyPI for served file hashes"
 
 # ----------------------------------------------------------------------
 # (10) publish-github-release un-drafts ONLY AFTER both registry publishes succeed.

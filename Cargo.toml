@@ -43,6 +43,8 @@ exclude = [
     "ordvec-python/",
     "tests/__pycache__/",
     "tests/release_environment_settings.sh",
+    "tests/release_pypi_canonical_dist.py",
+    "tests/release_pypi_canonical_dist_tests.py",
     "tests/release_publish_invariants.py",
     "tests/release_publish_invariants.sh",
     "tests/release_signed_release_invariants.sh",

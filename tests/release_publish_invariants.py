@@ -13,6 +13,7 @@ from typing import Any
 
 
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
+PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 
 
 def fail(message: str) -> None:
@@ -93,79 +94,180 @@ def empty(value: Any) -> bool:
     return value is None or value == ""
 
 
+def has_need(job: dict[str, Any], needed: str) -> bool:
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return needs == needed
+    if isinstance(needs, list):
+        return needed in needs
+    return False
+
+
+def contains_text(value: Any, needle: str) -> bool:
+    return isinstance(value, str) and needle in value
+
+
+def read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        fail(f"{path}: could not read workflow: {exc}")
+
+
+def check_hash_requirement_temp_paths(paths: list[str]) -> None:
+    for path in paths:
+        workflow_text = read_text(path)
+        if "/tmp/ordvec-" in workflow_text:
+            fail(f"{path}: hash requirement files must be written under ${{RUNNER_TEMP}}, not /tmp")
+
+
+def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get("smoke-linux-aarch64-wheel"), f"{path}: jobs.smoke-linux-aarch64-wheel")
+    steps = sequence(job.get("steps"), f"{path}: jobs.smoke-linux-aarch64-wheel.steps")
+
+    matching_steps: list[dict[str, Any]] = []
+    for raw_step in steps:
+        step = mapping(raw_step, f"{path}: jobs.smoke-linux-aarch64-wheel.steps[]")
+        if step.get("name") == "Install exact wheel and run tiny RankQuant/Bitmap smoke":
+            matching_steps.append(step)
+
+    if len(matching_steps) != 1:
+        fail(f"{path}: smoke-linux-aarch64-wheel must have exactly one install/smoke step")
+
+    run = matching_steps[0].get("run")
+    if not isinstance(run, str):
+        fail(f"{path}: smoke-linux-aarch64-wheel install/smoke step must be a run step")
+    if "manylinux_2_17_aarch64" in run:
+        fail(f"{path}: linux/aarch64 wheel selector must not pin a specific manylinux policy tag")
+    if not all(needle in run for needle in ('"aarch64"', '"manylinux"', '"musllinux"', "len(wheels) != 1")):
+        fail(f"{path}: linux/aarch64 wheel selector must match architecture and assert exactly one wheel")
+
+
+def check_pypi_canonical_dist(workflow: dict[str, Any], path: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get("pypi-canonical-dist"), f"{path}: jobs.pypi-canonical-dist")
+    steps = sequence(job.get("steps"), f"{path}: jobs.pypi-canonical-dist.steps")
+
+    for needed in ("build-wheels", "build-sdist"):
+        if not has_need(job, needed):
+            fail(f"{path}: pypi-canonical-dist must need {needed}")
+
+    outputs = mapping(job.get("outputs"), f"{path}: jobs.pypi-canonical-dist.outputs")
+    if outputs.get("source") != "${{ steps.canonicalize.outputs.source }}":
+        fail(f"{path}: pypi-canonical-dist must expose the canonical source output")
+
+    wheels_downloads: list[int] = []
+    sdist_downloads: list[int] = []
+    canonicalize_steps: list[dict[str, Any]] = []
+    uploads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.pypi-canonical-dist.steps[{index}]")
+        action = action_name(step)
+        if action == "actions/download-artifact":
+            with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
+            artifact_path = norm_path(with_map.get("path"))
+            if with_map.get("pattern") == "wheels-*" and boolish_true(with_map.get("merge-multiple")):
+                if artifact_path != "built-dist":
+                    fail(f"{path}: canonical wheel download must target built-dist")
+                wheels_downloads.append(index)
+            elif with_map.get("name") == "sdist":
+                if artifact_path != "built-dist":
+                    fail(f"{path}: canonical sdist download must target built-dist")
+                sdist_downloads.append(index)
+        elif action == "actions/upload-artifact":
+            with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
+            if with_map.get("name") == "pypi-canonical-dist":
+                uploads.append((index, step, with_map))
+
+        run = step.get("run")
+        if contains_text(run, "tests/release_pypi_canonical_dist.py canonicalize"):
+            canonicalize_steps.append(step)
+            if "--built-dir built-dist" not in run or "--out-dir canonical-dist" not in run:
+                fail(f"{path}: canonicalize step must read built-dist and write canonical-dist")
+
+    if len(wheels_downloads) != 1:
+        fail(f"{path}: pypi-canonical-dist must download exactly one wheels-* artifact set")
+    if len(sdist_downloads) != 1:
+        fail(f"{path}: pypi-canonical-dist must download exactly one sdist artifact")
+    if len(canonicalize_steps) != 1:
+        fail(f"{path}: pypi-canonical-dist must run release_pypi_canonical_dist.py canonicalize")
+    if len(uploads) != 1:
+        fail(f"{path}: pypi-canonical-dist must upload exactly one pypi-canonical-dist artifact")
+
+    _, _, upload_with = uploads[0]
+    upload_path = upload_with.get("path")
+    if not (
+        contains_text(upload_path, "canonical-dist/*.whl")
+        and contains_text(upload_path, "canonical-dist/*.tar.gz")
+    ):
+        fail(f"{path}: pypi-canonical-dist upload must include canonical wheels and sdist")
+
+
 def check_publish_pypi(workflow: dict[str, Any], path: str) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     job = mapping(jobs.get("publish-pypi"), f"{path}: jobs.publish-pypi")
     steps = sequence(job.get("steps"), f"{path}: jobs.publish-pypi.steps")
 
+    if not has_need(job, "pypi-canonical-dist"):
+        fail(f"{path}: publish-pypi must need pypi-canonical-dist")
+
     publish_steps: list[tuple[int, dict[str, Any]]] = []
-    artifact_downloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    canonical_downloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    verify_steps: list[dict[str, Any]] = []
 
     for index, raw_step in enumerate(steps):
         step = mapping(raw_step, f"{path}: jobs.publish-pypi.steps[{index}]")
         action = action_name(step)
         if action == "pypa/gh-action-pypi-publish":
             publish_steps.append((index, step))
-        if action != "actions/download-artifact":
-            continue
+        if action == "actions/download-artifact":
+            with_block = step.get("with", {})
+            with_map = mapping(with_block, f"{path}: {step_label(index, step)} with")
+            if with_map.get("name") == "pypi-canonical-dist":
+                canonical_downloads.append((index, step, with_map))
+            elif norm_path(with_map.get("path")) == "dist":
+                fail(f"{path}: {step_label(index, step)} downloads a non-canonical artifact into dist")
 
-        with_block = step.get("with", {})
-        with_map = mapping(with_block, f"{path}: {step_label(index, step)} with")
-        artifact_downloads.append((index, step, with_map))
+        run = step.get("run")
+        if contains_text(run, "tests/release_pypi_canonical_dist.py verify"):
+            verify_steps.append(step)
+            if "--dist-dir dist" not in run:
+                fail(f"{path}: PyPI verify step must verify dist")
 
     if len(publish_steps) != 1:
         fail(f"{path}: publish-pypi must have exactly one pypa/gh-action-pypi-publish step")
 
     publish_index, publish_step = publish_steps[0]
+    if publish_step.get("if") != "needs.pypi-canonical-dist.outputs.source == 'build'":
+        fail(f"{path}: PyPI publish step must only run when canonical source is the current build")
     publish_with = mapping(
         publish_step.get("with", {}), f"{path}: {step_label(publish_index, publish_step)} with"
     )
     if norm_path(publish_with.get("packages-dir")) != "dist":
         fail(f"{path}: PyPI publish step must upload packages-dir: dist")
-    if not boolish_true(publish_with.get("skip-existing")):
-        fail(
-            f"{path}: PyPI publish step must set skip-existing: true so a recovery "
-            "rerun is idempotent after PyPI has already accepted the version"
-        )
 
-    wheels: list[int] = []
-    sdists: list[int] = []
-    for index, step, with_map in artifact_downloads:
+    if len(canonical_downloads) != 1:
+        fail(f"{path}: publish-pypi must download exactly one pypi-canonical-dist artifact")
+    download_index, download_step, download_with = canonical_downloads[0]
+    if download_index > publish_index:
+        fail(f"{path}: {step_label(download_index, download_step)} must run before the PyPI publish step")
+    if norm_path(download_with.get("path")) != "dist":
+        fail(f"{path}: publish-pypi must download pypi-canonical-dist into dist")
+
+    if len(verify_steps) != 1:
+        fail(f"{path}: publish-pypi must run release_pypi_canonical_dist.py verify exactly once")
+
+    for index, step in enumerate(steps):
+        if action_name(step) != "actions/download-artifact":
+            continue
+        with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
         label = step_label(index, step)
         artifact_path = norm_path(with_map.get("path"))
-        if artifact_path != "dist":
-            fail(
-                f"{path}: {label} downloads artifacts to {artifact_path or 'the default path'!r}; "
-                "publish-pypi may only download wheels-* and sdist into dist"
-            )
-        if index > publish_index:
-            fail(f"{path}: {label} downloads into dist after the PyPI publish step")
-
-        name = with_map.get("name")
-        pattern = with_map.get("pattern")
-        is_wheels = (
-            pattern == "wheels-*"
-            and empty(name)
-            and boolish_true(with_map.get("merge-multiple"))
-        )
-        is_sdist = name == "sdist" and empty(pattern)
-
-        if is_wheels:
-            wheels.append(index)
-            continue
-        if is_sdist:
-            sdists.append(index)
-            continue
-
-        fail(
-            f"{path}: {label} downloads into dist but is not the allowed "
-            "'pattern: wheels-*' or 'name: sdist' artifact"
-        )
-
-    if len(wheels) != 1:
-        fail(f"{path}: publish-pypi must download exactly one wheels-* artifact set into dist")
-    if len(sdists) != 1:
-        fail(f"{path}: publish-pypi must download exactly one sdist artifact into dist")
+        if artifact_path == "dist" and with_map.get("name") != "pypi-canonical-dist":
+            fail(f"{path}: {label} must not place non-canonical artifacts in dist")
 
 
 def check_publish_crate(workflow: dict[str, Any], path: str) -> None:
@@ -225,6 +327,9 @@ def check_publish_crate(workflow: dict[str, Any], path: str) -> None:
 
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
+    check_hash_requirement_temp_paths([WORKFLOW_PATH, PYTHON_WORKFLOW_PATH])
+    check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
+    check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
     check_publish_crate(workflow, WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)
 
