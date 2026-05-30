@@ -79,10 +79,13 @@ done
 # (2) release-assets-draft uploads every required asset class to the Release
 # ----------------------------------------------------------------------
 body_draft="$(job_body release-assets-draft)"
+github_repo_env_re='^[[:space:]]+GH_REPO:[[:space:]]*"?\$\{\{[[:space:]]*github\.repository[[:space:]]*\}\}"?[[:space:]]*$'
 for ext in '\.crate' '\.whl' '\.tar\.gz' '\.sigstore\.json' '\.intoto\.jsonl'; do
   printf '%s\n' "$body_draft" | grep -qE "dist/\*${ext}([^a-zA-Z]|$)" \
     || fail "release-assets-draft must \`gh release upload\` dist/*$(printf '%s' "$ext" | sed 's/\\//g')"
 done
+printf '%s\n' "$body_draft" | grep -qE "$github_repo_env_re" \
+  || fail "release-assets-draft must set \`GH_REPO: \${{ github.repository }}\` (no checkout, so gh release upload needs explicit repo context)"
 
 # ----------------------------------------------------------------------
 # (3) release-assets-draft must NOT un-draft (the dedicated un-draft job owns
@@ -185,5 +188,7 @@ done
 unp="$(job_body publish-github-release)"
 printf '%s\n' "$unp" | grep -qE 'gh release edit.*--draft=false' \
   || fail "publish-github-release must \`gh release edit <tag> --draft=false\` (this is the sole un-draft point)"
+printf '%s\n' "$unp" | grep -qE "$github_repo_env_re" \
+  || fail "publish-github-release must set \`GH_REPO: \${{ github.repository }}\` (no checkout, so gh release edit needs explicit repo context)"
 
 echo "OK: signed-release invariants hold."
