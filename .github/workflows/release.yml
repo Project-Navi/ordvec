@@ -779,16 +779,25 @@ jobs:
           [ -f "$ATTESTED" ] || { echo "::error::attested .crate missing at $ATTESTED"; exit 1; }
           A_SHA=$(sha256sum "$ATTESTED" | cut -d' ' -f1)
           # crates.io's stable download endpoint (follows redirect to the CDN).
+          # crates.io rejects curl's default User-Agent with HTTP 403, so send a
+          # project-specific UA and keep the static CDN URL as an equivalent
+          # content-addressed fallback.
           # CDN propagation can take a few seconds after publish — retry briefly.
-          URL="https://crates.io/api/v1/crates/ordvec/${VERSION}/download"
+          API_URL="https://crates.io/api/v1/crates/ordvec/${VERSION}/download"
+          STATIC_URL="https://static.crates.io/crates/ordvec/ordvec-${VERSION}.crate"
+          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
+          PUBLISHED="${RUNNER_TEMP}/published.crate"
           for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if curl -fsSL "$URL" -o /tmp/published.crate; then break; fi
+            rm -f "$PUBLISHED"
+            if curl -fsSL --user-agent "$CRATES_IO_USER_AGENT" "$API_URL" -o "$PUBLISHED"; then break; fi
+            if curl -fsSL --user-agent "$CRATES_IO_USER_AGENT" "$STATIC_URL" -o "$PUBLISHED"; then break; fi
+            rm -f "$PUBLISHED"
             echo "  waiting for crates.io to serve ordvec ${VERSION} (${i}/12)..."
-            sleep 5
+            if [ "$i" != 12 ]; then sleep 5; fi
           done
-          [ -s /tmp/published.crate ] \
-            || { echo "::error::could not download published .crate from $URL after retries"; exit 1; }
-          P_SHA=$(sha256sum /tmp/published.crate | cut -d' ' -f1)
+          [ -s "$PUBLISHED" ] \
+            || { echo "::error::could not download published .crate from $API_URL or $STATIC_URL after retries"; exit 1; }
+          P_SHA=$(sha256sum "$PUBLISHED" | cut -d' ' -f1)
           echo "attested:         $A_SHA"
           echo "crates.io-served: $P_SHA"
           if [ "$A_SHA" != "$P_SHA" ]; then

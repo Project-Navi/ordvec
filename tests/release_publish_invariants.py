@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -113,6 +115,60 @@ def read_text(path: str) -> str:
             return fh.read()
     except OSError as exc:
         fail(f"{path}: could not read workflow: {exc}")
+
+
+def shell_vars(name: str) -> set[str]:
+    return {f"${name}", f"${{{name}}}"}
+
+
+def shell_curl_commands(script: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if "curl" not in line:
+            continue
+        if line.startswith("if "):
+            line = line[3:].strip()
+        line = line.split("; then", 1)[0].strip().rstrip(";")
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            continue
+        if words and words[0] == "curl":
+            commands.append(words)
+    return commands
+
+
+def has_shell_arg(words: list[str], values: set[str]) -> bool:
+    return any(word in values for word in words)
+
+
+def has_shell_option_value(words: list[str], options: set[str], values: set[str]) -> bool:
+    for index, word in enumerate(words):
+        for option in options:
+            if word == option and index + 1 < len(words) and words[index + 1] in values:
+                return True
+            if word.startswith(f"{option}=") and word.split("=", 1)[1] in values:
+                return True
+            if len(option) == 2 and word.startswith(option) and word != option and word[2:] in values:
+                return True
+    return False
+
+
+def has_assignment(run: str, name: str, url_pattern: str) -> bool:
+    quoted = rf"{name}=([\"']){url_pattern}\1"
+    unquoted = rf"{name}={url_pattern}"
+    return any(
+        re.fullmatch(rf"(?:{quoted}|{unquoted})", line.strip()) for line in run.splitlines()
+    )
+
+
+def readback_curl_uses(words: list[str], url_var: str) -> bool:
+    return (
+        has_shell_arg(words, shell_vars(url_var))
+        and has_shell_option_value(words, {"--user-agent", "-A"}, shell_vars("CRATES_IO_USER_AGENT"))
+        and has_shell_option_value(words, {"--output", "-o"}, shell_vars("PUBLISHED"))
+    )
 
 
 def check_hash_requirement_temp_paths(paths: list[str]) -> None:
@@ -323,6 +379,34 @@ def check_publish_crate(workflow: dict[str, Any], path: str) -> None:
                 f"{path}: publish-crate step {name!r} must read the attested .crate "
                 "from ${RUNNER_TEMP}/attested"
             )
+        if name == "Post-publish byte-identity (download from crates.io == attested)":
+            if "/tmp/published.crate" in run:
+                fail(f"{path}: publish-crate post-publish readback must not write to /tmp")
+            if not (
+                "${RUNNER_TEMP}/published.crate" in run or "$RUNNER_TEMP/published.crate" in run
+            ):
+                fail(f"{path}: publish-crate post-publish readback must write under ${{RUNNER_TEMP}}")
+            version = r"\$(?:\{VERSION\}|VERSION)"
+            if not has_assignment(
+                run, "API_URL", rf"https://crates\.io/api/v1/crates/ordvec/{version}/download"
+            ):
+                fail(f"{path}: publish-crate post-publish readback must define the crates.io API URL")
+            if not has_assignment(
+                run, "STATIC_URL", rf"https://static\.crates\.io/crates/ordvec/ordvec-{version}\.crate"
+            ):
+                fail(f"{path}: publish-crate post-publish readback must define the static.crates.io fallback")
+
+            curl_commands = shell_curl_commands(run)
+            if not any(readback_curl_uses(words, "API_URL") for words in curl_commands):
+                fail(
+                    f"{path}: publish-crate post-publish readback must curl $API_URL "
+                    "with CRATES_IO_USER_AGENT into $PUBLISHED"
+                )
+            if not any(readback_curl_uses(words, "STATIC_URL") for words in curl_commands):
+                fail(
+                    f"{path}: publish-crate post-publish readback must curl $STATIC_URL "
+                    "with CRATES_IO_USER_AGENT into $PUBLISHED"
+                )
 
 
 def main() -> None:
