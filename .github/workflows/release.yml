@@ -573,7 +573,9 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist-crate
-          path: attested
+          # Keep the downloaded artifact outside the checkout. `cargo package`
+          # refuses to run when untracked files dirty the working tree.
+          path: ${{ runner.temp }}/attested
       - name: Re-package the crate (must be byte-identical to the attested .crate)
         run: cargo package -p ordvec --locked
       - name: Verify byte-identity vs the attested .crate
@@ -581,7 +583,7 @@ jobs:
           VERSION: ${{ needs.guard.outputs.version }}
         run: |
           set -euo pipefail
-          ATTESTED="attested/ordvec-${VERSION}.crate"
+          ATTESTED="${RUNNER_TEMP}/attested/ordvec-${VERSION}.crate"
           PACKAGED="target/package/ordvec-${VERSION}.crate"
           [ -f "$ATTESTED" ] || { echo "::error::attested .crate not found at $ATTESTED"; exit 1; }
           [ -f "$PACKAGED" ] || { echo "::error::packaged .crate not found at $PACKAGED"; exit 1; }
@@ -619,7 +621,7 @@ jobs:
           VERSION: ${{ needs.guard.outputs.version }}
         run: |
           set -euo pipefail
-          ATTESTED="attested/ordvec-${VERSION}.crate"
+          ATTESTED="${RUNNER_TEMP}/attested/ordvec-${VERSION}.crate"
           [ -f "$ATTESTED" ] || { echo "::error::attested .crate missing at $ATTESTED"; exit 1; }
           A_SHA=$(sha256sum "$ATTESTED" | cut -d' ' -f1)
           # crates.io's stable download endpoint (follows redirect to the CDN).
@@ -672,6 +674,10 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist
+          # Makes release recovery idempotent if PyPI already accepted this
+          # version but another registry publish failed. The next step still
+          # fails closed unless PyPI-served hashes equal the staged dist files.
+          skip-existing: true
       - name: Post-publish PyPI hashes match staged dist
         env:
           VERSION: ${{ needs.guard.outputs.version }}

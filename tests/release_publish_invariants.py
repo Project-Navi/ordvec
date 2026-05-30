@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structural release publish invariants for the PyPI upload job."""
+"""Structural release publish invariants for registry upload jobs."""
 
 from __future__ import annotations
 
@@ -122,6 +122,11 @@ def check_publish_pypi(workflow: dict[str, Any], path: str) -> None:
     )
     if norm_path(publish_with.get("packages-dir")) != "dist":
         fail(f"{path}: PyPI publish step must upload packages-dir: dist")
+    if not boolish_true(publish_with.get("skip-existing")):
+        fail(
+            f"{path}: PyPI publish step must set skip-existing: true so a recovery "
+            "rerun is idempotent after PyPI has already accepted the version"
+        )
 
     wheels: list[int] = []
     sdists: list[int] = []
@@ -163,8 +168,64 @@ def check_publish_pypi(workflow: dict[str, Any], path: str) -> None:
         fail(f"{path}: publish-pypi must download exactly one sdist artifact into dist")
 
 
+def check_publish_crate(workflow: dict[str, Any], path: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get("publish-crate"), f"{path}: jobs.publish-crate")
+    steps = sequence(job.get("steps"), f"{path}: jobs.publish-crate.steps")
+
+    crate_downloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.publish-crate.steps[{index}]")
+        if action_name(step) != "actions/download-artifact":
+            continue
+        with_block = step.get("with", {})
+        with_map = mapping(with_block, f"{path}: {step_label(index, step)} with")
+        if with_map.get("name") == "dist-crate":
+            crate_downloads.append((index, step, with_map))
+
+    if len(crate_downloads) != 1:
+        fail(f"{path}: publish-crate must download exactly one dist-crate artifact")
+
+    index, step, with_map = crate_downloads[0]
+    label = step_label(index, step)
+    artifact_path = norm_path(with_map.get("path"))
+    if artifact_path != "${{ runner.temp }}/attested":
+        fail(
+            f"{path}: {label} downloads dist-crate to {artifact_path or 'the default path'!r}; "
+            "it must use ${{ runner.temp }}/attested so cargo package sees a clean checkout"
+        )
+
+    verify_step_names = {
+        "Verify byte-identity vs the attested .crate",
+        "Post-publish byte-identity (download from crates.io == attested)",
+    }
+    verify_steps: list[dict[str, Any]] = []
+    found_names: set[str] = set()
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.publish-crate.steps[{index}]")
+        name = step.get("name")
+        if name in verify_step_names:
+            verify_steps.append(step)
+            found_names.add(name)
+    if found_names != verify_step_names:
+        fail(f"{path}: publish-crate must have both attested .crate verification steps")
+
+    for step in verify_steps:
+        name = step.get("name")
+        run = step.get("run")
+        if not isinstance(run, str):
+            fail(f"{path}: publish-crate step {name!r} must be a run step")
+        if "${RUNNER_TEMP}/attested/ordvec-${VERSION}.crate" not in run:
+            fail(
+                f"{path}: publish-crate step {name!r} must read the attested .crate "
+                "from ${RUNNER_TEMP}/attested"
+            )
+
+
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
+    check_publish_crate(workflow, WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)
 
 
