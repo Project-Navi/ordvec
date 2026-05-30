@@ -13,6 +13,7 @@ from typing import Any
 
 
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
+PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 
 
 def fail(message: str) -> None:
@@ -104,6 +105,44 @@ def has_need(job: dict[str, Any], needed: str) -> bool:
 
 def contains_text(value: Any, needle: str) -> bool:
     return isinstance(value, str) and needle in value
+
+
+def read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        fail(f"{path}: could not read workflow: {exc}")
+
+
+def check_hash_requirement_temp_paths(paths: list[str]) -> None:
+    for path in paths:
+        workflow_text = read_text(path)
+        if "/tmp/ordvec-" in workflow_text:
+            fail(f"{path}: hash requirement files must be written under ${{RUNNER_TEMP}}, not /tmp")
+
+
+def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get("smoke-linux-aarch64-wheel"), f"{path}: jobs.smoke-linux-aarch64-wheel")
+    steps = sequence(job.get("steps"), f"{path}: jobs.smoke-linux-aarch64-wheel.steps")
+
+    matching_steps: list[dict[str, Any]] = []
+    for raw_step in steps:
+        step = mapping(raw_step, f"{path}: jobs.smoke-linux-aarch64-wheel.steps[]")
+        if step.get("name") == "Install exact wheel and run tiny RankQuant/Bitmap smoke":
+            matching_steps.append(step)
+
+    if len(matching_steps) != 1:
+        fail(f"{path}: smoke-linux-aarch64-wheel must have exactly one install/smoke step")
+
+    run = matching_steps[0].get("run")
+    if not isinstance(run, str):
+        fail(f"{path}: smoke-linux-aarch64-wheel install/smoke step must be a run step")
+    if "manylinux_2_17_aarch64" in run:
+        fail(f"{path}: linux/aarch64 wheel selector must not pin a specific manylinux policy tag")
+    if not all(needle in run for needle in ('"aarch64"', '"manylinux"', '"musllinux"', "len(wheels) != 1")):
+        fail(f"{path}: linux/aarch64 wheel selector must match architecture and assert exactly one wheel")
 
 
 def check_pypi_canonical_dist(workflow: dict[str, Any], path: str) -> None:
@@ -288,6 +327,8 @@ def check_publish_crate(workflow: dict[str, Any], path: str) -> None:
 
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
+    check_hash_requirement_temp_paths([WORKFLOW_PATH, PYTHON_WORKFLOW_PATH])
+    check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
     check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
     check_publish_crate(workflow, WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)

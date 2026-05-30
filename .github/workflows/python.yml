@@ -106,7 +106,8 @@ jobs:
           print(wheels[0])
           PY
           )"
-          python - <<'PY' "$WHEEL" > /tmp/ordvec-wheel-requirements.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-wheel-requirements.txt"
+          python - <<'PY' "$WHEEL" > "$REQ_FILE"
           import hashlib
           import sys
           from pathlib import Path
@@ -115,6 +116,6 @@ jobs:
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           print(f"ordvec @ {wheel.as_uri()} --hash=sha256:{digest}")
           PY
-          python -m pip install --require-hashes --no-index --no-deps -r /tmp/ordvec-wheel-requirements.txt
+          python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
       - name: pytest
         run: python -m pytest ordvec-python/tests -q

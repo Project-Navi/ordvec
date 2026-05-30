@@ -307,7 +307,8 @@ jobs:
           PY
           )"
           python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
-          python - <<'PY' "$WHEEL" > /tmp/ordvec-wheel-requirements.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-wheel-requirements.txt"
+          python - <<'PY' "$WHEEL" > "$REQ_FILE"
           import hashlib
           import sys
           from pathlib import Path
@@ -316,7 +317,7 @@ jobs:
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           print(f"ordvec @ {wheel.as_uri()} --hash=sha256:{digest}")
           PY
-          python -m pip install --require-hashes --no-index --no-deps -r /tmp/ordvec-wheel-requirements.txt
+          python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
           python -m pytest ordvec-python/tests -q
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -352,14 +353,19 @@ jobs:
           set -euo pipefail
           WHEEL="$(python - <<'PY'
           from pathlib import Path
-          wheels = sorted(Path("wheelhouse").glob("*manylinux_2_17_aarch64*.whl"))
+          wheels = sorted(
+              wheel
+              for wheel in Path("wheelhouse").glob("*.whl")
+              if "aarch64" in wheel.name and ("manylinux" in wheel.name or "musllinux" in wheel.name)
+          )
           if len(wheels) != 1:
               raise SystemExit(f"expected exactly one linux/aarch64 wheel, found {wheels}")
           print(wheels[0])
           PY
           )"
           python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
-          python - <<'PY' "$WHEEL" > /tmp/ordvec-wheel-requirements.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-aarch64-wheel-requirements.txt"
+          python - <<'PY' "$WHEEL" > "$REQ_FILE"
           import hashlib
           import sys
           from pathlib import Path
@@ -368,7 +374,7 @@ jobs:
           digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
           print(f"ordvec @ {wheel.as_uri()} --hash=sha256:{digest}")
           PY
-          python -m pip install --require-hashes --no-index --no-deps -r /tmp/ordvec-wheel-requirements.txt
+          python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
           python - <<'PY'
           import numpy as np
           from ordvec import Bitmap, RankQuant
@@ -429,7 +435,8 @@ jobs:
           PY
           )"
           python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
-          python - <<'PY' "$SDIST" > /tmp/ordvec-sdist-requirements.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-sdist-requirements.txt"
+          python - <<'PY' "$SDIST" > "$REQ_FILE"
           import hashlib
           import sys
           from pathlib import Path
@@ -438,7 +445,7 @@ jobs:
           digest = hashlib.sha256(sdist.read_bytes()).hexdigest()
           print(f"ordvec @ {sdist.as_uri()} --hash=sha256:{digest}")
           PY
-          python -m pip install --require-hashes --no-index --no-deps --no-build-isolation -r /tmp/ordvec-sdist-requirements.txt
+          python -m pip install --require-hashes --no-index --no-deps --no-build-isolation -r "$REQ_FILE"
           python -m pytest ordvec-python/tests -q
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
