@@ -1,10 +1,10 @@
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
-    sha256_file, verify_index_manifest, verify_manifest_with_base, CalibrationOrdinalization,
-    CalibrationProfileRef, CreateManifestOptions, CreateRowIdentity, EncoderSpec,
-    ManifestIndexParams, NullModelSpec, ProfileArtifactRef, ProfileParameterization, RowIdentity,
-    VerifyOptions, CALIBRATION_SCHEMA_VERSION,
+    load_manifest_file_with_options, sha256_file, verify_index_manifest, verify_manifest_with_base,
+    CalibrationOrdinalization, CalibrationProfileRef, CreateManifestOptions, CreateRowIdentity,
+    EncoderSpec, ManifestIndexParams, NullModelSpec, ProfileArtifactRef, ProfileParameterization,
+    ResourceLimits, RowIdentity, VerifyOptions, CALIBRATION_SCHEMA_VERSION,
 };
 use serde_json::json;
 use std::fs;
@@ -16,6 +16,15 @@ fn write_index(dir: &Path) -> PathBuf {
     let path = dir.join("index.tvrq");
     let mut index = RankQuant::new(16, 2);
     let docs: Vec<f32> = (0..32).map(|i| i as f32 - 12.0).collect();
+    index.add(&docs);
+    index.write(&path).unwrap();
+    path
+}
+
+fn write_rankquant_index(dir: &Path, rows: usize) -> PathBuf {
+    let path = dir.join("index.tvrq");
+    let mut index = RankQuant::new(16, 2);
+    let docs: Vec<f32> = (0..16 * rows).map(|i| i as f32 - 12.0).collect();
     index.add(&docs);
     index.write(&path).unwrap();
     path
@@ -245,6 +254,214 @@ fn schema_rejects_unknown_fields_and_bad_extension_keys() {
     );
     let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
     assert!(report.ok, "{:?}", report.errors);
+}
+
+#[test]
+fn manifest_loader_enforces_size_limit_with_exact_boundary_success() {
+    let root = tempfile::tempdir().unwrap();
+    let (_temp, manifest, manifest_path) = identity_manifest(root.path());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let manifest_bytes = fs::metadata(&manifest_path).unwrap().len();
+
+    let err = load_manifest_file_with_options(
+        &manifest_path,
+        &VerifyOptions {
+            limits: ResourceLimits {
+                max_manifest_bytes: manifest_bytes - 1,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("manifest_file_too_large"));
+
+    let loaded = load_manifest_file_with_options(
+        &manifest_path,
+        &VerifyOptions {
+            limits: ResourceLimits {
+                max_manifest_bytes: manifest_bytes,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(loaded.manifest.manifest_id, manifest.manifest_id);
+}
+
+#[test]
+fn row_identity_jsonl_line_limit_is_overridable() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 1);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(&rows, &[("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", None)]);
+    let line_len = fs::read(&rows).unwrap().len();
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::Jsonl(rows.clone()),
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    let report = verify_manifest_with_base(
+        manifest.clone(),
+        temp.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_row_identity_jsonl_line_bytes: line_len - 1,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(error_codes(&report).contains(&"row_identity_line_too_large"));
+
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_row_identity_jsonl_line_bytes: line_len,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(report.ok, "{:?}", report.errors);
+}
+
+#[test]
+fn row_identity_row_limit_rejects_declared_overrun() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 2);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(
+        &rows,
+        &[
+            ("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", None),
+            ("ffffffff-1111-4222-8333-444444444444", None),
+        ],
+    );
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::Jsonl(rows),
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    let report = verify_manifest_with_base(
+        manifest.clone(),
+        temp.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_row_identity_rows: 1,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(error_codes(&report).contains(&"row_identity_row_count_limit_exceeded"));
+
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_row_identity_rows: 2,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(report.ok, "{:?}", report.errors);
+}
+
+#[test]
+fn create_row_identity_limit_is_overridable() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 2);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(
+        &rows,
+        &[
+            ("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", None),
+            ("ffffffff-1111-4222-8333-444444444444", None),
+        ],
+    );
+    let manifest_path = temp.path().join("manifest.json");
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::Jsonl(rows.clone()),
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            limits: ResourceLimits {
+                max_row_identity_rows: 1,
+                ..ResourceLimits::default()
+            },
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("row_identity_row_count_limit_exceeded"));
+
+    let manifest = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::Jsonl(rows),
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            limits: ResourceLimits {
+                max_row_identity_rows: 2,
+                ..ResourceLimits::default()
+            },
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(manifest.row_identity.row_count(), 2);
+}
+
+#[test]
+fn row_identity_report_issue_limit_truncates_per_row_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
+    let rows = temp.path().join("rows.jsonl");
+    fs::write(&rows, b"{}\n{}\n{}\n{}\n").unwrap();
+    let hash = sha256_file(&rows).unwrap();
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: hash.sha256,
+        row_count: 4,
+        id_kind: "uuid".to_string(),
+        db: None,
+    };
+
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_report_issues: 2,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert_eq!(report.errors.len(), 2);
+    assert!(error_codes(&report).contains(&"verification_report_issue_limit_exceeded"));
 }
 
 #[test]
@@ -1021,6 +1238,54 @@ fn cli_create_verify_and_exit_codes() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(
+        &rows,
+        &[
+            ("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", None),
+            ("ffffffff-1111-4222-8333-444444444444", None),
+        ],
+    );
+    let output = Command::new(bin)
+        .args([
+            "create",
+            "--index",
+            index.to_str().unwrap(),
+            "--row-map",
+            rows.to_str().unwrap(),
+            "--embedding-model",
+            "test-embedding",
+            "--out",
+            manifest.to_str().unwrap(),
+            "--max-row-map-rows",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+
+    let output = Command::new(bin)
+        .args([
+            "create",
+            "--index",
+            index.to_str().unwrap(),
+            "--row-map",
+            rows.to_str().unwrap(),
+            "--embedding-model",
+            "test-embedding",
+            "--out",
+            manifest.to_str().unwrap(),
+            "--max-row-map-rows",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -1324,4 +1589,102 @@ fn sqlite_cache_key_includes_calibration_profile_bytes() {
     .unwrap();
     assert!(!cached.ok, "profile drift must force fresh verification");
     assert!(error_codes(&cached).contains(&"calibration_profile_sha256_mismatch"));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_cache_key_includes_limits_and_bounds_cached_report_size() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("registry.sqlite");
+
+    let options_a = VerifyOptions {
+        limits: ResourceLimits {
+            max_report_issues: 17,
+            ..ResourceLimits::default()
+        },
+        ..VerifyOptions::default()
+    };
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        options_a.clone(),
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+    let cached = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        options_a,
+        true,
+    )
+    .unwrap();
+    assert!(cached.ok, "{:?}", cached.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1, "same limits should reuse the cached report");
+
+    let options_b = VerifyOptions {
+        limits: ResourceLimits {
+            max_report_issues: 18,
+            ..ResourceLimits::default()
+        },
+        ..VerifyOptions::default()
+    };
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        options_b,
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 2, "limit changes must produce a distinct cache key");
+
+    let tiny_cache_limit = VerifyOptions {
+        limits: ResourceLimits {
+            max_cached_report_bytes: 1,
+            ..ResourceLimits::default()
+        },
+        ..VerifyOptions::default()
+    };
+    let err = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        tiny_cache_limit,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("sqlite_cached_report_too_large"));
 }

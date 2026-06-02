@@ -1,8 +1,9 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use ordvec_manifest::{
-    create_manifest_for_index_with_options, load_manifest_file, sha256_file, verify_manifest,
-    write_manifest_file, CreateManifestOptions, CreateRowIdentity, ManifestDocument, ManifestError,
-    NullModelSpec, ProfileParameterization, VerifyOptions,
+    create_manifest_for_index_with_options, load_manifest_file_with_options, sha256_file,
+    verify_manifest, write_manifest_file, CreateManifestOptions, CreateRowIdentity,
+    ManifestDocument, ManifestError, NullModelSpec, ProfileParameterization, ResourceLimits,
+    VerifyOptions,
 };
 use serde_json::json;
 use std::fs;
@@ -28,6 +29,8 @@ enum Commands {
     },
     Inspect {
         manifest: PathBuf,
+        #[command(flatten)]
+        limits: LimitArgs,
         #[arg(long)]
         json: bool,
     },
@@ -42,6 +45,8 @@ enum Commands {
         allow_path_escape: bool,
         #[arg(long)]
         allow_duplicate_db_ids: bool,
+        #[command(flatten)]
+        limits: LimitArgs,
         #[arg(long)]
         json: bool,
     },
@@ -60,6 +65,8 @@ enum Commands {
         allow_absolute_paths: bool,
         #[arg(long)]
         allow_path_escape: bool,
+        #[command(flatten)]
+        limits: LimitArgs,
     },
     #[cfg(feature = "sqlite")]
     Sqlite {
@@ -86,6 +93,8 @@ enum SqliteCommands {
         allow_path_escape: bool,
         #[arg(long)]
         allow_duplicate_db_ids: bool,
+        #[command(flatten)]
+        limits: LimitArgs,
         #[arg(long)]
         json: bool,
     },
@@ -104,9 +113,47 @@ enum SqliteCommands {
         allow_path_escape: bool,
         #[arg(long)]
         allow_duplicate_db_ids: bool,
+        #[command(flatten)]
+        limits: LimitArgs,
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Args, Clone, Debug, Default)]
+struct LimitArgs {
+    #[arg(long)]
+    max_manifest_bytes: Option<u64>,
+    #[arg(long)]
+    max_row_map_line_bytes: Option<usize>,
+    #[arg(long)]
+    max_row_map_rows: Option<usize>,
+    #[arg(long)]
+    max_report_issues: Option<usize>,
+    #[arg(long)]
+    max_cached_report_bytes: Option<u64>,
+}
+
+impl LimitArgs {
+    fn resource_limits(&self) -> ResourceLimits {
+        let mut limits = ResourceLimits::default();
+        if let Some(value) = self.max_manifest_bytes {
+            limits.max_manifest_bytes = value;
+        }
+        if let Some(value) = self.max_row_map_line_bytes {
+            limits.max_row_identity_jsonl_line_bytes = value;
+        }
+        if let Some(value) = self.max_row_map_rows {
+            limits.max_row_identity_rows = value;
+        }
+        if let Some(value) = self.max_report_issues {
+            limits.max_report_issues = value;
+        }
+        if let Some(value) = self.max_cached_report_bytes {
+            limits.max_cached_report_bytes = value;
+        }
+        limits
+    }
 }
 
 fn main() {
@@ -140,9 +187,14 @@ fn run() -> Result<i32, ManifestError> {
         }
         Commands::Inspect {
             manifest,
+            limits,
             json: as_json,
         } => {
-            let document = load_manifest_file(&manifest)?;
+            let options = VerifyOptions {
+                limits: limits.resource_limits(),
+                ..VerifyOptions::default()
+            };
+            let document = load_manifest_file_with_options(&manifest, &options)?;
             if as_json {
                 print_json(&document.manifest)?;
             } else {
@@ -160,18 +212,18 @@ fn run() -> Result<i32, ManifestError> {
             allow_absolute_paths,
             allow_path_escape,
             allow_duplicate_db_ids,
+            limits,
             json: as_json,
         } => {
-            let document = load_manifest_file(&manifest)?;
-            let report = verify_manifest(
-                &document,
-                VerifyOptions {
-                    allow_absolute_paths,
-                    allow_path_escape,
-                    allow_duplicate_db_ids,
-                    index_override: index,
-                },
-            );
+            let options = VerifyOptions {
+                allow_absolute_paths,
+                allow_path_escape,
+                allow_duplicate_db_ids,
+                index_override: index,
+                limits: limits.resource_limits(),
+            };
+            let document = load_manifest_file_with_options(&manifest, &options)?;
+            let report = verify_manifest(&document, options);
             emit_report(&report, as_json)?;
             Ok(if report.ok {
                 0
@@ -187,6 +239,7 @@ fn run() -> Result<i32, ManifestError> {
             out,
             allow_absolute_paths,
             allow_path_escape,
+            limits,
         } => {
             let row_identity = match (row_map, row_id_is_identity) {
                 (Some(_), true) => {
@@ -213,6 +266,7 @@ fn run() -> Result<i32, ManifestError> {
                 CreateManifestOptions {
                     allow_absolute_paths,
                     allow_path_escape,
+                    limits: limits.resource_limits(),
                 },
             )?;
             write_manifest_file(&manifest, &out)?;
@@ -235,20 +289,19 @@ fn run_sqlite(command: SqliteCommands) -> Result<i32, ManifestError> {
             allow_absolute_paths,
             allow_path_escape,
             allow_duplicate_db_ids,
+            limits,
             json: as_json,
         } => {
-            let document = load_manifest_file(&manifest)?;
+            let options = VerifyOptions {
+                allow_absolute_paths,
+                allow_path_escape,
+                allow_duplicate_db_ids,
+                index_override: index,
+                limits: limits.resource_limits(),
+            };
+            let document = load_manifest_file_with_options(&manifest, &options)?;
             let report = ordvec_manifest::sqlite::verify_with_registry(
-                &db,
-                &document,
-                &manifest,
-                VerifyOptions {
-                    allow_absolute_paths,
-                    allow_path_escape,
-                    allow_duplicate_db_ids,
-                    index_override: index,
-                },
-                use_cache,
+                &db, &document, &manifest, options, use_cache,
             )?;
             emit_report(&report, as_json)?;
             Ok(if report.ok {
@@ -265,21 +318,19 @@ fn run_sqlite(command: SqliteCommands) -> Result<i32, ManifestError> {
             allow_absolute_paths,
             allow_path_escape,
             allow_duplicate_db_ids,
+            limits,
             json: as_json,
         } => {
-            let document = load_manifest_file(&manifest)?;
-            let report = ordvec_manifest::sqlite::activate(
-                &db,
-                &document,
-                &manifest,
-                VerifyOptions {
-                    allow_absolute_paths,
-                    allow_path_escape,
-                    allow_duplicate_db_ids,
-                    index_override: index,
-                },
-                force,
-            )?;
+            let options = VerifyOptions {
+                allow_absolute_paths,
+                allow_path_escape,
+                allow_duplicate_db_ids,
+                index_override: index,
+                limits: limits.resource_limits(),
+            };
+            let document = load_manifest_file_with_options(&manifest, &options)?;
+            let report =
+                ordvec_manifest::sqlite::activate(&db, &document, &manifest, options, force)?;
             emit_report(&report, as_json)?;
             Ok(if report.ok || force {
                 0

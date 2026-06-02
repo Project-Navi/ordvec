@@ -26,6 +26,23 @@ verify with default settings. If an artifact or JSONL row map lives outside the
 manifest directory, pass `--allow-path-escape` at create time and again at
 verify time.
 
+Verification uses bounded parser/report defaults on both CLI and library paths:
+
+- manifest JSON: 1 MiB before JSON parsing;
+- row-identity JSONL line: 64 KiB;
+- row-identity JSONL rows: 10,000,000;
+- collected report issues: 1,024, after which a
+  `verification_report_issue_limit_exceeded` issue is emitted;
+- SQLite cached report JSON: 4 MiB.
+
+The CLI exposes matching override flags on `inspect`, `verify`, `create`,
+`sqlite verify`, and `sqlite activate`: `--max-manifest-bytes`,
+`--max-row-map-line-bytes`, `--max-row-map-rows`, `--max-report-issues`, and
+`--max-cached-report-bytes`. Library callers can override the same ceilings via
+`VerifyOptions::limits`. These limits bound metadata parsing and report/cache
+growth; hashing an index or calibration profile is still proportional to the
+artifact bytes being verified.
+
 With `--features sqlite`, the `sqlite verify` and `sqlite activate` subcommands
 add a local cache/audit log plus one active-manifest pointer. This is not a
 full named registry. `sqlite verify --use-cache` reuses only reports whose

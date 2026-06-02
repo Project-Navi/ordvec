@@ -1,6 +1,7 @@
 use crate::{
-    resolve_existing_path, sha256_file, verify_manifest, ManifestDocument, ManifestError,
-    ReportIssue, RowIdentity, VerificationReport, VerifyOptions,
+    resolve_existing_path, sha256_file, sha256_file_bounded, validate_jsonl_rows, verify_manifest,
+    ManifestDocument, ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationReport,
+    VerifyOptions,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -19,9 +20,12 @@ pub fn verify_with_registry(
     init(&conn)?;
     if use_cache {
         if let Some(cache_key) = current_cache_key(document, manifest_path.as_ref(), &options)? {
-            if let Some(report) =
-                load_cached_report(&conn, &document.manifest.manifest_id, &cache_key)?
-            {
+            if let Some(report) = load_cached_report(
+                &conn,
+                &document.manifest.manifest_id,
+                &cache_key,
+                &options.limits,
+            )? {
                 return Ok(report);
             }
         }
@@ -37,6 +41,7 @@ pub fn verify_with_registry(
         manifest_path.as_ref(),
         &report,
         cache_key.as_ref(),
+        &store_options.limits,
     )?;
     Ok(report)
 }
@@ -69,6 +74,7 @@ pub fn activate(
         manifest_path.as_ref(),
         &report,
         cache_key.as_ref(),
+        &store_options.limits,
     )?;
     if !report.ok && !force {
         return Ok(report);
@@ -161,9 +167,20 @@ fn store_report(
     manifest_path: &Path,
     report: &VerificationReport,
     cache_key: Option<&CacheKey>,
+    limits: &ResourceLimits,
 ) -> Result<(), ManifestError> {
     let tx = conn.transaction().map_err(sqlite_err)?;
     let report_json = serde_json::to_string(report)?;
+    if report_json.len() as u64 > limits.max_cached_report_bytes {
+        return Err(ManifestError::limit_exceeded(
+            "sqlite_cached_report_too_large",
+            format!(
+                "cached report is {} bytes, exceeding max_cached_report_bytes={}",
+                report_json.len(),
+                limits.max_cached_report_bytes
+            ),
+        ));
+    }
     tx.execute(
         "INSERT INTO verification_reports(
             manifest_id,
@@ -199,10 +216,11 @@ fn load_cached_report(
     conn: &Connection,
     manifest_id: &str,
     cache_key: &CacheKey,
+    limits: &ResourceLimits,
 ) -> Result<Option<VerificationReport>, ManifestError> {
-    let report_json: Option<String> = conn
+    let cached_row: Option<(i64, i64)> = conn
         .query_row(
-            "SELECT report_json
+            "SELECT report_id, length(CAST(report_json AS BLOB))
              FROM verification_reports
              WHERE manifest_id = ?1
                AND manifest_sha256 = ?2
@@ -226,13 +244,33 @@ fn load_cached_report(
                 cache_key.row_identity_sha256.as_deref(),
                 cache_key.calibration_profile_sha256.as_deref(),
             ],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(sqlite_err)?;
-    report_json
-        .map(|json| serde_json::from_str(&json).map_err(ManifestError::from))
-        .transpose()
+    let Some((report_id, report_len)) = cached_row else {
+        return Ok(None);
+    };
+    if report_len as u64 > limits.max_cached_report_bytes {
+        return Err(ManifestError::limit_exceeded(
+            "sqlite_cached_report_too_large",
+            format!(
+                "cached report is {report_len} bytes, exceeding max_cached_report_bytes={}",
+                limits.max_cached_report_bytes
+            ),
+        ));
+    }
+
+    let report_json: String = conn
+        .query_row(
+            "SELECT report_json FROM verification_reports WHERE report_id = ?1",
+            params![report_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_err)?;
+    serde_json::from_str(&report_json)
+        .map(Some)
+        .map_err(ManifestError::from)
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +288,7 @@ struct CacheableVerifyOptions {
     allow_path_escape: bool,
     allow_duplicate_db_ids: bool,
     index_override: Option<String>,
+    limits: ResourceLimits,
 }
 
 impl CacheableVerifyOptions {
@@ -262,6 +301,7 @@ impl CacheableVerifyOptions {
                 .index_override
                 .as_ref()
                 .map(|path| path.display().to_string().replace('\\', "/")),
+            limits: options.limits.clone(),
         }
     }
 }
@@ -271,7 +311,12 @@ fn current_cache_key(
     manifest_path: &Path,
     options: &VerifyOptions,
 ) -> Result<Option<CacheKey>, ManifestError> {
-    let manifest_sha256 = match sha256_file(manifest_path) {
+    let manifest_sha256 = match sha256_file_bounded(
+        manifest_path,
+        options.limits.max_manifest_bytes,
+        "manifest_file_too_large",
+        "manifest file",
+    ) {
         Ok(hash) => hash.sha256,
         Err(_) => return Ok(None),
     };
@@ -300,7 +345,12 @@ fn current_cache_key(
 
     let row_identity_sha256 = match &document.manifest.row_identity {
         RowIdentity::RowIdIdentity { .. } => None,
-        RowIdentity::Jsonl { path, .. } => {
+        RowIdentity::Jsonl {
+            path, row_count, ..
+        } => {
+            if *row_count > options.limits.max_row_identity_rows {
+                return Ok(None);
+            }
             let row_path = PathBuf::from(path);
             let Some(row_identity) = resolve_existing_path(
                 &row_path,
@@ -311,10 +361,21 @@ fn current_cache_key(
             ) else {
                 return Ok(None);
             };
-            match sha256_file(&row_identity.resolved_path) {
-                Ok(hash) => Some(hash.sha256),
+            let mut row_errors = Vec::new();
+            let stats = match validate_jsonl_rows(
+                &row_identity.resolved_path,
+                options.allow_duplicate_db_ids,
+                &options.limits,
+                Some(*row_count),
+                &mut row_errors,
+            ) {
+                Ok(stats) => stats,
                 Err(_) => return Ok(None),
+            };
+            if !row_errors.is_empty() || stats.row_count != *row_count {
+                return Ok(None);
             }
+            stats.sha256
         }
     };
     let calibration_profile_sha256 = current_calibration_profile_sha256(document, options)?;
@@ -334,7 +395,12 @@ fn cache_key_from_report(
     document: &ManifestDocument,
     options: &VerifyOptions,
 ) -> Result<Option<CacheKey>, ManifestError> {
-    let manifest_sha256 = match sha256_file(manifest_path) {
+    let manifest_sha256 = match sha256_file_bounded(
+        manifest_path,
+        options.limits.max_manifest_bytes,
+        "manifest_file_too_large",
+        "manifest file",
+    ) {
         Ok(hash) => hash.sha256,
         Err(_) => return Ok(None),
     };
