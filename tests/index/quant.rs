@@ -164,8 +164,9 @@ fn rankquant_asymmetric_matches_reference(bits: u8) {
         );
     }
 
-    // And the top-10 set must match (we allow tied scores to permute
-    // within ties — same set, possibly different order).
+    // This random reference check uses set equality to avoid overfitting a
+    // near-tolerance boundary. Exact score-tie ordering is pinned by
+    // tests/determinism_contract.rs.
     let mut ref_sorted: Vec<(usize, f32)> = ref_scores
         .iter()
         .enumerate()

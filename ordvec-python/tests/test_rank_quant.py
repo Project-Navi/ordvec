@@ -299,8 +299,7 @@ def test_search_asymmetric_subset_matches_full_when_candidates_eq_all():
     # When the candidate set is every doc, the subset path must agree
     # with full `search_asymmetric` on the top-k. Both use the
     # asymmetric kernel; the subset path just iterates the candidate
-    # list instead of all N docs. (Allow set equality — ties may
-    # permute within the same scoring tier.)
+    # list instead of all N docs.
     vectors = unit_vectors(40, 128, seed=0)
     idx = RankQuant(dim=128, bits=2)
     idx.add(vectors)
@@ -310,7 +309,21 @@ def test_search_asymmetric_subset_matches_full_when_candidates_eq_all():
     _, subset_ids = idx.search_asymmetric_subset(query, candidates, k=10)
 
     _, full_ids = idx.search_asymmetric(query[None, :], k=10)
-    assert set(int(i) for i in subset_ids) == set(int(i) for i in full_ids[0])
+    np.testing.assert_array_equal(subset_ids, full_ids[0])
+
+
+def test_search_asymmetric_subset_ties_use_global_row_ids():
+    vectors = np.ones((12, 64), dtype=np.float32)
+    idx = RankQuant(dim=64, bits=2)
+    idx.add(vectors)
+
+    candidates = np.array([9, 3, 7, 1], dtype=np.uint32)
+    scores, ids = idx.search_asymmetric_subset(
+        np.zeros(64, dtype=np.float32), candidates, k=2
+    )
+
+    np.testing.assert_array_equal(ids, np.array([1, 3], dtype=np.int64))
+    np.testing.assert_array_equal(scores, np.array([0.0, 0.0], dtype=np.float32))
 
 
 def test_search_asymmetric_subset_k_caps_at_candidate_count():

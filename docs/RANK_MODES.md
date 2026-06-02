@@ -328,10 +328,10 @@ facts qualify this:
   rank-mode README recommends, and where the structural prior pays
   off.
 - **The asymmetric AVX-512 kernel is an exact packed scan, not an ANN
-  approximation.** It returns identical top-k to the scalar RankQuant
-  scorer and agrees within 1e-4 on scores (verified by
-  `rankquant_asymmetric_matches_reference_b{1,2,4}` in
-  `tests/index/quant.rs`).
+  approximation.** It is checked against the scalar RankQuant scorer with
+  score tolerances and deterministic golden tie fixtures (see
+  [`determinism.md`](determinism.md)); the random reference tests avoid
+  overfitting top-k order at near-tolerance boundaries.
 
 The byte-LUT scorer remains in the codebase as a labelled reference
 path (`ordvec::search_asymmetric_byte_lut`,
@@ -434,6 +434,9 @@ single-pass b=2 fast path; it supports `add`/`search` but not
 `src/fastscan.rs`). `MultiBucketBitmap` underwrites the
 bilinear bucket-overlap decomposition and is reachable only behind the
 `experimental` feature.
+
+Search result ordering, backend score-equivalence expectations, tie keys, and
+empty-result shapes are specified in [`determinism.md`](determinism.md).
 
 ## Test coverage
 

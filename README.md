@@ -156,6 +156,7 @@ The runtime dependency floor is `numpy>=2.2`.
   [`docs/ALTERNATIVES_CONSIDERED.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/ALTERNATIVES_CONSIDERED.md)
 - **Index-file trust model:**
   [`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md),
+  [`docs/determinism.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/determinism.md),
   [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)
 - **Repo-local manifest verifier, C ABI, and Go wrapper:**
   available from the full GitHub checkout. These sidecars are not part of the

@@ -833,11 +833,9 @@ pub unsafe extern "C" fn ordvec_index_search(
             (LoadedIndex::RankQuant(index), Some(rows)) => {
                 // Ask the core for every candidate score, then normalize by the
                 // ABI's global row-id tie policy before truncating. The core
-                // subset helper breaks ties by candidate position before
-                // mapping back to global row IDs, so requesting only k could
-                // drop a boundary-tied lower row ID from an unsorted candidate
-                // list. Materializing all candidates preserves the ABI ordering
-                // contract until core exposes a global-row top-k scorer.
+                // subset helper uses global row IDs as score-tie keys; keeping
+                // the ABI normalization centralized preserves duplicate and
+                // boundary handling for caller-supplied candidate lists.
                 let (scores, indices) =
                     index.search_asymmetric_subset(validation.query, rows, rows.len());
                 normalize_global_order(scores, indices, validation.required_hits)

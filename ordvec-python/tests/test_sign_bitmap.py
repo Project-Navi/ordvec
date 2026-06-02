@@ -80,10 +80,8 @@ def test_top_m_candidates_batched_shape():
 
 
 def test_batched_matches_scalar_for_each_row():
-    # The batched AVX-512 VPOPCNTDQ kernel must agree with the scalar
-    # path on the same query at top-1; we check the leading match for a
-    # small batch (boundary ties at deeper ranks may diverge — see the
-    # body-kernel tie-break follow-up, separate from sign-bitmap).
+    # The batched kernel must agree with the single-query path for the full
+    # ordered top-m row, including boundary ties.
     idx = SignBitmap(dim=128)
     idx.add(unit_vectors(60, 128, seed=0))
     queries = unit_vectors(6, 128, seed=99)
@@ -91,11 +89,7 @@ def test_batched_matches_scalar_for_each_row():
     batched = idx.top_m_candidates_batched(queries, m=5)
     for i in range(6):
         scalar = idx.top_m_candidates(queries[i], m=5)
-        # Top-1 must agree exactly across both code paths.
-        assert int(batched[i, 0]) == int(scalar[0]), (
-            f"batched vs scalar disagree on top-1 for query {i}: "
-            f"batched={batched[i, 0]} scalar={scalar[0]}"
-        )
+        np.testing.assert_array_equal(batched[i], scalar)
 
 
 def test_empty_batch_returns_consistent_column_count():

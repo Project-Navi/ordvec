@@ -536,7 +536,9 @@ impl RankQuant {
     /// subset (e.g., the top-M from a bitmap probe). Returns
     /// `(scores, indices)`: the top-`k` scores and their corresponding
     /// **global** doc IDs (the local candidate positions are mapped back
-    /// to global IDs before returning).
+    /// to global IDs before returning). Results are ordered by score
+    /// descending, then global row ID ascending, matching the full-index
+    /// search tie policy even when `candidates` is unsorted.
     ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just
@@ -606,7 +608,7 @@ impl RankQuant {
         // never reaches a kernel that would drop its tail chunk.
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
-        let mut top = TopK::new(k_eff);
+        let mut top = TopK::new_with_tie_keys(k_eff, candidates);
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
         let mut centre_drop_used = false;
         #[cfg(target_arch = "x86_64")]

@@ -352,28 +352,31 @@ fn xor_popcount_simd128(doc: &[u64], q: &[u64]) -> u32 {
 /// partial sort.
 ///
 /// **Tie-break (deterministic across CPUs).** Ranking is by the
-/// composite key `(score desc, doc_id asc)`: on equal scores the
-/// LOWER doc_id wins, both for eviction and in the final order. SIMD
-/// vs scalar f32 summation-order differences can flip genuine
-/// near-ties between hosts; the composite key removes that
-/// nondeterminism and matches the candidate-gen paths
-/// (`top_m_candidates`) which already partition on `(score, doc_id)`.
-/// The "worst kept" entry — the one evicted first — is therefore the
-/// one with the lowest score and, among equal-score entries, the
-/// HIGHEST doc_id.
+/// composite key `(score desc, tie_key asc)`: on equal scores the lower
+/// tie key wins, both for eviction and in the final order. Full-index
+/// scans use `doc_id` as the tie key. Subset scans may emit local scratch
+/// indices while supplying global row IDs as the tie keys. SIMD vs scalar
+/// f32 summation-order differences can flip genuine near-ties between
+/// hosts; the composite key removes exact-tie nondeterminism and matches
+/// the candidate-gen paths (`top_m_candidates`) which already partition on
+/// `(score, doc_id)`. The "worst kept" entry — the one evicted first — is
+/// therefore the one with the lowest score and, among equal-score entries,
+/// the highest tie key.
 pub(crate) struct TopK {
     k: usize,
     scores: Vec<f32>,
     indices: Vec<i64>,
+    tie_keys: Vec<i64>,
+    tie_key_by_index: Option<Vec<i64>>,
     filled: usize,
-    /// Slot holding the worst kept entry under `(score asc, doc_id
+    /// Slot holding the worst kept entry under `(score asc, tie_key
     /// desc)` — the next to be evicted.
     worst_pos: usize,
     /// Score of the worst kept entry.
     worst_val: f32,
-    /// doc_id of the worst kept entry (used to break score ties:
-    /// among equal scores the higher doc_id is worse to keep).
-    worst_idx: i64,
+    /// Tie key of the worst kept entry. Among equal scores, the higher
+    /// tie key is worse to keep.
+    worst_tie_key: i64,
 }
 
 impl TopK {
@@ -382,11 +385,25 @@ impl TopK {
             k,
             scores: vec![f32::NEG_INFINITY; k],
             indices: vec![-1; k],
+            tie_keys: vec![i64::MAX; k],
+            tie_key_by_index: None,
             filled: 0,
             worst_pos: 0,
             worst_val: f32::INFINITY,
-            worst_idx: i64::MAX,
+            worst_tie_key: i64::MAX,
         }
+    }
+
+    /// Construct a top-k collector whose emitted indices are local scan
+    /// positions but whose score ties are broken by caller-supplied keys.
+    ///
+    /// This is used by subset scans: SIMD kernels still emit local candidate
+    /// positions into the gathered scratch buffer, while ties must follow the
+    /// public global row-id policy.
+    pub(crate) fn new_with_tie_keys(k: usize, tie_key_by_index: &[u32]) -> Self {
+        let mut top = Self::new(k);
+        top.tie_key_by_index = Some(tie_key_by_index.iter().map(|&id| i64::from(id)).collect());
+        top
     }
 
     #[inline]
@@ -401,52 +418,59 @@ impl TopK {
         // stays clippy-clean on 32-bit, where `idx <= i64::MAX as usize` would
         // be an always-true `absurd_extreme_comparison`.
         let id = i64::try_from(idx).expect("ordvec: doc_id exceeds i64::MAX");
+        let tie_key = self
+            .tie_key_by_index
+            .as_ref()
+            .map(|keys| keys[idx])
+            .unwrap_or(id);
         if self.filled < self.k {
             self.scores[self.filled] = score;
             self.indices[self.filled] = id;
+            self.tie_keys[self.filled] = tie_key;
             self.filled += 1;
             if self.filled == self.k {
                 self.recompute_worst();
             }
         } else {
-            // Replace the worst kept entry iff the incoming `(score, id)` is
-            // strictly better to keep under the `(score desc, doc_id asc)`
-            // order: a higher score, or an equal score with a lower doc_id.
-            // doc_ids are unique per scan, so this is a total order — the
-            // greedy eviction keeps exactly the top-k set under the composite
-            // key.
-            let better = score > self.worst_val || (score == self.worst_val && id < self.worst_idx);
+            // Replace the worst kept entry iff the incoming `(score, tie_key)`
+            // is strictly better to keep under the `(score desc, tie_key asc)`
+            // order: a higher score, or an equal score with a lower row key.
+            // Full-index scans use `doc_id` as the tie key. Subset scans use
+            // global row IDs while still emitting local scratch-buffer indices.
+            let better =
+                score > self.worst_val || (score == self.worst_val && tie_key < self.worst_tie_key);
             if better {
                 self.scores[self.worst_pos] = score;
                 self.indices[self.worst_pos] = id;
+                self.tie_keys[self.worst_pos] = tie_key;
                 self.recompute_worst();
             }
         }
     }
 
-    /// Locate the worst kept entry under `(score asc, doc_id desc)`:
-    /// lowest score, and among equal scores the highest doc_id. That
-    /// is the entry a strictly-better incoming candidate evicts.
+    /// Locate the worst kept entry under `(score asc, tie_key desc)`:
+    /// lowest score, and among equal scores the highest tie key. That is the
+    /// entry a strictly-better incoming candidate evicts.
     fn recompute_worst(&mut self) {
         let mut wv = f32::INFINITY;
-        let mut wi = i64::MIN;
+        let mut wt = i64::MIN;
         let mut wp = 0;
         for i in 0..self.filled {
             let s = self.scores[i];
-            let id = self.indices[i];
-            if s < wv || (s == wv && id > wi) {
+            let tie_key = self.tie_keys[i];
+            if s < wv || (s == wv && tie_key > wt) {
                 wv = s;
-                wi = id;
+                wt = tie_key;
                 wp = i;
             }
         }
         self.worst_val = wv;
-        self.worst_idx = wi;
+        self.worst_tie_key = wt;
         self.worst_pos = wp;
     }
 
     /// Drain into `out_scores` / `out_indices` sorted by the composite
-    /// key `(score desc, doc_id asc)`. `out_scores.len()` is the
+    /// key `(score desc, tie_key asc)`. `out_scores.len()` is the
     /// user-requested `k`; positions beyond `self.filled` are left as
     /// sentinels.
     pub(crate) fn finalize_into(&self, out_scores: &mut [f32], out_indices: &mut [i64]) {
@@ -457,26 +481,27 @@ impl TopK {
         for i in out_indices.iter_mut() {
             *i = -1;
         }
-        let mut pairs: Vec<(f32, i64)> = self
+        let mut pairs: Vec<(f32, i64, i64)> = self
             .scores
             .iter()
             .zip(self.indices.iter())
+            .zip(self.tie_keys.iter())
             .take(self.filled)
-            .map(|(&s, &i)| (s, i))
+            .map(|((&s, &i), &tie_key)| (s, i, tie_key))
             .collect();
-        // Composite key: score descending, then doc_id ascending. The
-        // doc_id tie-break makes the final order deterministic when
-        // scores are equal.
+        // Composite key: score descending, then tie key ascending. For
+        // full-index scans the tie key is the doc_id; for subset scans it is
+        // the global row id associated with the emitted local index.
         pairs.sort_unstable_by(|a, b| {
             // `total_cmp` is a true total order (IEEE-754 `totalOrder`), so the
             // sort stays well-defined even if a non-finite score ever slipped
             // past the finite-input guards — `partial_cmp(..).unwrap_or(Equal)`
             // is not a total order and can mis-sort around NaN. For the finite
-            // scores we actually have, the two agree. doc_id ascending breaks
-            // score ties (unchanged).
-            b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1))
+            // scores we actually have, the two agree. The ascending tie key
+            // makes score ties deterministic.
+            b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2))
         });
-        for (slot, (s, i)) in pairs.into_iter().enumerate() {
+        for (slot, (s, i, _)) in pairs.into_iter().enumerate() {
             if slot >= out_scores.len() {
                 break;
             }

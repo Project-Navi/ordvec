@@ -87,7 +87,9 @@ fn assert_asym_matches_byte_lut(dim: usize, bits: u8, seed: u64) {
     let prod_idx = prod.indices_for_query(0);
     let ref_idx = reference.indices_for_query(0);
 
-    // Top-k *set* must match (ties may permute within equal scores).
+    // This dispatch-grid red-team check uses set equality because random
+    // near-ties can sit inside the scalar/SIMD tolerance. Exact score-tie
+    // ordering is pinned by tests/determinism_contract.rs.
     let prod_set: std::collections::HashSet<i64> = prod_idx.iter().copied().collect();
     let ref_set: std::collections::HashSet<i64> = ref_idx.iter().copied().collect();
     assert_eq!(
