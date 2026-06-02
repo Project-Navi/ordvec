@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Added a `signbitmap_rankquant_twostage` fuzz target and deterministic tests
+  for the SignBitmap candidate generation plus RankQuant subset rerank
+  pipeline used by downstream retrieval systems.
+- Added named auxiliary artifact verification to `ordvec-manifest`, including
+  required/optional sidecar states, path/size/SHA-256 checks, deterministic
+  report entries, and SQLite cache invalidation for declared sidecar bytes.
+
 ### Documentation
 
 - Added a pre-1.0 compatibility policy covering stable and experimental Rust
@@ -19,14 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added bounded parser/report defaults to `ordvec-manifest` verification for
   manifest JSON size, row-identity JSONL line length, row count,
   duplicate-tracking memory, auxiliary artifact declaration count and bytes,
-  encoder distortion profile artifact bytes, auxiliary artifact declaration
-  count and bytes, report issue count, and SQLite cached report size.
-
-### Added
-
-- Added named auxiliary artifact verification to `ordvec-manifest`, including
-  required/optional sidecar states, path/size/SHA-256 checks, deterministic
-  report entries, and SQLite cache invalidation for declared sidecar bytes.
+  encoder distortion profile artifact bytes, report issue count, and SQLite
+  cached report size.
 
 ## 0.3.0 - 2026-05-29
 

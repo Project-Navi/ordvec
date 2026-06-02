@@ -9,12 +9,12 @@
 #
 # Requires: a nightly toolchain and cargo-fuzz (`cargo install cargo-fuzz`).
 #
-# HEAVY BY DEFAULT. The defaults are a long, many-core campaign (~3h x 7
-# targets ~= 21h total; FORKS = cores - 2; peak RAM ~= FORKS x RSS_LIMIT_MB)
+# HEAVY BY DEFAULT. The defaults are a long, many-core campaign (~3h x 8
+# targets ~= 24h total; FORKS = cores - 2; peak RAM ~= FORKS x RSS_LIMIT_MB)
 # tuned for a big workstation. On a laptop or smaller box, DIAL IT DOWN with the
 # env knobs below so you don't peg every core or exhaust RAM. A quick run:
 #
-#   SECS_PER_TARGET=120 FORKS=2 ./fuzz/run_full_fuzz.sh   # ~14 min on 2 cores
+#   SECS_PER_TARGET=120 FORKS=2 ./fuzz/run_full_fuzz.sh   # ~16 min on 2 cores
 #
 # The script prints the estimated total time + RAM up front and, when run
 # interactively, waits 5s so you can Ctrl-C and re-run with smaller knobs.
@@ -29,7 +29,7 @@
 #   SECS_PER_TARGET   per-target wall-clock budget   (default 10800 = 3h)
 #   FORKS             concurrent fork workers        (default = nproc - 2)
 #   RSS_LIMIT_MB      per-process RSS cap            (default 3072)
-#   TARGETS           space-separated target list    (default = all seven)
+#   TARGETS           space-separated target list    (default = all eight)
 #
 # Examples:
 #   SECS_PER_TARGET=43200 ./fuzz/run_full_fuzz.sh          # 12h per target
@@ -53,7 +53,7 @@ SECS_PER_TARGET="${SECS_PER_TARGET:-10800}"
 NCPU="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
 FORKS="${FORKS:-$(( NCPU > 2 ? NCPU - 2 : 1 ))}"
 RSS_LIMIT_MB="${RSS_LIMIT_MB:-3072}"
-TARGETS="${TARGETS:-load_rank load_rankquant load_bitmap load_sign_bitmap roundtrip_rankquant search_rankquant fastscan_b2}"
+TARGETS="${TARGETS:-load_rank load_rankquant load_bitmap load_sign_bitmap roundtrip_rankquant search_rankquant fastscan_b2 signbitmap_rankquant_twostage}"
 
 read -ra _targets <<<"${TARGETS}"
 n_targets=${#_targets[@]}

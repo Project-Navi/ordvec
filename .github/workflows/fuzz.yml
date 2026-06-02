@@ -1,15 +1,16 @@
 name: fuzz
 
-# Bounded cargo-fuzz smoke. The seven targets in fuzz/ are normally exercised
+# Bounded cargo-fuzz smoke. The eight targets in fuzz/ are normally exercised
 # in manual campaigns; this adds CI cadence so a regression that reintroduces a
 # loader panic / OOM, breaks the write->load round-trip, or destabilises the
-# FastScan kernel surfaces in CI rather than only at the next manual run
+# FastScan or two-stage retrieval kernels surfaces in CI rather than only at
+# the next manual run
 # (THREAT-FUZZ-002 in THREAT_MODEL.md).
 #
 #   * pull_request / push(main): a SHORT smoke (60s/target) over the
 #     highest-value targets — fast enough to run on every change.
 #   * schedule (weekly) / workflow_dispatch: a LONGER sweep (300s/target)
-#     across ALL seven targets.
+#     across ALL eight targets.
 #
 # This runs UNATTENDED on a cron schedule, so every third-party action is
 # SHA-pinned, cargo-fuzz is installed with its bundled lockfile on a pinned
@@ -39,9 +40,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Short per-change smoke over the highest-value targets: two loaders plus the
-  # FastScan b=2 kernel (the one unsafe-heavy scan path the loader targets do
-  # not reach).
+  # Short per-change smoke over the highest-value targets: two loaders, the
+  # FastScan b=2 kernel, and the downstream-style SignBitmap -> RankQuant
+  # composed retrieval path.
   smoke:
     name: fuzz smoke (60s)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -50,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [load_rank, load_rankquant, fastscan_b2]
+        target: [load_rank, load_rankquant, fastscan_b2, signbitmap_rankquant_twostage]
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -71,7 +72,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo "+${FUZZ_NIGHTLY}" fuzz run "$TARGET" -- -max_total_time=60 -rss_limit_mb=4096
 
-  # Weekly full sweep over all seven targets at a larger time budget.
+  # Weekly full sweep over all eight targets at a larger time budget.
   weekly:
     name: fuzz weekly (300s)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -88,6 +89,7 @@ jobs:
           - roundtrip_rankquant
           - search_rankquant
           - fastscan_b2
+          - signbitmap_rankquant_twostage
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:

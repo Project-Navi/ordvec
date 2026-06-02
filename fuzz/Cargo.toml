@@ -73,3 +73,12 @@ path = "fuzz_targets/fastscan_b2.rs"
 test = false
 doc = false
 bench = false
+
+# Downstream-style composed retrieval path: sign candidate generation followed
+# by RankQuant subset reranking over the same rows.
+[[bin]]
+name = "signbitmap_rankquant_twostage"
+path = "fuzz_targets/signbitmap_rankquant_twostage.rs"
+test = false
+doc = false
+bench = false

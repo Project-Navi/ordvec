@@ -75,12 +75,13 @@ absence of a second maintainer is itself a tracked supply-chain residual
 | **Python FFI** | `ordvec-python` (PyO3 / maturin) | Python ↔ Rust boundary; NumPy buffers |
 | **CI / supply chain** | GitHub Actions workflows; `Cargo.lock`; crates.io + PyPI | GitHub OIDC, crates.io, PyPI trust chains |
 
-The `fuzz/` directory holds **seven** cargo-fuzz targets: `load_rank`,
+The `fuzz/` directory holds **eight** cargo-fuzz targets: `load_rank`,
 `load_rankquant`, `load_bitmap`, `load_sign_bitmap` (deserialization);
 `roundtrip_rankquant` (write→load round-trip); `search_rankquant` (the
 single-rate ingest + asymmetric-search compute path); and `fastscan_b2` (the
 FastScan b=2 block-32 kernel — the one `unsafe`-heavy scan path the others do
-not reach).
+not reach); and `signbitmap_rankquant_twostage` (sign candidate generation
+followed by RankQuant subset reranking).
 
 ### 1.2 Deployment contexts (for integrators)
 
@@ -428,8 +429,9 @@ knowledge of quantization parameters and the document distribution.
 
 ## 8. Fuzzing coverage (THREAT-FUZZ)
 
-Seven targets cover the four loaders, the write→load round-trip, the
-single-rate compute path, and (new) the FastScan kernel.
+Eight targets cover the four loaders, the write→load round-trip, the
+single-rate compute path, the FastScan kernel, and the composed
+SignBitmap→RankQuant retrieval path.
 
 **THREAT-FUZZ-001 (closed this cycle): FastScan path was unfuzzed.** The
 `fastscan_b2` target now drives `RankQuantFastscan` (`pack_fastscan_b2` +
@@ -441,12 +443,13 @@ it exercises the AVX-512 kernel.
 **THREAT-FUZZ-002 (mitigated this cycle): CI-bound fuzzing for continuous
 regression.** A `fuzz.yml` workflow now runs a bounded smoke on every pull
 request and push to `main` (`-max_total_time=60` over `load_rank`,
-`load_rankquant`, and `fastscan_b2`) plus a weekly full sweep
-(`-max_total_time=300` over all seven targets), so a regression that
+`load_rankquant`, `fastscan_b2`, and `signbitmap_rankquant_twostage`) plus a
+weekly full sweep (`-max_total_time=300` over all eight targets), so a
+regression that
 reintroduces a loader panic / OOM, breaks the write→load round-trip, or
-destabilises the FastScan kernel surfaces in CI rather than only at the next
-manual campaign. cargo-fuzz is version-pinned and the actions are SHA-pinned,
-matching the repo's scheduled-workflow hardening.
+destabilises the FastScan kernel or composed sign→RankQuant path surfaces in CI
+rather than only at the next manual campaign. cargo-fuzz is version-pinned and
+the actions are SHA-pinned, matching the repo's scheduled-workflow hardening.
 
 *Note on `load_sign_bitmap`:* all bit patterns are structurally valid for sign
 bitmaps (no per-row invariant), so that target is correctly scoped to parser
