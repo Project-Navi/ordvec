@@ -163,6 +163,10 @@ The runtime dependency floor is `numpy>=2.2`.
   published core `.crate`; use the GitHub checkout for `ordvec-manifest/`,
   `ordvec-ffi/`, `ordvec-go/`, and
   [`docs/c-api.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/c-api.md).
+- **Pre-1.0 compatibility policy:**
+  [`docs/compatibility-policy.md`](docs/compatibility-policy.md) defines the
+  stable, experimental, repo-local, persisted-format, MSRV, and release-note
+  review surfaces.
 - **Formal proof spine:** [`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization),
   including its [`proof-spine`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/proof-spine.md),
   [`theorem-map`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/theorem-map.md),
@@ -327,7 +331,8 @@ AVX-512 intrinsics the SIMD kernels compile against (it also clears the 1.87
 floor from `is_multiple_of`). Because the kernels are built against those
 intrinsics, this is a hard compile floor, not just a convenience pin: a
 toolchain below 1.89 won't build the crate. Raising the MSRV is treated as a
-minor-version change.
+minor-version change under the
+[compatibility policy](docs/compatibility-policy.md).
 
 ## License
 

@@ -116,9 +116,20 @@ filename. Until either is updated, the corresponding gated publish fails
 
 1. Land everything on `main`; confirm the working tree and `Cargo.lock` are in
    sync (`cargo build --locked`).
-2. Bump the version (crate `Cargo.toml`, and `ordvec-python` if the wheel
-   changed) and update `CHANGELOG.md`. Commit on `main`.
-3. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
+2. Review the compatibility impact against
+   [`docs/compatibility-policy.md`](docs/compatibility-policy.md):
+   - classify the release as patch-compatible or minor-breaking;
+   - identify touched stable Rust, Python, C ABI, Go, persisted-format,
+     feature, and MSRV surfaces;
+   - for patch releases, run a SemVer compatibility check against the latest
+     published crate when practical, or record why an equivalent check is not
+     useful for this release;
+   - distinguish `ordvec` primitive API/file compatibility from downstream
+     application database behavior.
+3. Bump the version (crate `Cargo.toml`, and `ordvec-python` if the wheel
+   changed) and update `CHANGELOG.md` with migration notes for every
+   intentional compatibility break. Commit on `main`.
+4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`, and
    `codeql.yml`.
@@ -138,7 +149,7 @@ filename. Until either is updated, the corresponding gated publish fails
      strategy. An interior commit that exists in history only from a PR branch
      has no push-to-main run (its CI ran as a `pull_request` on the branch)
      and so is not releasable.
-4. Run the manual release-settings audit before creating the tag:
+5. Run the manual release-settings audit before creating the tag:
 
    ```sh
    bash tests/release_environment_settings.sh
@@ -148,8 +159,8 @@ filename. Until either is updated, the corresponding gated publish fails
    and accept only the stable release tag pattern. Separately verify the
    registry Trusted Publisher records by hand: crates.io must point to
    `release.yml` / `crates-io`, and PyPI must point to `release.yml` / `pypi`.
-5. Get the maintainer's explicit go to publish.
-6. Push the version tag from `main` (signed):
+6. Get the maintainer's explicit go to publish.
+7. Push the version tag from `main` (signed):
 
    ```sh
    git tag -s vX.Y.Z -m "vX.Y.Z"
@@ -163,7 +174,7 @@ filename. Until either is updated, the corresponding gated publish fails
    `*.sigstore.json`); generates the SLSA `*.intoto.jsonl`; and stages every
    artifact, the attestation bundle, and the provenance on the GitHub Release
    — **as a DRAFT**. It then pauses at the two registry environment gates.
-7. **Approve the two publish environments** when they pause in the Actions UI
+8. **Approve the two publish environments** when they pause in the Actions UI
    (one for `crates-io`, one for `pypi`). The required-reviewer approval is
    what authorises the registry push.
    - `publish-crate` first sha256-compares its repackaged `.crate` to the
@@ -178,7 +189,7 @@ filename. Until either is updated, the corresponding gated publish fails
      serves that version, skips upload and verifies the existing files. In both
      modes it compares every PyPI-served wheel/sdist SHA-256 digest against the
      canonical `dist/` files before the GitHub Release can un-draft.
-8. Verify each published artifact and its provenance:
+9. Verify each published artifact and its provenance:
    - crates.io / docs.rs;
    - PyPI (confirm the post-publish hash-verification log, optionally
      `pip download ordvec==X.Y.Z` and inspect, plus check the PEP 740 attestation

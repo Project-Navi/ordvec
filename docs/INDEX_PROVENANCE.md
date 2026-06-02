@@ -4,9 +4,10 @@
 reloads them through `Rank::load`, `RankQuant::load`, `Bitmap::load`, and
 `SignBitmap::load`. This note states exactly **what the loaders guarantee and
 what they do not**, so you can decide whether an index file needs out-of-band
-verification before you load it. For the byte layout, versioning, and
-compatibility policy of the persisted formats themselves, see
-[`PERSISTED_FORMAT.md`](PERSISTED_FORMAT.md).
+verification before you load it. For the byte layout and versioning of the
+persisted formats themselves, see [`PERSISTED_FORMAT.md`](PERSISTED_FORMAT.md).
+Format compatibility expectations are covered by the
+[pre-1.0 compatibility policy](compatibility-policy.md).
 
 ## What the loaders validate
 

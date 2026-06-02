@@ -99,7 +99,8 @@ All fallible functions return an `ordvec_status_t`. On success, they clear the
 calling thread's `ordvec_last_error()` string. On failure, they set it to a
 human-readable detail string. The pointer returned by `ordvec_last_error()` is
 thread-local and valid until the next fallible `ordvec` C call on that same
-thread.
+thread. ABI v1 compatibility expectations are governed by the
+[pre-1.0 compatibility policy](compatibility-policy.md).
 
 Panics are caught and returned as `ORDVEC_STATUS_PANIC`; no Rust unwind crosses
 the C ABI. The library does not install a global panic hook, so the Rust
