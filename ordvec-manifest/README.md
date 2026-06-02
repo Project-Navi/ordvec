@@ -3,9 +3,10 @@
 Repo-local, publish=false sidecar verifier for ordvec index manifests.
 
 It verifies index bytes, probed header metadata, row identity, named auxiliary
-artifacts, optional calibration profile references, and attestation shape before
-a caller loads an ordvec index. It does not sign artifacts, manage keys, call
-networks, mutate index files, decide deployment trust policy, compute
+artifacts, optional encoder distortion profile references, optional
+calibration profile references, and attestation shape before a caller loads an
+ordvec index. It does not sign artifacts, manage keys, call networks, mutate
+index files, decide deployment trust policy, estimate encoder geometry, compute
 calibration statistics, or change the C ABI.
 
 ```sh
@@ -226,8 +227,8 @@ With `--features sqlite`, the `sqlite verify` and `sqlite activate` subcommands
 add a local cache/audit log plus one active-manifest pointer. This is not a
 full named registry. `sqlite verify --use-cache` reuses only reports whose
 manifest, verification options, artifact bytes, row-identity bytes,
-calibration profile bytes, and declared auxiliary artifact states/bytes still
-match; otherwise it runs fresh verification and stores a new report.
-`sqlite activate --force` writes the active pointer even when verification
-fails, emits a `sqlite_activation_forced` warning in JSON output, and exits zero
-because it did mutate activation state.
+calibration profile bytes, encoder distortion profile bytes, and declared
+auxiliary artifact states/bytes still match; otherwise it runs fresh
+verification and stores a new report. `sqlite activate --force` writes the
+active pointer even when verification fails, emits a `sqlite_activation_forced`
+warning in JSON output, and exits zero because it did mutate activation state.

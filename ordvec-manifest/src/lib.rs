@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v1";
 pub const CALIBRATION_SCHEMA_VERSION: &str = "ordvec.calibration.v1";
+pub const ENCODER_DISTORTION_SCHEMA_VERSION: &str = "ordvec.encoder_distortion.v1";
 pub const DEFAULT_MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_ROW_IDENTITY_ROWS: usize = 10_000_000;
@@ -239,6 +240,7 @@ pub fn verify_manifest(document: &ManifestDocument, options: VerifyOptions) -> V
 
     verify_auxiliary_artifacts(document, &options, &mut report);
     verify_row_identity(document, &options, &mut report);
+    verify_encoder_distortion(document, &options, &mut report);
     verify_calibration(document, &options, &mut report);
     verify_attestations(&document.manifest, &mut report);
 
@@ -350,6 +352,18 @@ fn validate_manifest_shape(
         "embedding_model_revision_empty",
         "embedding.model_revision must be non-empty when present",
         manifest.embedding.model_revision.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "embedding_tokenizer_revision_empty",
+        "embedding.tokenizer_revision must be non-empty when present",
+        manifest.embedding.tokenizer_revision.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "embedding_pooling_empty",
+        "embedding.pooling must be non-empty when present",
+        manifest.embedding.pooling.as_deref(),
         report,
     );
     validate_optional_sha256(
@@ -482,6 +496,57 @@ fn validate_optional_sha256(
     report: &mut VerificationReport,
 ) {
     if value.is_some_and(|value| !is_sha256_hex(value)) {
+        report.error(code, message);
+    }
+}
+
+fn validate_optional_sha256_uri(
+    code: &str,
+    message: &str,
+    value: Option<&str>,
+    report: &mut VerificationReport,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(digest) = value.strip_prefix("sha256:") else {
+        report.error(code, message);
+        return;
+    };
+    if !is_sha256_hex(digest) {
+        report.error(code, message);
+    }
+}
+
+fn validate_optional_positive_f64(
+    code: &str,
+    message: &str,
+    value: Option<f64>,
+    report: &mut VerificationReport,
+) {
+    if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        report.error(code, message);
+    }
+}
+
+fn validate_optional_nonnegative_f64(
+    code: &str,
+    message: &str,
+    value: Option<f64>,
+    report: &mut VerificationReport,
+) {
+    if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        report.error(code, message);
+    }
+}
+
+fn validate_optional_probability(
+    code: &str,
+    message: &str,
+    value: Option<f64>,
+    report: &mut VerificationReport,
+) {
+    if value.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
         report.error(code, message);
     }
 }
@@ -665,6 +730,473 @@ fn verify_row_identity(
     }
 }
 
+fn verify_encoder_distortion(
+    document: &ManifestDocument,
+    options: &VerifyOptions,
+    report: &mut VerificationReport,
+) {
+    let Some(profile) = &document.manifest.encoder_distortion else {
+        return;
+    };
+
+    report.encoder_distortion.present = true;
+    report.encoder_distortion.schema_version = Some(profile.schema_version.clone());
+    report.encoder_distortion.profile_id = Some(profile.profile_id.clone());
+    report.encoder_distortion.evidence_kind = Some(profile.evidence.kind.label().to_string());
+    report.encoder_distortion.source_metric = Some(profile.source_metric.name.clone());
+    report.encoder_distortion.embedding_metric = Some(profile.embedding_metric.name.clone());
+
+    validate_encoder_distortion_shape(profile, report);
+    validate_encoder_distortion_encoder(profile, &document.manifest.embedding, report);
+    validate_encoder_distortion_metrics(profile, report);
+    validate_encoder_distortion_bounds(&profile.bounds, report);
+    validate_encoder_distortion_scope(&profile.scope, report);
+    validate_encoder_distortion_evidence(profile, &document.base_dir, options, report);
+    validate_encoder_distortion_calibration(
+        profile,
+        document.manifest.calibration.as_ref(),
+        report,
+    );
+}
+
+fn validate_encoder_distortion_shape(
+    profile: &EncoderDistortionProfileRef,
+    report: &mut VerificationReport,
+) {
+    if profile.schema_version != ENCODER_DISTORTION_SCHEMA_VERSION {
+        report.error(
+            "encoder_distortion_schema_version_unsupported",
+            format!(
+                "encoder_distortion.schema_version must be {ENCODER_DISTORTION_SCHEMA_VERSION}, got {}",
+                profile.schema_version
+            ),
+        );
+    }
+    if profile.profile_id.trim().is_empty() {
+        report.error(
+            "encoder_distortion_profile_id_empty",
+            "encoder_distortion.profile_id must be non-empty",
+        );
+    }
+    if profile
+        .created_at
+        .as_ref()
+        .is_some_and(|created_at| DateTime::parse_from_rfc3339(created_at).is_err())
+    {
+        report.error(
+            "encoder_distortion_created_at_invalid",
+            "encoder_distortion.created_at must parse as RFC3339 when present",
+        );
+    }
+    if profile.encoder.model.trim().is_empty() {
+        report.error(
+            "encoder_distortion_encoder_model_empty",
+            "encoder_distortion.encoder.model must be non-empty",
+        );
+    }
+    if profile.encoder.dim == 0 {
+        report.error(
+            "encoder_distortion_encoder_dim_zero",
+            "encoder_distortion.encoder.dim must be greater than zero",
+        );
+    }
+    validate_optional_non_empty(
+        "encoder_distortion_encoder_model_revision_empty",
+        "encoder_distortion.encoder.model_revision must be non-empty when present",
+        profile.encoder.model_revision.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "encoder_distortion_encoder_normalization_empty",
+        "encoder_distortion.encoder.normalization must be non-empty when present",
+        profile.encoder.normalization.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "encoder_distortion_tokenizer_revision_empty",
+        "encoder_distortion.tokenizer_revision must be non-empty when present",
+        profile.tokenizer_revision.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "encoder_distortion_pooling_empty",
+        "encoder_distortion.pooling must be non-empty when present",
+        profile.pooling.as_deref(),
+        report,
+    );
+}
+
+fn validate_encoder_distortion_encoder(
+    profile: &EncoderDistortionProfileRef,
+    embedding: &Embedding,
+    report: &mut VerificationReport,
+) {
+    if profile.encoder.model != embedding.model {
+        report.error(
+            "encoder_distortion_encoder_model_mismatch",
+            format!(
+                "encoder_distortion model {:?} does not match embedding.model {:?}",
+                profile.encoder.model, embedding.model
+            ),
+        );
+    }
+    if profile.encoder.dim != embedding.dim {
+        report.error(
+            "encoder_distortion_encoder_dim_mismatch",
+            format!(
+                "encoder_distortion dim {} does not match embedding.dim {}",
+                profile.encoder.dim, embedding.dim
+            ),
+        );
+    }
+    compare_optional_encoder_identity(
+        "encoder_distortion_encoder_model_revision_mismatch",
+        "encoder_distortion encoder",
+        "model_revision",
+        embedding.model_revision.as_deref(),
+        profile.encoder.model_revision.as_deref(),
+        report,
+    );
+    compare_optional_encoder_identity(
+        "encoder_distortion_encoder_normalization_mismatch",
+        "encoder_distortion encoder",
+        "normalization",
+        embedding.normalization.as_deref(),
+        profile.encoder.normalization.as_deref(),
+        report,
+    );
+    compare_optional_encoder_identity(
+        "encoder_distortion_tokenizer_revision_mismatch",
+        "encoder_distortion",
+        "tokenizer_revision",
+        embedding.tokenizer_revision.as_deref(),
+        profile.tokenizer_revision.as_deref(),
+        report,
+    );
+    compare_optional_encoder_identity(
+        "encoder_distortion_pooling_mismatch",
+        "encoder_distortion",
+        "pooling",
+        embedding.pooling.as_deref(),
+        profile.pooling.as_deref(),
+        report,
+    );
+}
+
+fn validate_encoder_distortion_metrics(
+    profile: &EncoderDistortionProfileRef,
+    report: &mut VerificationReport,
+) {
+    validate_metric_spec(
+        "encoder_distortion_source_metric",
+        &profile.source_metric,
+        report,
+    );
+    validate_metric_spec(
+        "encoder_distortion_embedding_metric",
+        &profile.embedding_metric,
+        report,
+    );
+}
+
+fn validate_metric_spec(prefix: &str, metric: &MetricSpec, report: &mut VerificationReport) {
+    if metric.name.trim().is_empty() {
+        report.error(
+            format!("{prefix}_name_empty"),
+            format!("{prefix}.name must be non-empty"),
+        );
+    }
+    validate_optional_non_empty(
+        &format!("{prefix}_version_empty"),
+        &format!("{prefix}.version must be non-empty when present"),
+        metric.version.as_deref(),
+        report,
+    );
+    validate_optional_sha256_uri(
+        &format!("{prefix}_digest_invalid"),
+        &format!("{prefix}.digest must be sha256:<lowercase-hex> when present"),
+        metric.digest.as_deref(),
+        report,
+    );
+}
+
+fn validate_encoder_distortion_bounds(bounds: &DistortionBounds, report: &mut VerificationReport) {
+    if bounds.declared_lower_bound.is_none()
+        && bounds.declared_upper_bound.is_none()
+        && bounds.estimated_distortion.is_none()
+        && bounds.violation_rate.is_none()
+        && bounds.max_observed_violation.is_none()
+        && bounds.quantile_observed_violation.is_none()
+    {
+        report.error(
+            "encoder_distortion_bounds_empty",
+            "encoder_distortion.bounds must declare at least one bound or observed violation statistic",
+        );
+    }
+
+    validate_optional_positive_f64(
+        "encoder_distortion_lower_bound_invalid",
+        "encoder_distortion.bounds.declared_lower_bound must be finite and greater than zero",
+        bounds.declared_lower_bound,
+        report,
+    );
+    validate_optional_positive_f64(
+        "encoder_distortion_upper_bound_invalid",
+        "encoder_distortion.bounds.declared_upper_bound must be finite and greater than zero",
+        bounds.declared_upper_bound,
+        report,
+    );
+    validate_optional_positive_f64(
+        "encoder_distortion_estimated_distortion_invalid",
+        "encoder_distortion.bounds.estimated_distortion must be finite and greater than zero",
+        bounds.estimated_distortion,
+        report,
+    );
+    validate_optional_probability(
+        "encoder_distortion_violation_rate_invalid",
+        "encoder_distortion.bounds.violation_rate must be finite and within [0, 1]",
+        bounds.violation_rate,
+        report,
+    );
+    validate_optional_nonnegative_f64(
+        "encoder_distortion_max_observed_violation_invalid",
+        "encoder_distortion.bounds.max_observed_violation must be finite and non-negative",
+        bounds.max_observed_violation,
+        report,
+    );
+    validate_optional_nonnegative_f64(
+        "encoder_distortion_quantile_observed_violation_invalid",
+        "encoder_distortion.bounds.quantile_observed_violation must be finite and non-negative",
+        bounds.quantile_observed_violation,
+        report,
+    );
+
+    if let (Some(lower), Some(upper)) = (bounds.declared_lower_bound, bounds.declared_upper_bound) {
+        if lower.is_finite() && upper.is_finite() && lower > upper {
+            report.error(
+                "encoder_distortion_bounds_order_invalid",
+                "encoder_distortion.bounds.declared_lower_bound must be less than or equal to declared_upper_bound",
+            );
+        }
+        if lower.is_finite() && upper.is_finite() && lower > 0.0 && upper > 0.0 {
+            if let Some(estimated) = bounds.estimated_distortion {
+                let expected = upper / lower;
+                let tolerance = 1e-9_f64.max(expected.abs() * 1e-9);
+                if estimated.is_finite() && (estimated - expected).abs() > tolerance {
+                    report.error(
+                        "encoder_distortion_distortion_mismatch",
+                        format!(
+                            "encoder_distortion.bounds.estimated_distortion {} does not match declared_upper_bound / declared_lower_bound {}",
+                            estimated, expected
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn validate_encoder_distortion_scope(scope: &DistortionScope, report: &mut VerificationReport) {
+    validate_optional_sha256_uri(
+        "encoder_distortion_scope_corpus_digest_invalid",
+        "encoder_distortion.scope.corpus_digest must be sha256:<lowercase-hex> when present",
+        scope.corpus_digest.as_deref(),
+        report,
+    );
+    validate_optional_sha256_uri(
+        "encoder_distortion_scope_query_set_digest_invalid",
+        "encoder_distortion.scope.query_set_digest must be sha256:<lowercase-hex> when present",
+        scope.query_set_digest.as_deref(),
+        report,
+    );
+    validate_optional_sha256_uri(
+        "encoder_distortion_scope_pair_sample_digest_invalid",
+        "encoder_distortion.scope.pair_sample_digest must be sha256:<lowercase-hex> when present",
+        scope.pair_sample_digest.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "encoder_distortion_scope_domain_empty",
+        "encoder_distortion.scope.domain must be non-empty when present",
+        scope.domain.as_deref(),
+        report,
+    );
+    validate_optional_non_empty(
+        "encoder_distortion_scope_estimator_version_empty",
+        "encoder_distortion.scope.estimator_version must be non-empty when present",
+        scope.estimator_version.as_deref(),
+        report,
+    );
+    if scope
+        .sample_size
+        .is_some_and(|sample_size| sample_size == 0)
+    {
+        report.error(
+            "encoder_distortion_scope_sample_size_zero",
+            "encoder_distortion.scope.sample_size must be greater than zero when present",
+        );
+    }
+    validate_optional_probability(
+        "encoder_distortion_scope_confidence_invalid",
+        "encoder_distortion.scope.confidence must be finite and within [0, 1]",
+        scope.confidence,
+        report,
+    );
+    validate_optional_probability(
+        "encoder_distortion_scope_coverage_invalid",
+        "encoder_distortion.scope.coverage must be finite and within [0, 1]",
+        scope.coverage,
+        report,
+    );
+}
+
+fn validate_encoder_distortion_evidence(
+    profile: &EncoderDistortionProfileRef,
+    base_dir: &Path,
+    options: &VerifyOptions,
+    report: &mut VerificationReport,
+) {
+    validate_optional_non_empty(
+        "encoder_distortion_evidence_estimator_id_empty",
+        "encoder_distortion.evidence.estimator_id must be non-empty when present",
+        profile.evidence.estimator_id.as_deref(),
+        report,
+    );
+    validate_optional_sha256_uri(
+        "encoder_distortion_evidence_estimator_hash_invalid",
+        "encoder_distortion.evidence.estimator_hash must be sha256:<lowercase-hex> when present",
+        profile.evidence.estimator_hash.as_deref(),
+        report,
+    );
+
+    if profile.profile.is_none() && profile.evidence.kind != DistortionEvidenceKind::CallerAsserted
+    {
+        report.error(
+            "encoder_distortion_profile_required",
+            "non-caller-asserted encoder distortion evidence requires a profile artifact",
+        );
+        return;
+    }
+
+    if let Some(artifact) = &profile.profile {
+        validate_encoder_distortion_profile_artifact(artifact, base_dir, options, report);
+    }
+}
+
+fn validate_encoder_distortion_profile_artifact(
+    profile: &DistortionProfileArtifactRef,
+    base_dir: &Path,
+    options: &VerifyOptions,
+    report: &mut VerificationReport,
+) {
+    report.encoder_distortion.profile_manifest_path = Some(profile.path.clone());
+    if profile.path.trim().is_empty() {
+        report.error(
+            "encoder_distortion_profile_path_empty",
+            "encoder_distortion.profile.path must be non-empty",
+        );
+    }
+    if !is_sha256_hex(&profile.sha256) {
+        report.error(
+            "encoder_distortion_profile_sha256_invalid",
+            "encoder_distortion.profile.sha256 must be a lowercase 64-character hex SHA-256 digest",
+        );
+    }
+    if profile.file_size_bytes == 0 {
+        report.error(
+            "encoder_distortion_profile_file_size_zero",
+            "encoder_distortion.profile.file_size_bytes must be greater than zero",
+        );
+    }
+    if profile.format.trim().is_empty() {
+        report.error(
+            "encoder_distortion_profile_format_empty",
+            "encoder_distortion.profile.format must be non-empty",
+        );
+    }
+    validate_optional_sha256_uri(
+        "encoder_distortion_profile_source_digest_invalid",
+        "encoder_distortion.profile.source_digest must be sha256:<lowercase-hex> when present",
+        profile.source_digest.as_deref(),
+        report,
+    );
+
+    if !profile.path.trim().is_empty() {
+        let path = PathBuf::from(&profile.path);
+        if let Some(resolved) = resolve_existing_path(
+            &path,
+            base_dir,
+            options,
+            "encoder_distortion_profile",
+            &mut report.errors,
+        ) {
+            report.encoder_distortion.profile_canonical_path =
+                Some(path_to_display(&resolved.canonical_path));
+            match sha256_file(&resolved.resolved_path) {
+                Ok(hash) => {
+                    report.encoder_distortion.profile_sha256 = Some(hash.sha256.clone());
+                    report.encoder_distortion.profile_size_bytes = Some(hash.size_bytes);
+                    if !hex_digest_eq(&hash.sha256, &profile.sha256) {
+                        report.error(
+                            "encoder_distortion_profile_sha256_mismatch",
+                            format!(
+                                "encoder distortion profile SHA-256 was {}, manifest declares {}",
+                                hash.sha256, profile.sha256
+                            ),
+                        );
+                    }
+                    if hash.size_bytes != profile.file_size_bytes {
+                        report.error(
+                            "encoder_distortion_profile_file_size_mismatch",
+                            format!(
+                                "encoder distortion profile size was {}, manifest declares {}",
+                                hash.size_bytes, profile.file_size_bytes
+                            ),
+                        );
+                    }
+                }
+                Err(err) => report.error(
+                    "encoder_distortion_profile_hash_failed",
+                    format!("failed to hash encoder distortion profile: {err}"),
+                ),
+            }
+        }
+    }
+}
+
+fn validate_encoder_distortion_calibration(
+    profile: &EncoderDistortionProfileRef,
+    calibration: Option<&CalibrationProfileRef>,
+    report: &mut VerificationReport,
+) {
+    let Some(calibration_profile_id) = &profile.calibration_profile_id else {
+        return;
+    };
+    if calibration_profile_id.trim().is_empty() {
+        report.error(
+            "encoder_distortion_calibration_profile_id_empty",
+            "encoder_distortion.calibration_profile_id must be non-empty when present",
+        );
+        return;
+    }
+    let Some(calibration) = calibration else {
+        report.error(
+            "encoder_distortion_calibration_missing",
+            "encoder_distortion.calibration_profile_id requires a calibration block",
+        );
+        return;
+    };
+    if calibration.profile_id != *calibration_profile_id {
+        report.error(
+            "encoder_distortion_calibration_profile_mismatch",
+            format!(
+                "encoder_distortion.calibration_profile_id {:?} does not match calibration.profile_id {:?}",
+                calibration_profile_id, calibration.profile_id
+            ),
+        );
+    }
+}
+
 fn verify_calibration(
     document: &ManifestDocument,
     options: &VerifyOptions,
@@ -827,6 +1359,7 @@ fn validate_calibration_encoder(
     }
     compare_optional_identity(
         "calibration_encoder_model_revision_mismatch",
+        "calibration encoder",
         "model_revision",
         embedding.model_revision.as_deref(),
         calibration.calibrated_for.model_revision.as_deref(),
@@ -834,6 +1367,7 @@ fn validate_calibration_encoder(
     );
     compare_optional_identity(
         "calibration_encoder_normalization_mismatch",
+        "calibration encoder",
         "normalization",
         embedding.normalization.as_deref(),
         calibration.calibrated_for.normalization.as_deref(),
@@ -843,17 +1377,36 @@ fn validate_calibration_encoder(
 
 fn compare_optional_identity(
     code: &str,
+    subject: &str,
     field: &str,
     embedding_value: Option<&str>,
     calibration_value: Option<&str>,
     report: &mut VerificationReport,
 ) {
-    match (embedding_value, calibration_value) {
+    compare_optional_encoder_identity(
+        code,
+        subject,
+        field,
+        embedding_value,
+        calibration_value,
+        report,
+    );
+}
+
+fn compare_optional_encoder_identity(
+    code: &str,
+    subject: &str,
+    field: &str,
+    embedding_value: Option<&str>,
+    observed_value: Option<&str>,
+    report: &mut VerificationReport,
+) {
+    match (embedding_value, observed_value) {
         (Some(expected), Some(observed)) if expected == observed => {}
         (None, None) => {}
         _ => report.error(
             code,
-            format!("calibration encoder {field} does not match embedding.{field}"),
+            format!("{subject} {field} does not match embedding.{field}"),
         ),
     }
 }
@@ -1728,6 +2281,8 @@ pub struct IndexManifest {
     pub auxiliary_artifacts: Vec<AuxiliaryArtifact>,
     pub embedding: Embedding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_distortion: Option<EncoderDistortionProfileRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<CalibrationProfileRef>,
     pub row_identity: RowIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1771,6 +2326,10 @@ pub struct Embedding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooling: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corpus_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_matrix_digest: Option<String>,
@@ -1801,6 +2360,120 @@ pub struct EncoderSpec {
     pub model_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalization: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncoderDistortionProfileRef {
+    pub schema_version: String,
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    pub encoder: EncoderSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooling: Option<String>,
+    pub source_metric: MetricSpec,
+    pub embedding_metric: MetricSpec,
+    pub bounds: DistortionBounds,
+    pub scope: DistortionScope,
+    pub evidence: DistortionEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<DistortionProfileArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration_profile_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricSpec {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistortionBounds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_lower_bound: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_upper_bound: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_distortion: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violation_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_observed_violation: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantile_observed_violation: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistortionScope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_set_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_sample_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimator_version: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistortionEvidence {
+    pub kind: DistortionEvidenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimator_hash: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DistortionEvidenceKind {
+    Certified,
+    EmpiricalSample,
+    BenchmarkEstimate,
+    TeacherEstimate,
+    CallerAsserted,
+}
+
+impl DistortionEvidenceKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Certified => "certified",
+            Self::EmpiricalSample => "empirical_sample",
+            Self::BenchmarkEstimate => "benchmark_estimate",
+            Self::TeacherEstimate => "teacher_estimate",
+            Self::CallerAsserted => "caller_asserted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistortionProfileArtifactRef {
+    pub path: String,
+    pub sha256: String,
+    pub file_size_bytes: u64,
+    pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1990,6 +2663,7 @@ pub struct VerificationReport {
     #[serde(default)]
     pub auxiliary_artifacts: Vec<AuxiliaryArtifactReport>,
     pub row_identity: RowIdentityReport,
+    pub encoder_distortion: EncoderDistortionReport,
     pub calibration: CalibrationReport,
     pub attestation_shape_checks: Vec<AttestationShapeCheck>,
     pub errors: Vec<ReportIssue>,
@@ -2006,6 +2680,7 @@ impl VerificationReport {
             artifact: ArtifactReport::default(),
             auxiliary_artifacts: Vec::new(),
             row_identity: RowIdentityReport::default(),
+            encoder_distortion: EncoderDistortionReport::default(),
             calibration: CalibrationReport::default(),
             attestation_shape_checks: Vec::new(),
             errors: Vec::new(),
@@ -2065,6 +2740,20 @@ pub struct RowIdentityReport {
     pub sha256: Option<String>,
     pub row_count: Option<usize>,
     pub validated_rows: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EncoderDistortionReport {
+    pub present: bool,
+    pub schema_version: Option<String>,
+    pub profile_id: Option<String>,
+    pub evidence_kind: Option<String>,
+    pub source_metric: Option<String>,
+    pub embedding_metric: Option<String>,
+    pub profile_manifest_path: Option<String>,
+    pub profile_canonical_path: Option<String>,
+    pub profile_sha256: Option<String>,
+    pub profile_size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -2328,10 +3017,13 @@ pub fn create_manifest_for_index_with_options(
             model: embedding_model.into(),
             dim: metadata.dim,
             model_revision: None,
+            tokenizer_revision: None,
+            pooling: None,
             corpus_digest: None,
             embedding_matrix_digest: None,
             normalization: None,
         },
+        encoder_distortion: None,
         calibration: None,
         row_identity,
         build: Some(BuildInfo {

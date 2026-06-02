@@ -70,6 +70,10 @@ The manifest verifier checks:
 - declared auxiliary artifacts, checking each caller-named sidecar's path,
   SHA-256 digest, byte length, and configured byte ceiling under the same
   default path policy as the primary index artifact;
+- optional `encoder_distortion` profile references, checking scoped metric
+  names, encoder identity, finite declared/estimated bounds, evidence kind,
+  path/hash integrity for side artifacts, and optional calibration-profile
+  linkage;
 - optional `calibration` profile references, checking profile identity,
   path/hash integrity, encoder identity, and ordinalization compatibility;
 - attestation **shape** only: predicate type, builder id when present, and at
@@ -83,6 +87,17 @@ whether declared required members were verified, whether optional members were
 present or absent, and whether any declared member failed path, size, or digest
 checks or exceeded the configured auxiliary artifact byte limit. Callers should
 load sidecars only after the relevant declaration is verified.
+
+When present, `encoder_distortion` records a scoped encoder geometry profile:
+source metric, embedding metric, lower/upper distortion-style bounds when
+declared, empirical violation statistics when available, evidence kind, and
+hashes tying any profile side artifact to the manifest. This is deliberately
+not a claim that the encoder is globally bi-Lipschitz over language. The
+verifier checks that the declaration is finite, scoped, identity-compatible
+with `embedding`, and byte-bound to any referenced profile; it does not estimate
+the profile or promote empirical evidence into a theorem. If
+`calibration_profile_id` is present, the verifier also checks that it names the
+manifest's `calibration.profile_id`.
 
 When present, `calibration` binds an index artifact to a hashed ordinal profile
 used to interpret overlap, bucket, sign, or rank evidence under a calibrated

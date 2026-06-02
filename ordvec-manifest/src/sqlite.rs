@@ -115,6 +115,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
                 row_identity_sha256 TEXT,
                 calibration_profile_sha256 TEXT,
                 auxiliary_artifacts_sha256 TEXT,
+                encoder_distortion_profile_sha256 TEXT,
                 report_json TEXT NOT NULL
              );
              INSERT INTO verification_reports(
@@ -139,6 +140,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
             row_identity_sha256 TEXT,
             calibration_profile_sha256 TEXT,
             auxiliary_artifacts_sha256 TEXT,
+            encoder_distortion_profile_sha256 TEXT,
             report_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS verification_reports_cache_idx
@@ -150,6 +152,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
             row_identity_sha256,
             calibration_profile_sha256,
             auxiliary_artifacts_sha256,
+            encoder_distortion_profile_sha256,
             report_id
           );
         CREATE TABLE IF NOT EXISTS active_manifest(
@@ -196,8 +199,9 @@ fn store_report(
             row_identity_sha256,
             calibration_profile_sha256,
             auxiliary_artifacts_sha256,
+            encoder_distortion_profile_sha256,
             report_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             document.manifest.manifest_id,
             manifest_path.display().to_string(),
@@ -209,6 +213,7 @@ fn store_report(
             cache_key.and_then(|key| key.row_identity_sha256.as_deref()),
             cache_key.and_then(|key| key.calibration_profile_sha256.as_deref()),
             cache_key.and_then(|key| key.auxiliary_artifacts_sha256.as_deref()),
+            cache_key.and_then(|key| key.encoder_distortion_profile_sha256.as_deref()),
             report_json,
         ],
     )
@@ -243,6 +248,10 @@ fn load_cached_report(
                  (auxiliary_artifacts_sha256 IS NULL AND ?7 IS NULL)
                  OR auxiliary_artifacts_sha256 = ?7
                )
+               AND (
+                 (encoder_distortion_profile_sha256 IS NULL AND ?8 IS NULL)
+                 OR encoder_distortion_profile_sha256 = ?8
+               )
              ORDER BY report_id DESC
              LIMIT 1",
             params![
@@ -253,6 +262,7 @@ fn load_cached_report(
                 cache_key.row_identity_sha256.as_deref(),
                 cache_key.calibration_profile_sha256.as_deref(),
                 cache_key.auxiliary_artifacts_sha256.as_deref(),
+                cache_key.encoder_distortion_profile_sha256.as_deref(),
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -291,6 +301,7 @@ struct CacheKey {
     row_identity_sha256: Option<String>,
     calibration_profile_sha256: Option<String>,
     auxiliary_artifacts_sha256: Option<String>,
+    encoder_distortion_profile_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -391,6 +402,8 @@ fn current_cache_key(
     };
     let calibration_profile_sha256 = current_calibration_profile_sha256(document, options)?;
     let auxiliary_artifacts_sha256 = current_auxiliary_artifacts_sha256(document, options)?;
+    let encoder_distortion_profile_sha256 =
+        current_encoder_distortion_profile_sha256(document, options)?;
 
     Ok(Some(CacheKey {
         manifest_sha256,
@@ -399,6 +412,7 @@ fn current_cache_key(
         row_identity_sha256,
         calibration_profile_sha256,
         auxiliary_artifacts_sha256,
+        encoder_distortion_profile_sha256,
     }))
 }
 
@@ -446,6 +460,20 @@ fn cache_key_from_report(
         None
     };
     let auxiliary_artifacts_sha256 = auxiliary_artifacts_sha256_from_report(document, report)?;
+    let encoder_distortion_profile_sha256 = if document
+        .manifest
+        .encoder_distortion
+        .as_ref()
+        .and_then(|profile| profile.profile.as_ref())
+        .is_some()
+    {
+        let Some(sha256) = report.encoder_distortion.profile_sha256.clone() else {
+            return Ok(None);
+        };
+        Some(sha256)
+    } else {
+        None
+    };
     Ok(Some(CacheKey {
         manifest_sha256,
         options_sha256,
@@ -453,6 +481,7 @@ fn cache_key_from_report(
         row_identity_sha256,
         calibration_profile_sha256,
         auxiliary_artifacts_sha256,
+        encoder_distortion_profile_sha256,
     }))
 }
 
@@ -548,6 +577,35 @@ fn current_calibration_profile_sha256(
     }
 }
 
+fn current_encoder_distortion_profile_sha256(
+    document: &ManifestDocument,
+    options: &VerifyOptions,
+) -> Result<Option<String>, ManifestError> {
+    let Some(profile) = document
+        .manifest
+        .encoder_distortion
+        .as_ref()
+        .and_then(|profile| profile.profile.as_ref())
+    else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&profile.path);
+    let mut path_errors = Vec::<ReportIssue>::new();
+    let Some(resolved) = resolve_existing_path(
+        &path,
+        &document.base_dir,
+        options,
+        "encoder_distortion_profile",
+        &mut path_errors,
+    ) else {
+        return Ok(None);
+    };
+    match sha256_file(&resolved.resolved_path) {
+        Ok(hash) => Ok(Some(hash.sha256)),
+        Err(_) => Ok(None),
+    }
+}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -584,7 +642,10 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
             .any(|column| column == "calibration_profile_sha256")
         || !columns
             .iter()
-            .any(|column| column == "auxiliary_artifacts_sha256"))
+            .any(|column| column == "auxiliary_artifacts_sha256")
+        || !columns
+            .iter()
+            .any(|column| column == "encoder_distortion_profile_sha256"))
 }
 
 fn sqlite_err(err: rusqlite::Error) -> ManifestError {
