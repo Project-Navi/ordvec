@@ -18,6 +18,7 @@
 # in CONTRIBUTING.md.
 /CLAUDE.md
 /.claude/
+/.ordgrep/
 
 # Coverage output (cargo-llvm-cov / Codecov).
 lcov.info

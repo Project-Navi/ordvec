@@ -73,7 +73,7 @@ absence of a second maintainer is itself a tracked supply-chain residual
 | **C ABI** | `ordvec-ffi` (`include/ordvec.h`) | C caller ↔ Rust boundary; raw pointers and opaque handles |
 | **Go FFI** | `ordvec-go` (cgo over `ordvec-ffi`) | Go slices ↔ synchronous C ABI calls |
 | **Python FFI** | `ordvec-python` (PyO3 / maturin) | Python ↔ Rust boundary; NumPy buffers |
-| **CI / supply chain** | 13 GitHub Actions workflows; `Cargo.lock`; crates.io + PyPI | GitHub OIDC, crates.io, PyPI trust chains |
+| **CI / supply chain** | GitHub Actions workflows; `Cargo.lock`; crates.io + PyPI | GitHub OIDC, crates.io, PyPI trust chains |
 
 The `fuzz/` directory holds **seven** cargo-fuzz targets: `load_rank`,
 `load_rankquant`, `load_bitmap`, `load_sign_bitmap` (deserialization);
@@ -204,6 +204,15 @@ scalar and AVX-512 paths agree on the same quantized inputs (equivalence test),
 and `TopK` uses `total_cmp` for deterministic tie-breaking across all paths.
 This is approximate *scoring*, not a CPU oracle. FastScan is a `#[doc(hidden)]`
 pre-ranker; callers needing exact scores use `RankQuant::search_asymmetric`.
+
+**THREAT-SIMD-004 (mitigated this cycle): Native sanitizer coverage for
+unsafe kernels.** `.github/workflows/sanitizers.yml` runs nightly
+AddressSanitizer tests with `-Zsanitizer=address` and `-Z build-std` on
+native x86_64 and Linux/aarch64. The x86_64 leg instruments the scalar/AVX2
+surfaces plus the repo-local C ABI tests; the aarch64 leg instruments the
+NEON path on a native ARM runner. This deliberately does not claim AVX-512
+sanitizer coverage: GitHub-hosted runners still need Intel SDE to execute
+those kernels, and layering ASAN onto the existing SDE leg remains a follow-up.
 
 ---
 
@@ -462,6 +471,7 @@ blast radius of a compromised dependency separately.
 | ID | Category | Owner | Description | Likelihood | Impact | Status / priority |
 |---|---|---|---|---|---|---|
 | THREAT-SIMD-001 | Memory safety | Library | Unsafe-kernel invariant bypass on refactor | Medium | High | **Mitigated** — `unsafe_op_in_unsafe_fn` denied crate-wide + type wrapper + equivalence test |
+| THREAT-SIMD-004 | Memory safety | Library | Native sanitizer coverage for unsafe kernels | Medium | High | **Mitigated** — ASAN on x86_64 scalar/AVX2 + aarch64 NEON; AVX-512 SDE+ASAN deferred |
 | THREAT-FFI-001 | FFI | Binding | Panic or invalid input crossing C ABI | Medium | High | **Mitigated** — status codes, validation, `catch_unwind` |
 | THREAT-FFI-002 | FFI | Caller | Handle lifetime misuse | Medium | High | **P2** — documented contract; stacked Go wrapper serializes `Close` |
 | THREAT-FFI-003 | FFI | Binding | Accidental telemetry through ABI stats | Low | Low | **Mitigated** — caller-owned stats, no logging |
@@ -495,7 +505,8 @@ matching binding guards; reviewer-gated release-tag deployment plus the
 `require-ci-green` main-SHA gate (SUPPLY-001); **GitHub immutable releases
 enabled + `main` branch protection**
 (SUPPLY-002); [`docs/INDEX_PROVENANCE.md`](docs/INDEX_PROVENANCE.md) (DESER-002);
-[`RELEASING.md`](RELEASING.md) (SUPPLY-001).
+[`RELEASING.md`](RELEASING.md) (SUPPLY-001); ASAN coverage for native
+x86_64/aarch64 unsafe paths (SIMD-004).
 
 **Open, low cost:**
 
@@ -506,7 +517,7 @@ enabled + `main` branch protection**
 wait timer becomes meaningful); an optional sidecar index verifier
 (`ordvec verify` / external HMAC/BLAKE3 manifest) if a deployment requires
 tamper-evidence (DESER-002); a `safe_copy=True` FFI isolation option
-(FFI-001).
+(FFI-001); layering ASAN onto the Intel SDE AVX-512 leg.
 
 ---
 
