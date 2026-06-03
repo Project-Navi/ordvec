@@ -25,11 +25,13 @@ empty, search returns an empty result shape rather than padded sentinel hits.
 
 Backend selection must not change the documented ordering rule. Exact integer
 popcount primitives are bit-exact across scalar, AVX-512, aarch64 NEON, and
-wasm `simd128` implementations. Floating-point RankQuant asymmetric kernels
-are checked against the scalar LUT reference with an absolute score tolerance
-of `1e-4` and no relative tolerance; intentional changes to that tolerance or
-to golden top-k output are compatibility-affecting and must be called out in
-the PR and release notes.
+wasm `simd128` implementations. Floating-point score equivalence uses an
+absolute tolerance of `1e-4` and no relative tolerance (`rtol = 0`) unless a
+row below explicitly states that the score is integer-exact. Some tests use
+tighter tolerances for specific scalar helper comparisons, but `1e-4` is the
+public cross-backend/architecture compatibility tolerance. Intentional changes
+to that tolerance or to golden top-k output are compatibility-affecting and
+must be called out in the PR and release notes.
 
 Query-level parallelism may change scheduling, but each query is scored and
 finalized independently. Batched APIs must match the corresponding single-query
@@ -41,16 +43,16 @@ the public hit order still follows the global ordering rule above.
 
 | Surface | Score contract | Tie key | Backend contract |
 | --- | --- | --- | --- |
-| `Rank::search` | Normalized Spearman-style rank cosine. | Global row ID ascending. | Fixed scalar arithmetic per row; query parallelism does not affect per-query output. |
-| `Rank::search_asymmetric` | Float query against stored ranks. | Global row ID ascending. | Fixed scalar arithmetic per row; query parallelism does not affect per-query output. |
-| `RankQuant::search` | Symmetric bucketed-rank score. | Global row ID ascending. | Scalar packed-byte LUT path; query parallelism does not affect per-query output. |
-| `RankQuant::search_asymmetric` | Float query against stored buckets. | Global row ID ascending. | AVX-512, AVX2, and scalar-LUT dispatch must agree with the scalar reference within the documented test tolerance and preserve top-k order for the golden fixtures. |
-| `RankQuant::search_asymmetric_subset` | Same score as `RankQuant::search_asymmetric`, restricted to caller-supplied candidates. | Global row ID ascending, not candidate-list position. Duplicate candidate IDs remain duplicate entries. | Uses the same AVX-512, AVX2, or scalar dispatch as full asymmetric search over a gathered scratch buffer. |
-| `Bitmap::search` | Exact `popcount(Q AND D)` as `f32`. | Global row ID ascending. | Popcount scores are integer-exact across scalar and SIMD implementations. |
-| `Bitmap::top_m_candidates` | Exact `popcount(Q AND D)` candidate ordering. | Global row ID ascending. | Single-query and batched candidate APIs must return the same ordered candidates. |
-| `Bitmap::search_subset` | Exact subset `popcount(Q AND D)` as `f32`. | Global row ID ascending. Duplicate candidate IDs remain duplicate entries. | Subset score kernels must agree with scalar popcount. |
-| `SignBitmap::top_m_candidates` | Lowest Hamming distance, equivalently highest sign agreement. | Global row ID ascending. | Single-query and batched candidate APIs must return the same ordered candidates. |
-| `SignBitmap::score_all` | Dense sign-agreement counts aligned by row ID. | Not a top-k API. | Popcount scores are integer-exact across scalar and SIMD implementations. |
+| `Rank::search` | Normalized Spearman-style rank cosine; floating scores are tolerance-based with absolute tolerance `1e-4`, `rtol = 0`. | Global row ID ascending. | Fixed scalar arithmetic per row; query parallelism does not affect per-query output. |
+| `Rank::search_asymmetric` | Float query against stored ranks; floating scores are tolerance-based with absolute tolerance `1e-4`, `rtol = 0`. | Global row ID ascending. | Fixed scalar arithmetic per row; query parallelism does not affect per-query output. |
+| `RankQuant::search` | Symmetric bucketed-rank score; floating scores are tolerance-based with absolute tolerance `1e-4`, `rtol = 0`. | Global row ID ascending. | Scalar packed-byte LUT path; query parallelism does not affect per-query output. |
+| `RankQuant::search_asymmetric` | Float query against stored buckets; floating scores are tolerance-based with absolute tolerance `1e-4`, `rtol = 0`. | Global row ID ascending. | AVX-512, AVX2, and scalar-LUT dispatch must agree with the scalar reference within the public tolerance and preserve top-k order for the golden fixtures. |
+| `RankQuant::search_asymmetric_subset` | Same score as `RankQuant::search_asymmetric`, restricted to caller-supplied candidates; floating scores use the same `1e-4` absolute tolerance and `rtol = 0`. | Global row ID ascending, not candidate-list position. Duplicate candidate IDs remain duplicate entries. | Uses the same AVX-512, AVX2, or scalar dispatch as full asymmetric search over a gathered scratch buffer. |
+| `Bitmap::search` | Exact `popcount(Q AND D)` represented as `f32`; score is integer-exact, not tolerance-based. | Global row ID ascending. | Popcount scores are integer-exact across scalar and SIMD implementations. |
+| `Bitmap::top_m_candidates` | Exact `popcount(Q AND D)` candidate ordering; score key is integer-exact, not tolerance-based. | Global row ID ascending. | Single-query and batched candidate APIs must return the same ordered candidates. |
+| `Bitmap::search_subset` | Exact subset `popcount(Q AND D)` represented as `f32`; score is integer-exact, not tolerance-based. | Global row ID ascending. Duplicate candidate IDs remain duplicate entries. | Subset score kernels must agree bit-exactly with scalar popcount. |
+| `SignBitmap::top_m_candidates` | Lowest Hamming distance, equivalently highest sign agreement; score key is integer-exact, not tolerance-based. | Global row ID ascending. | Single-query and batched candidate APIs must return the same ordered candidates. |
+| `SignBitmap::score_all` | Dense sign-agreement counts aligned by row ID; scores are `u32` integer-exact, not tolerance-based. | Not a top-k API. | Popcount scores are integer-exact across scalar and SIMD implementations. |
 
 ## FastScan
 
