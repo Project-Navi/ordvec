@@ -116,9 +116,26 @@ fn read_bounded_file(
     context: &'static str,
 ) -> Result<Vec<u8>, ManifestError> {
     let mut file = File::open(path)?;
-    let max_len = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    let max_len = usize::try_from(max_bytes).map_err(|_| {
+        ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} byte limit {max_bytes} is too large to enforce while reading {}",
+                path.display()
+            ),
+        )
+    })?;
+    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
+        ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} byte limit {max_bytes} is too large to enforce while reading {}",
+                path.display()
+            ),
+        )
+    })?;
     let mut bytes = Vec::new();
-    let mut limited = file.by_ref().take(max_bytes.saturating_add(1));
+    let mut limited = file.by_ref().take(read_limit);
     limited.read_to_end(&mut bytes)?;
     if bytes.len() > max_len {
         return Err(ManifestError::limit_exceeded(

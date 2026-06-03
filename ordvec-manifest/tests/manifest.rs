@@ -295,6 +295,31 @@ fn manifest_loader_enforces_size_limit_with_exact_boundary_success() {
 }
 
 #[test]
+fn manifest_loader_rejects_unenforceable_size_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let (_temp, manifest, manifest_path) = identity_manifest(root.path());
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = load_manifest_file_with_options(
+        &manifest_path,
+        &VerifyOptions {
+            limits: ResourceLimits {
+                max_manifest_bytes: u64::MAX,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("manifest_file_too_large"));
+    assert!(err.to_string().contains("too large to enforce"));
+}
+
+#[test]
 fn row_identity_jsonl_line_limit_is_overridable() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_rankquant_index(temp.path(), 1);
