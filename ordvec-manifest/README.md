@@ -26,6 +26,47 @@ verify with default settings. If an artifact or JSONL row map lives outside the
 manifest directory, pass `--allow-path-escape` at create time and again at
 verify time.
 
+Verification uses bounded parser/report defaults on both CLI and library paths.
+Stable limit codes are part of the contract:
+
+- manifest JSON: 1 MiB before JSON parsing
+  (`manifest_file_too_large`);
+- row-identity JSONL line: 64 KiB (`row_identity_line_too_large`);
+- row-identity JSONL rows: 10,000,000
+  (`row_identity_row_count_limit_exceeded`);
+- row-identity duplicate-tracking `db_id` bytes: 64 MiB
+  (`row_identity_duplicate_tracking_limit_exceeded`);
+- collected report issues: 1,024, after which a
+  `verification_report_issue_limit_exceeded` issue is emitted;
+- SQLite cached report JSON: 4 MiB (`sqlite_cached_report_too_large`).
+
+The CLI exposes matching override flags on `inspect`, `verify`, `create`,
+`sqlite verify`, and `sqlite activate`: `--max-manifest-bytes`,
+`--max-row-map-line-bytes`, `--max-row-map-rows`,
+`--max-row-map-tracked-id-bytes`, `--max-report-issues`, and
+`--max-cached-report-bytes`. Library callers can override the same ceilings via
+`VerifyOptions::limits`.
+
+Stable limit codes:
+
+| Limit surface | Verification report code | `ManifestError::code()` |
+| --- | --- | --- |
+| manifest JSON bytes | n/a | `manifest_file_too_large` |
+| row-identity JSONL line bytes | `row_identity_line_too_large` | `row_identity_line_too_large` |
+| row-identity JSONL rows | `row_identity_row_count_limit_exceeded` | `row_identity_row_count_limit_exceeded` |
+| row-identity duplicate-tracking `db_id` bytes | `row_identity_duplicate_tracking_limit_exceeded` | `row_identity_duplicate_tracking_limit_exceeded` |
+| collected verification report issues | `verification_report_issue_limit_exceeded` | n/a |
+| SQLite cached report JSON bytes | n/a | `sqlite_cached_report_too_large` |
+
+Oversized byte-limit overrides that cannot be represented safely by the
+bounded in-memory reader fail before reading with the same stable
+`ManifestError::code()` as the corresponding byte limit. A
+`max_report_issues` override of `0` suppresses detail issues and returns only
+the `verification_report_issue_limit_exceeded` sentinel when any issue would
+otherwise be reported. These limits bound metadata parsing and report/cache
+growth; hashing an index or calibration profile is still proportional to the
+artifact bytes being verified.
+
 With `--features sqlite`, the `sqlite verify` and `sqlite activate` subcommands
 add a local cache/audit log plus one active-manifest pointer. This is not a
 full named registry. `sqlite verify --use-cache` reuses only reports whose

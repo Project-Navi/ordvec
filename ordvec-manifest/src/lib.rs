@@ -14,17 +14,38 @@ use uuid::Uuid;
 
 pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v1";
 pub const CALIBRATION_SCHEMA_VERSION: &str = "ordvec.calibration.v1";
+pub const DEFAULT_MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+pub const DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES: usize = 64 * 1024;
+pub const DEFAULT_MAX_ROW_IDENTITY_ROWS: usize = 10_000_000;
+pub const DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_REPORT_ISSUES: usize = 1024;
+pub const DEFAULT_MAX_CACHED_REPORT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum ManifestError {
     Io(io::Error),
     Json(serde_json::Error),
     Invalid(String),
+    LimitExceeded { code: String, message: String },
 }
 
 impl ManifestError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::Invalid(message.into())
+    }
+
+    pub fn limit_exceeded(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::LimitExceeded {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::LimitExceeded { code, .. } => Some(code.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -34,6 +55,7 @@ impl fmt::Display for ManifestError {
             Self::Io(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "{err}"),
             Self::Invalid(message) => f.write_str(message),
+            Self::LimitExceeded { code, message } => write!(f, "{code}: {message}"),
         }
     }
 }
@@ -60,10 +82,21 @@ pub struct ManifestDocument {
 }
 
 pub fn load_manifest_file(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
+    load_manifest_file_with_options(path, &VerifyOptions::default())
+}
+
+pub fn load_manifest_file_with_options(
+    path: impl AsRef<Path>,
+    options: &VerifyOptions,
+) -> Result<ManifestDocument, ManifestError> {
     let path = path.as_ref();
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let manifest: IndexManifest = serde_json::from_reader(reader)?;
+    let manifest_bytes = read_bounded_file(
+        path,
+        options.limits.max_manifest_bytes,
+        "manifest_file_too_large",
+        "manifest file",
+    )?;
+    let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)?;
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -74,6 +107,46 @@ pub fn load_manifest_file(path: impl AsRef<Path>) -> Result<ManifestDocument, Ma
         source_path: Some(path.to_path_buf()),
         base_dir,
     })
+}
+
+fn read_bounded_file(
+    path: &Path,
+    max_bytes: u64,
+    code: &'static str,
+    context: &'static str,
+) -> Result<Vec<u8>, ManifestError> {
+    let mut file = File::open(path)?;
+    let max_len = usize::try_from(max_bytes).map_err(|_| {
+        ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} byte limit {max_bytes} is too large to enforce while reading {}",
+                path.display()
+            ),
+        )
+    })?;
+    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
+        ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} byte limit {max_bytes} is too large to enforce while reading {}",
+                path.display()
+            ),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    let mut limited = file.by_ref().take(read_limit);
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() > max_len {
+        return Err(ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} exceeds {max_bytes} bytes while reading {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 pub fn verify_manifest_with_base(
@@ -94,7 +167,7 @@ pub fn verify_index_manifest(
     manifest_path: impl AsRef<Path>,
     mut options: VerifyOptions,
 ) -> Result<VerificationReport, ManifestError> {
-    let document = load_manifest_file(manifest_path)?;
+    let document = load_manifest_file_with_options(manifest_path, &options)?;
     options.index_override = Some(index_path.into());
     Ok(verify_manifest(&document, options))
 }
@@ -166,6 +239,7 @@ pub fn verify_manifest(document: &ManifestDocument, options: VerifyOptions) -> V
     verify_calibration(document, &options, &mut report);
     verify_attestations(&document.manifest, &mut report);
 
+    enforce_report_issue_limit(&mut report.errors, &options.limits);
     report.ok = report.errors.is_empty();
     report
 }
@@ -473,6 +547,16 @@ fn verify_row_identity(
             report.row_identity.kind = Some("jsonl".to_string());
             report.row_identity.manifest_path = Some(path.clone());
             report.row_identity.row_count = Some(*row_count);
+            if *row_count > options.limits.max_row_identity_rows {
+                report.error(
+                    "row_identity_row_count_limit_exceeded",
+                    format!(
+                        "row_identity.row_count {row_count} exceeds max_row_identity_rows={}",
+                        options.limits.max_row_identity_rows
+                    ),
+                );
+                return;
+            }
             let row_path = PathBuf::from(path);
             if let Some(resolved) = resolve_existing_path(
                 &row_path,
@@ -483,38 +567,41 @@ fn verify_row_identity(
             ) {
                 report.row_identity.canonical_path =
                     Some(path_to_display(&resolved.canonical_path));
-                match sha256_file(&resolved.resolved_path) {
-                    Ok(hash) => {
-                        report.row_identity.sha256 = Some(hash.sha256.clone());
-                        if !hex_digest_eq(&hash.sha256, sha256) {
-                            report.error(
-                                "row_identity_sha256_mismatch",
-                                format!(
-                                    "row_identity SHA-256 was {}, manifest declares {}",
-                                    hash.sha256, sha256
-                                ),
-                            );
-                        }
-                    }
-                    Err(err) => report.error(
-                        "row_identity_hash_failed",
-                        format!("failed to hash row identity file: {err}"),
-                    ),
-                }
-
                 match validate_jsonl_rows(
                     &resolved.resolved_path,
                     options.allow_duplicate_db_ids,
+                    &options.limits,
+                    Some(*row_count),
                     &mut report.errors,
                 ) {
                     Ok(stats) => {
-                        report.row_identity.validated_rows = Some(stats.row_count);
-                        if stats.row_count != *row_count {
+                        report.row_identity.validated_rows = Some(stats.validated_rows);
+                        if let Some(hash) = &stats.sha256 {
+                            report.row_identity.sha256 = Some(hash.clone());
+                            if !hex_digest_eq(hash, sha256) {
+                                report.error(
+                                    "row_identity_sha256_mismatch",
+                                    format!(
+                                        "row_identity SHA-256 was {hash}, manifest declares {sha256}"
+                                    ),
+                                );
+                            }
+                        }
+                        if stats.row_count != *row_count
+                            && !report
+                                .errors
+                                .iter()
+                                .any(|issue| issue.code == "row_identity_row_count_mismatch")
+                        {
+                            let observed_rows = if stats.sha256.is_some() {
+                                stats.row_count.to_string()
+                            } else {
+                                format!("at least {}", stats.row_count)
+                            };
                             report.error(
                                 "row_identity_row_count_mismatch",
                                 format!(
-                                    "row identity file has {} rows, manifest declares {}",
-                                    stats.row_count, row_count
+                                    "row identity file has {observed_rows} rows, manifest declares {row_count}"
                                 ),
                             );
                         }
@@ -1140,6 +1227,30 @@ pub struct VerifyOptions {
     pub allow_path_escape: bool,
     pub allow_duplicate_db_ids: bool,
     pub index_override: Option<PathBuf>,
+    pub limits: ResourceLimits,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub max_manifest_bytes: u64,
+    pub max_row_identity_jsonl_line_bytes: usize,
+    pub max_row_identity_rows: usize,
+    pub max_row_identity_tracked_db_id_bytes: usize,
+    pub max_report_issues: usize,
+    pub max_cached_report_bytes: u64,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_manifest_bytes: DEFAULT_MAX_MANIFEST_BYTES,
+            max_row_identity_jsonl_line_bytes: DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES,
+            max_row_identity_rows: DEFAULT_MAX_ROW_IDENTITY_ROWS,
+            max_row_identity_tracked_db_id_bytes: DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES,
+            max_report_issues: DEFAULT_MAX_REPORT_ISSUES,
+            max_cached_report_bytes: DEFAULT_MAX_CACHED_REPORT_BYTES,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1604,6 +1715,45 @@ impl ReportIssue {
     }
 }
 
+fn push_report_issue_bounded(
+    errors: &mut Vec<ReportIssue>,
+    limits: &ResourceLimits,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) {
+    let limit = limits.max_report_issues;
+    if errors.len() < limit {
+        errors.push(ReportIssue::new(code, message));
+        return;
+    }
+    if errors
+        .iter()
+        .any(|issue| issue.code == "verification_report_issue_limit_exceeded")
+    {
+        return;
+    }
+    let detail_limit = limit.saturating_sub(1);
+    errors.truncate(detail_limit);
+    errors.push(ReportIssue::new(
+        "verification_report_issue_limit_exceeded",
+        format!("verification report issue count exceeded max_report_issues={limit}"),
+    ));
+}
+
+fn enforce_report_issue_limit(errors: &mut Vec<ReportIssue>, limits: &ResourceLimits) {
+    let limit = limits.max_report_issues;
+    if errors.len() <= limit {
+        return;
+    }
+    errors.retain(|issue| issue.code != "verification_report_issue_limit_exceeded");
+    let detail_limit = limit.saturating_sub(1);
+    errors.truncate(detail_limit);
+    errors.push(ReportIssue::new(
+        "verification_report_issue_limit_exceeded",
+        format!("verification report issue count exceeded max_report_issues={limit}"),
+    ));
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileHash {
     pub sha256: String,
@@ -1629,6 +1779,22 @@ pub fn sha256_file(path: impl AsRef<Path>) -> io::Result<FileHash> {
     })
 }
 
+pub fn sha256_file_bounded(
+    path: impl AsRef<Path>,
+    max_bytes: u64,
+    code: &'static str,
+    context: &'static str,
+) -> Result<FileHash, ManifestError> {
+    let path = path.as_ref();
+    let bytes = read_bounded_file(path, max_bytes, code, context)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(FileHash {
+        sha256: hex::encode(hasher.finalize()),
+        size_bytes: bytes.len() as u64,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub enum CreateRowIdentity {
     RowIdIdentity,
@@ -1639,6 +1805,7 @@ pub enum CreateRowIdentity {
 pub struct CreateManifestOptions {
     pub allow_absolute_paths: bool,
     pub allow_path_escape: bool,
+    pub limits: ResourceLimits,
 }
 
 pub fn create_manifest_for_index(
@@ -1691,10 +1858,24 @@ pub fn create_manifest_for_index_with_options(
             row_count: metadata.vector_count,
         },
         CreateRowIdentity::Jsonl(path) => {
-            let row_hash = sha256_file(&path)?;
             let mut row_errors = Vec::new();
-            let stats = validate_jsonl_rows(&path, false, &mut row_errors)?;
+            let stats = validate_jsonl_rows(
+                &path,
+                false,
+                &options.limits,
+                Some(metadata.vector_count),
+                &mut row_errors,
+            )?;
             if !row_errors.is_empty() {
+                if let Some(issue) = row_errors
+                    .iter()
+                    .find(|issue| is_limit_issue_code(&issue.code))
+                {
+                    return Err(ManifestError::limit_exceeded(
+                        issue.code.clone(),
+                        issue.message.clone(),
+                    ));
+                }
                 let codes = row_errors
                     .iter()
                     .map(|issue| issue.code.as_str())
@@ -1710,9 +1891,12 @@ pub fn create_manifest_for_index_with_options(
                     stats.row_count, metadata.vector_count
                 )));
             }
+            let row_sha256 = stats.sha256.ok_or_else(|| {
+                ManifestError::invalid("row map hash unavailable after bounded validation")
+            })?;
             RowIdentity::Jsonl {
                 path: manifest_path_for_create(&path, out_base, &options, "row identity")?,
-                sha256: row_hash.sha256,
+                sha256: row_sha256,
                 row_count: stats.row_count,
                 id_kind: "uuid".to_string(),
                 db: None,
@@ -1761,6 +1945,8 @@ pub fn write_manifest_file(
 #[derive(Clone, Debug)]
 struct JsonlStats {
     row_count: usize,
+    validated_rows: usize,
+    sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1775,65 +1961,214 @@ struct JsonlRow {
 fn validate_jsonl_rows(
     path: &Path,
     allow_duplicate_db_ids: bool,
+    limits: &ResourceLimits,
+    expected_row_count: Option<usize>,
     errors: &mut Vec<ReportIssue>,
 ) -> io::Result<JsonlStats> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
     let mut seen = HashSet::new();
+    let mut seen_db_id_bytes = 0usize;
     let mut row_count = 0usize;
+    let mut validated_rows = 0usize;
+    let mut line = Vec::new();
+    let mut reached_eof = true;
 
-    for (line_idx, line) in reader.lines().enumerate() {
-        let line = line?;
+    while let Some(too_long) = read_bounded_line(
+        &mut reader,
+        limits.max_row_identity_jsonl_line_bytes,
+        &mut line,
+        &mut hasher,
+    )? {
+        let line_idx = row_count;
         row_count += 1;
-        let row: JsonlRow = match serde_json::from_str(&line) {
+        if row_count > limits.max_row_identity_rows {
+            reached_eof = false;
+            push_report_issue_bounded(
+                errors,
+                limits,
+                "row_identity_row_count_limit_exceeded",
+                format!(
+                    "row identity file has more than max_row_identity_rows={} rows",
+                    limits.max_row_identity_rows
+                ),
+            );
+            break;
+        }
+        if let Some(expected_row_count) = expected_row_count {
+            if row_count > expected_row_count {
+                reached_eof = false;
+                push_report_issue_bounded(
+                    errors,
+                    limits,
+                    "row_identity_row_count_mismatch",
+                    format!(
+                        "row identity file has more than declared row_count={expected_row_count}"
+                    ),
+                );
+                break;
+            }
+        }
+        if too_long {
+            reached_eof = false;
+            push_report_issue_bounded(
+                errors,
+                limits,
+                "row_identity_line_too_large",
+                format!(
+                    "line {line_idx} exceeds max_row_identity_jsonl_line_bytes={}",
+                    limits.max_row_identity_jsonl_line_bytes
+                ),
+            );
+            break;
+        }
+        trim_jsonl_terminator(&mut line);
+        let row: JsonlRow = match serde_json::from_slice(&line) {
             Ok(row) => row,
             Err(err) => {
-                errors.push(ReportIssue::new(
+                push_report_issue_bounded(
+                    errors,
+                    limits,
                     "row_identity_jsonl_invalid_json",
                     format!("line {line_idx} is not a strict row object: {err}"),
-                ));
+                );
                 continue;
             }
         };
         if row.row_id != line_idx {
-            errors.push(ReportIssue::new(
+            push_report_issue_bounded(
+                errors,
+                limits,
                 "row_identity_row_id_mismatch",
                 format!("line {line_idx} has row_id {}", row.row_id),
-            ));
+            );
         }
-        validate_row_id_string("db_id", &row.db_id, line_idx, errors);
+        validate_row_id_string("db_id", &row.db_id, line_idx, limits, errors);
         if let Some(parent_id) = &row.parent_id {
-            validate_row_id_string("parent_id", parent_id, line_idx, errors);
+            validate_row_id_string("parent_id", parent_id, line_idx, limits, errors);
         }
-        if !allow_duplicate_db_ids && !seen.insert(row.db_id) {
-            errors.push(ReportIssue::new(
-                "row_identity_duplicate_db_id",
-                format!("line {line_idx} repeats db_id"),
-            ));
+        validated_rows += 1;
+        if !allow_duplicate_db_ids {
+            if seen.contains(&row.db_id) {
+                push_report_issue_bounded(
+                    errors,
+                    limits,
+                    "row_identity_duplicate_db_id",
+                    format!("line {line_idx} repeats db_id"),
+                );
+            } else {
+                let next_seen_db_id_bytes = seen_db_id_bytes.saturating_add(row.db_id.len());
+                if next_seen_db_id_bytes > limits.max_row_identity_tracked_db_id_bytes {
+                    reached_eof = false;
+                    push_report_issue_bounded(
+                        errors,
+                        limits,
+                        "row_identity_duplicate_tracking_limit_exceeded",
+                        format!(
+                            "tracked db_id bytes exceed max_row_identity_tracked_db_id_bytes={}",
+                            limits.max_row_identity_tracked_db_id_bytes
+                        ),
+                    );
+                    break;
+                }
+                seen_db_id_bytes = next_seen_db_id_bytes;
+                seen.insert(row.db_id);
+            }
         }
     }
 
-    Ok(JsonlStats { row_count })
+    Ok(JsonlStats {
+        row_count,
+        validated_rows,
+        sha256: reached_eof.then(|| hex::encode(hasher.finalize())),
+    })
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+    out: &mut Vec<u8>,
+    hasher: &mut Sha256,
+) -> io::Result<Option<bool>> {
+    out.clear();
+    let max_bytes = max_bytes.max(1);
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if out.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(false))
+            };
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take_len = newline.map_or(available.len(), |pos| pos + 1);
+
+        let remaining = max_bytes.saturating_sub(out.len());
+        if take_len > remaining {
+            let consume_len = remaining.saturating_add(1).min(take_len);
+            if remaining > 0 {
+                out.extend_from_slice(&available[..remaining]);
+            }
+            hasher.update(&available[..consume_len]);
+            reader.consume(consume_len);
+            return Ok(Some(true));
+        }
+
+        out.extend_from_slice(&available[..take_len]);
+        hasher.update(&available[..take_len]);
+        reader.consume(take_len);
+        if newline.is_some() {
+            return Ok(Some(false));
+        }
+    }
+}
+
+fn trim_jsonl_terminator(line: &mut Vec<u8>) {
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
 }
 
 fn validate_row_id_string(
     field: &str,
     value: &str,
     line_idx: usize,
+    limits: &ResourceLimits,
     errors: &mut Vec<ReportIssue>,
 ) {
     if value.is_empty() {
-        errors.push(ReportIssue::new(
+        push_report_issue_bounded(
+            errors,
+            limits,
             format!("row_identity_{field}_empty"),
             format!("line {line_idx} has empty {field}"),
-        ));
+        );
     }
     if value.contains('\0') {
-        errors.push(ReportIssue::new(
+        push_report_issue_bounded(
+            errors,
+            limits,
             format!("row_identity_{field}_contains_nul"),
             format!("line {line_idx} {field} contains NUL"),
-        ));
+        );
     }
+}
+
+fn is_limit_issue_code(code: &str) -> bool {
+    matches!(
+        code,
+        "row_identity_line_too_large"
+            | "row_identity_row_count_limit_exceeded"
+            | "row_identity_duplicate_tracking_limit_exceeded"
+            | "verification_report_issue_limit_exceeded"
+    )
 }
 
 fn manifest_path_for_create(
