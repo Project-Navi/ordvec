@@ -78,7 +78,7 @@ absence of a second maintainer is itself a tracked supply-chain residual
 The `fuzz/` directory holds **eight** cargo-fuzz targets: `load_rank`,
 `load_rankquant`, `load_bitmap`, `load_sign_bitmap` (deserialization);
 `roundtrip_rankquant` (write→load round-trip); `search_rankquant` (the
-single-rate ingest + asymmetric-search compute path); and `fastscan_b2` (the
+single-rate ingest + asymmetric-search compute path); `fastscan_b2` (the
 FastScan b=2 block-32 kernel — the one `unsafe`-heavy scan path the others do
 not reach); and `signbitmap_rankquant_twostage` (sign candidate generation
 followed by RankQuant subset reranking).

@@ -4,68 +4,94 @@
 //! rows. This is the shape used by downstream retrieval products before they
 //! apply host-owned metadata filters or sparse/lexical fusion.
 //!
-//! The fuzzer builds both indexes over one generated finite corpus, varies
-//! `m` and `k` across empty, oversized, and normal cases, and feeds duplicate
-//! candidate IDs into the subset path. When sign candidate generation returns
-//! the full corpus (`m >= n`), the target also checks that subset reranking
-//! agrees with a full RankQuant search.
+//! The fuzzer builds both indexes over one generated finite corpus, derives a
+//! bounded structured shape for `(dim, bits, n_vectors, m, k)`, and feeds
+//! duplicate candidate IDs into the subset path. When sign candidate generation
+//! returns the full corpus (`m >= n`), the target also checks that subset
+//! reranking agrees with a full RankQuant search.
 //!
 //! Contract: no panic, abort, or out-of-bounds access on any in-range candidate
 //! input, and full-corpus candidate reranking must match full RankQuant search.
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
+use libfuzzer_sys::{
+    arbitrary::{Arbitrary, Result, Unstructured},
+    fuzz_target,
+};
 use ordvec::{RankQuant, SignBitmap};
 
-fuzz_target!(|data: &[u8]| {
-    if data.len() < 5 {
-        return;
-    }
-    const DIM: usize = 64;
-    let bits: u8 = match data[0] % 3 {
-        0 => 1,
-        1 => 2,
-        _ => 4,
-    };
-    let n = data[1] as usize % 17; // 0..=16 docs.
-    let m = match data[2] % 4 {
-        0 => 0,
-        1 => 1,
-        2 => n,
-        _ => n.saturating_add((data[2] as usize % 8) + 1),
-    };
-    let k = match data[3] % 4 {
-        0 => 0,
-        1 => 1,
-        2 => m.saturating_add(1),
-        _ => data[3] as usize % (n + 8),
-    };
+#[derive(Debug)]
+struct TwoStageInput {
+    dim: usize,
+    bits: u8,
+    n_vectors: usize,
+    m: usize,
+    k: usize,
+    duplicate_case: u8,
+    payload: Vec<u8>,
+}
 
-    let payload = &data[5..];
-    let total = (n + 1) * DIM;
+impl<'a> Arbitrary<'a> for TwoStageInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+        let dim = *u.choose(&[64usize, 128, 256, 512])?;
+        let bits = *u.choose(&[1u8, 2, 4])?;
+        let n_vectors = usize::from(u.int_in_range(0..=16u8)?);
+        let m = match u.int_in_range(0..=3u8)? {
+            0 => 0,
+            1 => 1,
+            2 => n_vectors,
+            _ => n_vectors.saturating_add(usize::from(u.int_in_range(1..=8u8)?)),
+        };
+        let k = match u.int_in_range(0..=3u8)? {
+            0 => 0,
+            1 => 1,
+            2 => m.saturating_add(1),
+            _ => usize::from(u.int_in_range(0..=24u8)?),
+        };
+        let duplicate_case = u.int_in_range(0..=3u8)?;
+        let payload_len = u.int_in_range(0..=u.len().min(1024))?;
+        let payload = u.bytes(payload_len)?.to_vec();
+        Ok(Self {
+            dim,
+            bits,
+            n_vectors,
+            m,
+            k,
+            duplicate_case,
+            payload,
+        })
+    }
+}
+
+fuzz_target!(|input: TwoStageInput| {
+    let total = (input.n_vectors + 1) * input.dim;
     let floats: Vec<f32> = (0..total)
         .map(|i| {
-            if payload.is_empty() {
+            if input.payload.is_empty() {
                 0.0
             } else {
-                payload[i % payload.len()] as f32 - 128.0
+                input.payload[i % input.payload.len()] as f32 - 128.0
             }
         })
         .collect();
-    let (vecs, query) = floats.split_at(n * DIM);
+    let (vecs, query) = floats.split_at(input.n_vectors * input.dim);
 
-    let mut sign = SignBitmap::new(DIM);
-    let mut rankquant = RankQuant::new(DIM, bits);
+    let mut sign = SignBitmap::new(input.dim);
+    let mut rankquant = RankQuant::new(input.dim, input.bits);
     sign.add(vecs);
     rankquant.add(vecs);
+    assert_eq!(sign.dim(), rankquant.dim());
+    assert_eq!(sign.len(), rankquant.len());
+    assert_eq!(sign.dim(), input.dim);
+    assert_eq!(sign.len(), input.n_vectors);
 
-    let candidates = sign.top_m_candidates(query, m);
-    assert_eq!(candidates.len(), m.min(n));
-    assert!(candidates.iter().all(|&id| (id as usize) < n));
+    let candidates = sign.top_m_candidates(query, input.m);
+    assert_eq!(candidates.len(), input.m.min(input.n_vectors));
+    assert!(candidates.iter().all(|&id| (id as usize) < input.n_vectors));
 
     let mut subset_candidates = candidates.clone();
-    if n > 0 {
-        match data[4] % 4 {
+    if input.n_vectors > 0 {
+        match input.duplicate_case {
             0 => subset_candidates.clear(),
             1 => {
                 let id = subset_candidates.first().copied().unwrap_or(0);
@@ -76,8 +102,9 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let (scores, ids) = rankquant.search_asymmetric_subset(query, &subset_candidates, k);
-    let k_eff = k.min(subset_candidates.len());
+    let (scores, ids) =
+        rankquant.search_asymmetric_subset(query, &subset_candidates, input.k);
+    let k_eff = input.k.min(subset_candidates.len());
     assert_eq!(scores.len(), k_eff);
     assert_eq!(ids.len(), k_eff);
     assert!(scores.iter().all(|score| score.is_finite()));
@@ -87,10 +114,10 @@ fuzz_target!(|data: &[u8]| {
         assert!(subset_candidates.contains(&(id as u32)));
     }
 
-    if n > 0 && candidates.len() == n {
-        let full = rankquant.search_asymmetric(query, k);
+    if input.n_vectors > 0 && candidates.len() == input.n_vectors {
+        let full = rankquant.search_asymmetric(query, input.k);
         let (subset_scores, subset_ids) =
-            rankquant.search_asymmetric_subset(query, &candidates, k);
+            rankquant.search_asymmetric_subset(query, &candidates, input.k);
         assert_eq!(subset_ids.len(), full.indices_for_query(0).len());
         assert_eq!(subset_scores.len(), full.scores_for_query(0).len());
         let mut subset_scores_sorted = subset_scores;

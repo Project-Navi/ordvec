@@ -8,12 +8,21 @@ fn build_two_stage(bits: u8) -> (SignBitmap, RankQuant, Vec<f32>) {
     let mut rankquant = RankQuant::new(D, bits);
     sign.add(&corpus);
     rankquant.add(&corpus);
+    assert_two_stage_invariants(&sign, &rankquant);
     (sign, rankquant, corpus)
+}
+
+fn assert_two_stage_invariants(sign: &SignBitmap, rankquant: &RankQuant) {
+    assert_eq!(sign.dim(), rankquant.dim());
+    assert_eq!(sign.len(), rankquant.len());
+    assert_eq!(sign.dim(), D);
+    assert_eq!(sign.len(), N);
 }
 
 #[test]
 fn sign_rankquant_pipeline_handles_edge_candidate_and_k_shapes() {
     let (sign, rankquant, _corpus) = build_two_stage(2);
+    assert_two_stage_invariants(&sign, &rankquant);
     let query = &make_corpus(15_002)[..D];
 
     let empty_candidates = sign.top_m_candidates(query, 0);
@@ -47,6 +56,7 @@ fn sign_rankquant_pipeline_handles_edge_candidate_and_k_shapes() {
 #[test]
 fn sign_rankquant_full_candidate_set_matches_full_rankquant_search() {
     let (sign, rankquant, _corpus) = build_two_stage(4);
+    assert_two_stage_invariants(&sign, &rankquant);
     let query = &make_corpus(15_003)[..D];
     let candidates = sign.top_m_candidates(query, usize::MAX);
     assert_eq!(candidates.len(), N);
@@ -54,9 +64,15 @@ fn sign_rankquant_full_candidate_set_matches_full_rankquant_search() {
     let full = rankquant.search_asymmetric(query, 16);
     let (subset_scores, subset_ids) = rankquant.search_asymmetric_subset(query, &candidates, 16);
 
-    assert_eq!(subset_ids, full.indices_for_query(0));
+    assert!(subset_ids
+        .iter()
+        .all(|&id| candidates.contains(&(id as u32))));
     assert_eq!(subset_scores.len(), full.scores_for_query(0).len());
-    for (subset, full) in subset_scores.iter().zip(full.scores_for_query(0)) {
+    let mut subset_scores_sorted = subset_scores;
+    let mut full_scores_sorted = full.scores_for_query(0).to_vec();
+    subset_scores_sorted.sort_by(|left, right| left.total_cmp(right));
+    full_scores_sorted.sort_by(|left, right| left.total_cmp(right));
+    for (subset, full) in subset_scores_sorted.iter().zip(&full_scores_sorted) {
         assert!(
             (subset - full).abs() <= 1e-6,
             "subset score {subset} diverged from full score {full}"

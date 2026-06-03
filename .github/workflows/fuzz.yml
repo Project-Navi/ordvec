@@ -3,7 +3,7 @@ name: fuzz
 # Bounded cargo-fuzz smoke. The eight targets in fuzz/ are normally exercised
 # in manual campaigns; this adds CI cadence so a regression that reintroduces a
 # loader panic / OOM, breaks the write->load round-trip, or destabilises the
-# FastScan or two-stage retrieval kernels surfaces in CI rather than only at
+# FastScan or two-stage retrieval kernels surface in CI rather than only at
 # the next manual run
 # (THREAT-FUZZ-002 in THREAT_MODEL.md).
 #
