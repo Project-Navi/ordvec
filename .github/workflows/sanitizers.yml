@@ -95,9 +95,14 @@ jobs:
         if: ${{ matrix.run_ffi }}
         env:
           TARGET: ${{ matrix.target }}
+          ORDVEC_FFI_STATIC_LIB_DIR: ${{ github.workspace }}/target/${{ matrix.target }}/debug
+          ORDVEC_FFI_CC_SANITIZER: address
           RUSTFLAGS: -D warnings -Zsanitizer=address -C force-frame-pointers=yes
         run: |
           set -euo pipefail
+          cargo "+${ASAN_NIGHTLY}" build -Z build-std \
+            --target "${TARGET}" \
+            -p ordvec-ffi
           cargo "+${ASAN_NIGHTLY}" test -Z build-std \
             --target "${TARGET}" \
             -p ordvec-ffi --lib --tests

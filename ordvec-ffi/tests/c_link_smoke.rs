@@ -42,15 +42,48 @@ fn c_string_literal(path: &Path) -> String {
     format!("\"{escaped}\"")
 }
 
-fn target_debug_dir() -> PathBuf {
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        return PathBuf::from(target_dir).join("debug");
-    }
+fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("ordvec-ffi should live in the workspace root")
-        .join("target")
-        .join("debug")
+        .to_path_buf()
+}
+
+fn target_debug_dir() -> PathBuf {
+    if let Ok(lib_dir) = std::env::var("ORDVEC_FFI_STATIC_LIB_DIR") {
+        let lib_dir = PathBuf::from(lib_dir);
+        return if lib_dir.is_absolute() {
+            lib_dir
+        } else {
+            workspace_root().join(lib_dir)
+        };
+    }
+
+    let target = std::env::var("ORDVEC_FFI_TARGET").ok();
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        return match target {
+            Some(target) => target_dir.join(target).join("debug"),
+            None => target_dir.join("debug"),
+        };
+    }
+
+    let mut target_dir = workspace_root().join("target");
+    if let Some(target) = target {
+        target_dir.push(target);
+    }
+    target_dir.join("debug")
+}
+
+fn add_optional_sanitizer(cc: &mut Command) {
+    match std::env::var("ORDVEC_FFI_CC_SANITIZER") {
+        Ok(value) if value == "address" => {
+            cc.arg("-fsanitize=address");
+        }
+        Ok(value) if value.trim().is_empty() => {}
+        Ok(value) => panic!("unsupported ORDVEC_FFI_CC_SANITIZER={value}"),
+        Err(_) => {}
+    }
 }
 
 #[test]
@@ -125,6 +158,7 @@ int main(void) {{
     } else if cfg!(target_os = "macos") {
         cc.args(["-lm", "-lpthread"]);
     }
+    add_optional_sanitizer(&mut cc);
     let compile = cc.arg("-o").arg(&exe).output();
     match compile {
         Ok(output) => {
