@@ -481,17 +481,20 @@ impl TopK {
         for i in out_indices.iter_mut() {
             *i = -1;
         }
-        let mut pairs: Vec<(f32, i64, i64)> = self
+        let mut pairs: Vec<(f32, i64, i64, usize)> = self
             .scores
             .iter()
             .zip(self.indices.iter())
             .zip(self.tie_keys.iter())
+            .enumerate()
             .take(self.filled)
-            .map(|((&s, &i), &tie_key)| (s, i, tie_key))
+            .map(|(slot, ((&s, &i), &tie_key))| (s, i, tie_key, slot))
             .collect();
-        // Composite key: score descending, then tie key ascending. For
-        // full-index scans the tie key is the doc_id; for subset scans it is
-        // the global row id associated with the emitted local index.
+        // Composite key: score descending, then tie key ascending. The kept
+        // slot is only a final deterministic tie-break when duplicate
+        // candidate entries are otherwise indistinguishable. For full-index
+        // scans the tie key is the doc_id; for subset scans it is the global
+        // row id associated with the emitted local index.
         pairs.sort_unstable_by(|a, b| {
             // `total_cmp` is a true total order (IEEE-754 `totalOrder`), so the
             // sort stays well-defined even if a non-finite score ever slipped
@@ -499,9 +502,11 @@ impl TopK {
             // is not a total order and can mis-sort around NaN. For the finite
             // scores we actually have, the two agree. The ascending tie key
             // makes score ties deterministic.
-            b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2))
+            b.0.total_cmp(&a.0)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
         });
-        for (slot, (s, i, _)) in pairs.into_iter().enumerate() {
+        for (slot, (s, i, _, _)) in pairs.into_iter().enumerate() {
             if slot >= out_scores.len() {
                 break;
             }
@@ -556,6 +561,21 @@ mod tests {
         let mut indices: [i64; 0] = [];
         top.finalize_into(&mut scores, &mut indices);
         assert!(scores.is_empty() && indices.is_empty());
+    }
+
+    #[test]
+    fn topk_duplicate_candidate_ties_have_total_final_order() {
+        let mut top = TopK::new_with_tie_keys(2, &[7, 7, 7]);
+        top.maybe_insert(0.0, 0);
+        top.maybe_insert(0.0, 1);
+        top.maybe_insert(0.0, 2);
+
+        let mut scores = [f32::NEG_INFINITY; 2];
+        let mut indices = [-1; 2];
+        top.finalize_into(&mut scores, &mut indices);
+
+        assert_eq!(scores, [0.0, 0.0]);
+        assert_eq!(indices, [0, 1]);
     }
 
     #[test]

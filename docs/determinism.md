@@ -26,14 +26,16 @@ empty, search returns an empty result shape rather than padded sentinel hits.
 Backend selection must not change the documented ordering rule. Exact integer
 popcount primitives are bit-exact across scalar, AVX-512, aarch64 NEON, and
 wasm `simd128` implementations. Floating-point RankQuant asymmetric kernels
-are checked against the scalar LUT reference within the tolerance used by the
-test suite; intentional changes to those tolerances or to golden top-k output
-are compatibility-affecting and must be called out in the PR and release notes.
+are checked against the scalar LUT reference with an absolute score tolerance
+of `1e-4` and no relative tolerance; intentional changes to that tolerance or
+to golden top-k output are compatibility-affecting and must be called out in
+the PR and release notes.
 
 Query-level parallelism may change scheduling, but each query is scored and
 finalized independently. Batched APIs must match the corresponding single-query
 API for the same query rows, modulo the primitive-specific tolerance stated
-below.
+below. Floating-point comparison tolerances apply only to score equivalence;
+the public hit order still follows the global ordering rule above.
 
 ## Primitive Contracts
 
