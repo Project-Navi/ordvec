@@ -6,8 +6,11 @@
 use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ordvec::{probe_index_metadata, Bitmap, IndexKind, IndexParams, Rank, RankQuant, SignBitmap};
+
+static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
 
 struct TempFile {
     path: PathBuf,
@@ -34,10 +37,7 @@ impl Drop for TempFile {
 }
 
 fn tmp(name: &str) -> TempFile {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let nonce = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "ordvec_persistence_compat_{}_{}_{}.bin",
         name,
