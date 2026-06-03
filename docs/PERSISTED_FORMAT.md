@@ -104,7 +104,7 @@ Header:
 | 9 | 4 | `n_vectors` as `u32` little-endian |
 
 Payload: `n_vectors * dim` `u16` values, each little-endian. Each row must be a
-permutation of `[0, dim)`.
+permutation of `[0, dim)`. `dim` must be in `[2, 65,535]`.
 
 Probe metadata:
 
@@ -129,8 +129,9 @@ MSB-first within each byte. For `bits = 2`, the first coordinate occupies bits
 7..6 of the byte, the second coordinate bits 5..4, the third bits 3..2, and
 the fourth bits 1..0.
 
-`dim` must be divisible by both `1 << bits` and `8 / bits`. Each row must have
-constant composition: exactly `dim / (1 << bits)` coordinates in every bucket.
+`dim` must be in `[2, 65,535]` and divisible by both `1 << bits` and
+`8 / bits`. Each row must have constant composition: exactly
+`dim / (1 << bits)` coordinates in every bucket.
 
 Probe metadata:
 
@@ -151,7 +152,8 @@ Header:
 | 13 | 4 | `n_vectors` as `u32` little-endian |
 
 Payload: `n_vectors * dim / 64` `u64` bitmap words, each little-endian. `dim`
-must be a multiple of 64. Each row must have exactly `n_top` bits set.
+must be in `[2, 65,535]` and a multiple of 64. Each row must have exactly
+`n_top` bits set.
 
 Probe metadata:
 

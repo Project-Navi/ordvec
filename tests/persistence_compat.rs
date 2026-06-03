@@ -4,21 +4,47 @@
 //! that only prove the current writer can feed the current loader.
 
 use std::io::Write;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use ordvec::{probe_index_metadata, Bitmap, IndexKind, IndexParams, Rank, RankQuant, SignBitmap};
 
-fn tmp(name: &str) -> PathBuf {
+struct TempFile {
+    path: PathBuf,
+}
+
+impl AsRef<Path> for TempFile {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Deref for TempFile {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn tmp(name: &str) -> TempFile {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!(
+    let path = std::env::temp_dir().join(format!(
         "ordvec_persistence_compat_{}_{}_{}.bin",
         name,
         std::process::id(),
         nonce
-    ))
+    ));
+    TempFile { path }
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) {
@@ -52,6 +78,10 @@ fn assert_rejects_version_and_trailing_bytes<T>(
     expected: &[u8],
     load: impl Fn(&Path) -> std::io::Result<T>,
 ) {
+    assert!(
+        expected.len() > 4,
+        "expected fixture must include a version byte at index 4"
+    );
     let path = tmp(name);
 
     let mut unsupported_version = expected.to_vec();
@@ -59,14 +89,12 @@ fn assert_rejects_version_and_trailing_bytes<T>(
     write_bytes(&path, &unsupported_version);
     assert!(probe_index_metadata(&path).is_err());
     assert!(load(&path).is_err());
-    std::fs::remove_file(&path).ok();
 
     let mut trailing = expected.to_vec();
     trailing.push(0);
     write_bytes(&path, &trailing);
     assert!(probe_index_metadata(&path).is_err());
     assert!(load(&path).is_err());
-    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -89,13 +117,11 @@ fn rank_v1_fixture_bytes_are_stable() {
         IndexParams::Rank,
         expected.len() as u64,
     );
-    std::fs::remove_file(&path).ok();
 
     write_bytes(&path, &expected);
     let loaded = Rank::load(&path).unwrap();
     assert_eq!(loaded.dim(), 4);
     assert_eq!(loaded.len(), 1);
-    std::fs::remove_file(&path).ok();
 
     assert_rejects_version_and_trailing_bytes("rank", &expected, |path| Rank::load(path));
 }
@@ -120,14 +146,12 @@ fn rankquant_v1_fixture_bytes_are_stable() {
         IndexParams::RankQuant { bits: 2 },
         expected.len() as u64,
     );
-    std::fs::remove_file(&path).ok();
 
     write_bytes(&path, &expected);
     let loaded = RankQuant::load(&path).unwrap();
     assert_eq!(loaded.dim(), 8);
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded.bits(), 2);
-    std::fs::remove_file(&path).ok();
 
     assert_rejects_version_and_trailing_bytes("rankquant", &expected, |path| RankQuant::load(path));
 }
@@ -153,14 +177,12 @@ fn bitmap_v1_fixture_bytes_are_stable() {
         IndexParams::Bitmap { n_top: 2 },
         expected.len() as u64,
     );
-    std::fs::remove_file(&path).ok();
 
     write_bytes(&path, &expected);
     let loaded = Bitmap::load(&path).unwrap();
     assert_eq!(loaded.dim(), 64);
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded.n_top(), 2);
-    std::fs::remove_file(&path).ok();
 
     assert_rejects_version_and_trailing_bytes("bitmap", &expected, |path| Bitmap::load(path));
 }
@@ -188,13 +210,11 @@ fn sign_bitmap_v1_fixture_bytes_are_stable() {
         IndexParams::SignBitmap,
         expected.len() as u64,
     );
-    std::fs::remove_file(&path).ok();
 
     write_bytes(&path, &expected);
     let loaded = SignBitmap::load(&path).unwrap();
     assert_eq!(loaded.dim(), 64);
     assert_eq!(loaded.len(), 1);
-    std::fs::remove_file(&path).ok();
 
     assert_rejects_version_and_trailing_bytes("sign_bitmap", &expected, |path| {
         SignBitmap::load(path)
