@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Added bounded parser/report defaults to `ordvec-manifest` verification for
-  manifest JSON size, row-identity JSONL line length and row count, report
-  issue count, and SQLite cached report size.
+  manifest JSON size, row-identity JSONL line length, row count,
+  duplicate-tracking memory, report issue count, and SQLite cached report size.
 
 ## 0.3.0 - 2026-05-29
 

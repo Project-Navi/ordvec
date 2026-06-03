@@ -17,6 +17,7 @@ pub const CALIBRATION_SCHEMA_VERSION: &str = "ordvec.calibration.v1";
 pub const DEFAULT_MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_ROW_IDENTITY_ROWS: usize = 10_000_000;
+pub const DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_REPORT_ISSUES: usize = 1024;
 pub const DEFAULT_MAX_CACHED_REPORT_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -1208,6 +1209,7 @@ pub struct ResourceLimits {
     pub max_manifest_bytes: u64,
     pub max_row_identity_jsonl_line_bytes: usize,
     pub max_row_identity_rows: usize,
+    pub max_row_identity_tracked_db_id_bytes: usize,
     pub max_report_issues: usize,
     pub max_cached_report_bytes: u64,
 }
@@ -1218,6 +1220,7 @@ impl Default for ResourceLimits {
             max_manifest_bytes: DEFAULT_MAX_MANIFEST_BYTES,
             max_row_identity_jsonl_line_bytes: DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES,
             max_row_identity_rows: DEFAULT_MAX_ROW_IDENTITY_ROWS,
+            max_row_identity_tracked_db_id_bytes: DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES,
             max_report_issues: DEFAULT_MAX_REPORT_ISSUES,
             max_cached_report_bytes: DEFAULT_MAX_CACHED_REPORT_BYTES,
         }
@@ -1836,6 +1839,15 @@ pub fn create_manifest_for_index_with_options(
                 &mut row_errors,
             )?;
             if !row_errors.is_empty() {
+                if let Some(issue) = row_errors
+                    .iter()
+                    .find(|issue| is_limit_issue_code(&issue.code))
+                {
+                    return Err(ManifestError::limit_exceeded(
+                        issue.code.clone(),
+                        issue.message.clone(),
+                    ));
+                }
                 let codes = row_errors
                     .iter()
                     .map(|issue| issue.code.as_str())
@@ -1928,6 +1940,7 @@ fn validate_jsonl_rows(
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut seen = HashSet::new();
+    let mut seen_db_id_bytes = 0usize;
     let mut row_count = 0usize;
     let mut line = Vec::new();
     let row_read_limit = expected_row_count
@@ -1946,15 +1959,17 @@ fn validate_jsonl_rows(
         row_count += 1;
         if row_count > row_read_limit {
             reached_eof = false;
-            push_report_issue_bounded(
-                errors,
-                limits,
-                "row_identity_row_count_limit_exceeded",
-                format!(
-                    "row identity file has more than max_row_identity_rows={} rows",
-                    limits.max_row_identity_rows
-                ),
-            );
+            if row_count > limits.max_row_identity_rows {
+                push_report_issue_bounded(
+                    errors,
+                    limits,
+                    "row_identity_row_count_limit_exceeded",
+                    format!(
+                        "row identity file has more than max_row_identity_rows={} rows",
+                        limits.max_row_identity_rows
+                    ),
+                );
+            }
             break;
         }
         if too_long {
@@ -1995,13 +2010,32 @@ fn validate_jsonl_rows(
         if let Some(parent_id) = &row.parent_id {
             validate_row_id_string("parent_id", parent_id, line_idx, limits, errors);
         }
-        if !allow_duplicate_db_ids && !seen.insert(row.db_id) {
-            push_report_issue_bounded(
-                errors,
-                limits,
-                "row_identity_duplicate_db_id",
-                format!("line {line_idx} repeats db_id"),
-            );
+        if !allow_duplicate_db_ids {
+            if seen.contains(&row.db_id) {
+                push_report_issue_bounded(
+                    errors,
+                    limits,
+                    "row_identity_duplicate_db_id",
+                    format!("line {line_idx} repeats db_id"),
+                );
+            } else {
+                let next_seen_db_id_bytes = seen_db_id_bytes.saturating_add(row.db_id.len());
+                if next_seen_db_id_bytes > limits.max_row_identity_tracked_db_id_bytes {
+                    reached_eof = false;
+                    push_report_issue_bounded(
+                        errors,
+                        limits,
+                        "row_identity_duplicate_tracking_limit_exceeded",
+                        format!(
+                            "tracked db_id bytes exceed max_row_identity_tracked_db_id_bytes={}",
+                            limits.max_row_identity_tracked_db_id_bytes
+                        ),
+                    );
+                    break;
+                }
+                seen_db_id_bytes = next_seen_db_id_bytes;
+                seen.insert(row.db_id);
+            }
         }
     }
 
@@ -2085,6 +2119,16 @@ fn validate_row_id_string(
             format!("line {line_idx} {field} contains NUL"),
         );
     }
+}
+
+fn is_limit_issue_code(code: &str) -> bool {
+    matches!(
+        code,
+        "row_identity_line_too_large"
+            | "row_identity_row_count_limit_exceeded"
+            | "row_identity_duplicate_tracking_limit_exceeded"
+            | "verification_report_issue_limit_exceeded"
+    )
 }
 
 fn manifest_path_for_create(

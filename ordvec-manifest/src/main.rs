@@ -129,6 +129,8 @@ struct LimitArgs {
     #[arg(long)]
     max_row_map_rows: Option<usize>,
     #[arg(long)]
+    max_row_map_tracked_id_bytes: Option<usize>,
+    #[arg(long)]
     max_report_issues: Option<usize>,
     #[arg(long)]
     max_cached_report_bytes: Option<u64>,
@@ -145,6 +147,9 @@ impl LimitArgs {
         }
         if let Some(value) = self.max_row_map_rows {
             limits.max_row_identity_rows = value;
+        }
+        if let Some(value) = self.max_row_map_tracked_id_bytes {
+            limits.max_row_identity_tracked_db_id_bytes = value;
         }
         if let Some(value) = self.max_report_issues {
             limits.max_report_issues = value;

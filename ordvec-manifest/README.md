@@ -31,15 +31,26 @@ Verification uses bounded parser/report defaults on both CLI and library paths:
 - manifest JSON: 1 MiB before JSON parsing;
 - row-identity JSONL line: 64 KiB;
 - row-identity JSONL rows: 10,000,000;
+- row-identity duplicate-tracking `db_id` bytes: 64 MiB;
 - collected report issues: 1,024, after which a
   `verification_report_issue_limit_exceeded` issue is emitted;
 - SQLite cached report JSON: 4 MiB.
 
 The CLI exposes matching override flags on `inspect`, `verify`, `create`,
 `sqlite verify`, and `sqlite activate`: `--max-manifest-bytes`,
-`--max-row-map-line-bytes`, `--max-row-map-rows`, `--max-report-issues`, and
-`--max-cached-report-bytes`. Library callers can override the same ceilings via
-`VerifyOptions::limits`. These limits bound metadata parsing and report/cache
+`--max-row-map-line-bytes`, `--max-row-map-rows`,
+`--max-row-map-tracked-id-bytes`, `--max-report-issues`, and
+`--max-cached-report-bytes`. Library callers can override the same ceilings
+via `VerifyOptions::limits`. Stable limit codes exposed through verification
+reports are `row_identity_line_too_large`,
+`row_identity_row_count_limit_exceeded`,
+`row_identity_duplicate_tracking_limit_exceeded`, and
+`verification_report_issue_limit_exceeded`. `ManifestError::code()` reports
+`manifest_file_too_large`, `row_identity_line_too_large`,
+`row_identity_row_count_limit_exceeded`,
+`row_identity_duplicate_tracking_limit_exceeded`, or
+`sqlite_cached_report_too_large` when those limits fail before a report can be
+returned or cached. These limits bound metadata parsing and report/cache
 growth; hashing an index or calibration profile is still proportional to the
 artifact bytes being verified.
 

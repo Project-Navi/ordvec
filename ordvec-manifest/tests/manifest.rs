@@ -386,6 +386,83 @@ fn row_identity_row_limit_rejects_declared_overrun() {
 }
 
 #[test]
+fn row_identity_extra_rows_reports_mismatch_not_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 2);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(
+        &rows,
+        &[
+            ("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", None),
+            ("ffffffff-1111-4222-8333-444444444444", None),
+            ("55555555-6666-4777-8888-999999999999", None),
+        ],
+    );
+    let row_hash = sha256_file(&rows).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: row_hash.sha256,
+        row_count: 2,
+        id_kind: "uuid".to_string(),
+        db: None,
+    };
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    let codes = error_codes(&report);
+    assert!(codes.contains(&"row_identity_row_count_mismatch"));
+    assert!(!codes.contains(&"row_identity_row_count_limit_exceeded"));
+}
+
+#[test]
+fn row_identity_duplicate_tracking_limit_is_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 2);
+    let rows = temp.path().join("rows.jsonl");
+    let first_id = "a".repeat(24);
+    let second_id = "b".repeat(24);
+    let mut file = fs::File::create(&rows).unwrap();
+    writeln!(file, "{}", json!({"row_id": 0, "db_id": first_id})).unwrap();
+    writeln!(file, "{}", json!({"row_id": 1, "db_id": second_id})).unwrap();
+    let row_hash = sha256_file(&rows).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: row_hash.sha256,
+        row_count: 2,
+        id_kind: "uuid".to_string(),
+        db: None,
+    };
+
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_row_identity_tracked_db_id_bytes: 32,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(error_codes(&report).contains(&"row_identity_duplicate_tracking_limit_exceeded"));
+}
+
+#[test]
 fn create_row_identity_limit_is_overridable() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_rankquant_index(temp.path(), 2);
@@ -413,9 +490,7 @@ fn create_row_identity_limit_is_overridable() {
         },
     )
     .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("row_identity_row_count_limit_exceeded"));
+    assert_eq!(err.code(), Some("row_identity_row_count_limit_exceeded"));
 
     let manifest = create_manifest_for_index_with_options(
         &index,
@@ -432,6 +507,64 @@ fn create_row_identity_limit_is_overridable() {
     )
     .unwrap();
     assert_eq!(manifest.row_identity.row_count(), 2);
+}
+
+#[test]
+fn create_row_identity_line_limit_preserves_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 1);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(&rows, &[("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", None)]);
+    let line_len = fs::read(&rows).unwrap().len();
+    let manifest_path = temp.path().join("manifest.json");
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::Jsonl(rows),
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            limits: ResourceLimits {
+                max_row_identity_jsonl_line_bytes: line_len - 1,
+                ..ResourceLimits::default()
+            },
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("row_identity_line_too_large"));
+}
+
+#[test]
+fn create_row_identity_duplicate_tracking_limit_preserves_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 2);
+    let rows = temp.path().join("rows.jsonl");
+    let first_id = "a".repeat(24);
+    let second_id = "b".repeat(24);
+    let mut file = fs::File::create(&rows).unwrap();
+    writeln!(file, "{}", json!({"row_id": 0, "db_id": first_id})).unwrap();
+    writeln!(file, "{}", json!({"row_id": 1, "db_id": second_id})).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::Jsonl(rows),
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            limits: ResourceLimits {
+                max_row_identity_tracked_db_id_bytes: 32,
+                ..ResourceLimits::default()
+            },
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("row_identity_duplicate_tracking_limit_exceeded")
+    );
 }
 
 #[test]
@@ -1260,6 +1393,24 @@ fn cli_create_verify_and_exit_codes() {
             manifest.to_str().unwrap(),
             "--max-row-map-rows",
             "1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+
+    let output = Command::new(bin)
+        .args([
+            "create",
+            "--index",
+            index.to_str().unwrap(),
+            "--row-map",
+            rows.to_str().unwrap(),
+            "--embedding-model",
+            "test-embedding",
+            "--out",
+            manifest.to_str().unwrap(),
+            "--max-row-map-tracked-id-bytes",
+            "10",
         ])
         .output()
         .unwrap();
