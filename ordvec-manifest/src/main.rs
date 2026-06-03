@@ -135,6 +135,8 @@ struct LimitArgs {
     #[arg(long)]
     max_auxiliary_artifact_bytes: Option<u64>,
     #[arg(long)]
+    max_encoder_distortion_profile_bytes: Option<u64>,
+    #[arg(long)]
     max_report_issues: Option<usize>,
     #[arg(long)]
     max_cached_report_bytes: Option<u64>,
@@ -160,6 +162,9 @@ impl LimitArgs {
         }
         if let Some(value) = self.max_auxiliary_artifact_bytes {
             limits.max_auxiliary_artifact_bytes = value;
+        }
+        if let Some(value) = self.max_encoder_distortion_profile_bytes {
+            limits.max_encoder_distortion_profile_bytes = value;
         }
         if let Some(value) = self.max_report_issues {
             limits.max_report_issues = value;

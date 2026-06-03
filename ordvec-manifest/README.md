@@ -3,9 +3,10 @@
 Repo-local, publish=false sidecar verifier for ordvec index manifests.
 
 It verifies index bytes, probed header metadata, row identity, named auxiliary
-artifacts, optional calibration profile references, and attestation shape before
-a caller loads an ordvec index. It does not sign artifacts, manage keys, call
-networks, mutate index files, decide deployment trust policy, compute
+artifacts, optional encoder distortion profile references, optional
+calibration profile references, and attestation shape before a caller loads an
+ordvec index. It does not sign artifacts, manage keys, call networks, mutate
+index files, decide deployment trust policy, estimate encoder geometry, compute
 calibration statistics, or change the C ABI.
 
 ```sh
@@ -40,6 +41,8 @@ Stable limit codes are part of the contract:
   (`auxiliary_artifact_count_limit_exceeded`);
 - auxiliary artifact bytes per declared file: 64 MiB
   (`auxiliary_artifact_file_too_large`);
+- encoder distortion profile artifact bytes: 64 MiB
+  (`encoder_distortion_profile_too_large`);
 - collected report issues: 1,024, after which a
   `verification_report_issue_limit_exceeded` issue is emitted;
 - SQLite cached report JSON: 4 MiB (`sqlite_cached_report_too_large`).
@@ -48,9 +51,10 @@ The CLI exposes matching override flags on `inspect`, `verify`, `create`,
 `sqlite verify`, and `sqlite activate`: `--max-manifest-bytes`,
 `--max-row-map-line-bytes`, `--max-row-map-rows`,
 `--max-row-map-tracked-id-bytes`, `--max-auxiliary-artifacts`,
-`--max-auxiliary-artifact-bytes`, `--max-report-issues`, and
-`--max-cached-report-bytes`. Library callers can override the same ceilings via
-`VerifyOptions::limits`.
+`--max-auxiliary-artifact-bytes`,
+`--max-encoder-distortion-profile-bytes`, `--max-report-issues`, and
+`--max-cached-report-bytes`. Library callers can override the same ceilings
+via `VerifyOptions::limits`.
 
 Stable limit codes:
 
@@ -62,6 +66,7 @@ Stable limit codes:
 | row-identity duplicate-tracking `db_id` bytes | `row_identity_duplicate_tracking_limit_exceeded` | `row_identity_duplicate_tracking_limit_exceeded` |
 | auxiliary artifact declarations | `auxiliary_artifact_count_limit_exceeded` | n/a |
 | auxiliary artifact bytes per declared file | `auxiliary_artifact_file_too_large` | n/a |
+| encoder distortion profile artifact bytes | `encoder_distortion_profile_too_large` | n/a |
 | collected verification report issues | `verification_report_issue_limit_exceeded` | n/a |
 | SQLite cached report JSON bytes | n/a | `sqlite_cached_report_too_large` |
 
@@ -72,7 +77,9 @@ bounded in-memory reader fail before reading with the same stable
 the `verification_report_issue_limit_exceeded` sentinel when any issue would
 otherwise be reported. These limits bound metadata parsing and report/cache
 growth; hashing an index or calibration profile is still proportional to the
-artifact bytes being verified.
+artifact bytes being verified. SQLite cache-key construction treats an
+over-limit encoder distortion profile as non-cacheable and reruns verification
+instead of reusing a previously cached report.
 
 Manifests may declare `auxiliary_artifacts` for caller-owned sidecars that
 should be integrity-checked with the same path policy as the primary index.
@@ -226,8 +233,8 @@ With `--features sqlite`, the `sqlite verify` and `sqlite activate` subcommands
 add a local cache/audit log plus one active-manifest pointer. This is not a
 full named registry. `sqlite verify --use-cache` reuses only reports whose
 manifest, verification options, artifact bytes, row-identity bytes,
-calibration profile bytes, and declared auxiliary artifact states/bytes still
-match; otherwise it runs fresh verification and stores a new report.
-`sqlite activate --force` writes the active pointer even when verification
-fails, emits a `sqlite_activation_forced` warning in JSON output, and exits zero
-because it did mutate activation state.
+calibration profile bytes, encoder distortion profile bytes, and declared
+auxiliary artifact states/bytes still match; otherwise it runs fresh
+verification and stores a new report. `sqlite activate --force` writes the
+active pointer even when verification fails, emits a `sqlite_activation_forced`
+warning in JSON output, and exits zero because it did mutate activation state.
