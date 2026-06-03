@@ -271,7 +271,8 @@ The full GitHub checkout includes a publish=false sidecar CLI,
 header metadata, row identity, and attestation shape checks. It does not sign
 artifacts, manage keys, or decide deployment trust policy. No in-format crypto
 is shipped because it would add key management the library can't own. See
-[`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md)
+[`docs/PERSISTED_FORMAT.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/PERSISTED_FORMAT.md),
+[`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md),
 and [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)
 in the full repository.
 

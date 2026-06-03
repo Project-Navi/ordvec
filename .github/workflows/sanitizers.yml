@@ -1,0 +1,108 @@
+name: sanitizers
+
+# Native AddressSanitizer coverage for memory-unsafe surfaces that ordinary
+# stable CI cannot instrument. This intentionally skips blanket Miri: the crate
+# uses Rayon in core paths and the unsafe work lives in target-specific SIMD
+# intrinsics that Miri cannot execute. AVX-512 still needs SDE+ASAN follow-up;
+# this job covers native x86_64 scalar/AVX2 and Linux/aarch64 NEON.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: sanitizers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ASAN_NIGHTLY: nightly-2025-08-15
+  ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  asan:
+    name: asan (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64 core + ffi
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            run_ffi: true
+          - name: aarch64 core
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            run_ffi: false
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly; channel via toolchain: below
+        with:
+          toolchain: ${{ env.ASAN_NIGHTLY }}
+          components: rust-src
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: asan-${{ matrix.target }}
+      - name: Show sanitizer context
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          uname -a
+          rustc "+${ASAN_NIGHTLY}" -Vv
+          echo "target=${TARGET}"
+      - name: Sanity-check native AVX2/FMA detection
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/avx2-fma-probe.rs" <<'EOF'
+          fn main() {
+              let avx2 = is_x86_feature_detected!("avx2");
+              let fma = is_x86_feature_detected!("fma");
+              println!("avx2={avx2} fma={fma}");
+              assert!(avx2, "runner did not expose avx2; ASAN would miss the AVX2 kernels");
+              assert!(fma, "runner did not expose fma; ASAN would miss the AVX2 kernels");
+          }
+          EOF
+          rustc "+${ASAN_NIGHTLY}" "${RUNNER_TEMP}/avx2-fma-probe.rs" \
+            -o "${RUNNER_TEMP}/avx2-fma-probe"
+          "${RUNNER_TEMP}/avx2-fma-probe"
+      - name: ASAN core tests
+        env:
+          TARGET: ${{ matrix.target }}
+          RUSTFLAGS: -D warnings -Zsanitizer=address -C force-frame-pointers=yes
+        run: |
+          set -euo pipefail
+          cargo "+${ASAN_NIGHTLY}" test -Z build-std \
+            --target "${TARGET}" \
+            -p ordvec --lib --tests --all-features
+      - name: ASAN C ABI tests
+        if: ${{ matrix.run_ffi }}
+        env:
+          TARGET: ${{ matrix.target }}
+          ORDVEC_FFI_STATIC_LIB_DIR: ${{ github.workspace }}/target/${{ matrix.target }}/debug
+          ORDVEC_FFI_CC_SANITIZER: address
+          RUSTFLAGS: -D warnings -Zsanitizer=address -C force-frame-pointers=yes
+        run: |
+          set -euo pipefail
+          cargo "+${ASAN_NIGHTLY}" build -Z build-std \
+            --target "${TARGET}" \
+            -p ordvec-ffi
+          cargo "+${ASAN_NIGHTLY}" test -Z build-std \
+            --target "${TARGET}" \
+            -p ordvec-ffi --lib --tests
