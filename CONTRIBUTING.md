@@ -48,6 +48,20 @@ simd128 on wasm32, and a scalar fallback elsewhere. If you change a SIMD
 kernel, the AVX-512 path is exercised in CI under Intel SDE; locally, run on
 an AVX-512 host or via SDE.
 
+The `sanitizers` workflow runs AddressSanitizer on native x86_64 and
+Linux/aarch64. To run the x86_64 core sanitizer check locally:
+
+```sh
+RUSTFLAGS="-D warnings -Zsanitizer=address -C force-frame-pointers=yes" \
+ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:abort_on_error=1" \
+cargo +nightly-2025-08-15 test -Z build-std \
+  --target x86_64-unknown-linux-gnu \
+  -p ordvec --lib --tests --all-features
+```
+
+This native ASAN check does not exercise AVX-512 unless it is run through the
+SDE path.
+
 ### Python bindings (`ordvec-python/`)
 
 ```sh

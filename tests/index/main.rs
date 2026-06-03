@@ -188,14 +188,15 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
             v
         }),
         // TVR1 with truncated payload (header claims a payload bigger
-        // than what's on disk → read_exact returns UnexpectedEof, not
-        // a panic).
+        // than what's on disk → exact-length validation returns Err, not
+        // a panic or allocation attempt).
         ("tvr_truncated", {
             let mut v = Vec::new();
             v.extend_from_slice(b"TVR1");
             v.push(1);
             // Header claims 100 * 64 * 2 = 12800 payload bytes but only 100
-            // are provided, so the loader hits UnexpectedEof, not a panic.
+            // are provided, so the loader rejects the exact-length mismatch,
+            // not a panic.
             v.extend_from_slice(&64u32.to_le_bytes()); // dim
             v.extend_from_slice(&100u32.to_le_bytes()); // n_vectors
             v.extend(std::iter::repeat_n(0u8, 100));
@@ -222,7 +223,7 @@ fn rank_io_loaders_reject_malformed_files_without_panicking() {
         }),
         // TVSB with truncated payload: header declares 8 docs * 128/64 =
         // 16 qwords = 128 payload bytes but the file ends right after the
-        // header, so read_exact yields UnexpectedEof rather than a panic.
+        // header, so exact-length validation fails before payload allocation.
         ("tvsb_truncated", {
             let mut v = Vec::new();
             v.extend_from_slice(b"TVSB");
