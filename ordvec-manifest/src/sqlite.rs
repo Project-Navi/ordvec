@@ -1,7 +1,8 @@
 use crate::{
     resolve_existing_path, sha256_file, sha256_file_bounded, validate_jsonl_rows,
     verify_auxiliary_artifacts, verify_manifest, AuxiliaryArtifactState, ManifestDocument,
-    ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationReport, VerifyOptions,
+    ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationPathCapture,
+    VerificationReport, VerifyOptions,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -493,7 +494,8 @@ fn current_auxiliary_artifacts_sha256(
         return Ok(None);
     }
     let mut report = VerificationReport::new(None);
-    verify_auxiliary_artifacts(document, options, &mut report);
+    let mut paths = VerificationPathCapture::default();
+    verify_auxiliary_artifacts(document, options, &mut report, &mut paths);
     auxiliary_artifacts_sha256_from_report(document, &report)
 }
 

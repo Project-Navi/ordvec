@@ -1,8 +1,8 @@
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
-    load_manifest_file_with_options, sha256_file, verify_for_load, verify_index_manifest,
-    verify_manifest_with_base, AuxiliaryArtifact, AuxiliaryArtifactState,
+    load_manifest_file_with_options, sha256_file, verify_document_for_load, verify_for_load,
+    verify_index_manifest, verify_manifest_with_base, AuxiliaryArtifact, AuxiliaryArtifactState,
     CalibrationOrdinalization, CalibrationProfileRef, CreateManifestOptions, CreateRowIdentity,
     DistortionBounds, DistortionEvidence, DistortionEvidenceKind, DistortionProfileArtifactRef,
     DistortionScope, EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind,
@@ -1825,6 +1825,10 @@ fn verify_for_load_returns_resolved_plan_and_report() {
     assert_eq!(sidecar_plan.state(), AuxiliaryArtifactState::Verified);
     assert_eq!(sidecar_plan.path(), Some(canonical_sidecar.as_path()));
     assert_eq!(sidecar_plan.sha256(), Some(sidecar_hash.sha256.as_str()));
+
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let document_plan = verify_document_for_load(&document, VerifyOptions::default()).unwrap();
+    assert_eq!(document_plan.artifact_path(), plan.artifact_path());
 }
 
 #[test]

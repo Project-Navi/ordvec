@@ -57,10 +57,12 @@ deployment intentionally keeps those files outside that directory, create with
 Rust callers can use `verify_for_load(manifest_path, VerifyOptions)` to get a
 `VerifiedLoadPlan` containing the canonical artifact path, probed metadata,
 row-identity summary, auxiliary artifact states, and the full verification
-report. The plan helper does not call an ordvec loader, pin file descriptors,
-or make mutable shared storage immutable; callers still own the final policy
-decision and should load from the returned paths only while the verified files
-remain under their control.
+report. Callers that already hold a `ManifestDocument` can use
+`verify_document_for_load(&document, VerifyOptions)` without re-reading the
+manifest file. The plan helpers do not call an ordvec loader, pin file
+descriptors, or make mutable shared storage immutable; callers still own the
+final policy decision and should load from the returned paths only while the
+verified files remain under their control.
 
 The manifest verifier checks:
 
