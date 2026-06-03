@@ -317,10 +317,9 @@ fn rankquant_bytes_per_vec(dim: usize, bits: u8) -> io::Result<usize> {
 }
 
 fn rankquant_payload_bytes(dim: usize, vector_count: usize, bits: u8) -> io::Result<usize> {
+    let bytes_per_vec = rankquant_bytes_per_vec(dim, bits)?;
     vector_count
-        .checked_mul(dim)
-        .and_then(|x| x.checked_mul(bits as usize))
-        .map(|x| x / 8)
+        .checked_mul(bytes_per_vec)
         .ok_or_else(|| invalid("TVRQ payload size overflows usize"))
 }
 
