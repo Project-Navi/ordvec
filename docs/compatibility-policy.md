@@ -128,7 +128,8 @@ types:
 Patch releases should keep valid files from the same minor series loadable.
 Loader hardening may reject malformed files, forged sizes, trailing bytes, bad
 dimensions, unsupported bit widths, or files outside documented capacity
-limits. This bucket tracks the format-compatibility requirements from #118.
+limits. This bucket tracks the format-compatibility requirements from
+[#118](https://github.com/Fieldnote-Echo/ordvec/issues/118).
 
 Minor releases may introduce new format versions or new sidecar conventions.
 When they do, release notes must say whether older files remain readable and
