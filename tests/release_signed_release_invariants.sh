@@ -74,10 +74,18 @@ require_job_line() {
 job_downloads_artifact_to_path() {
   local jobname="$1" artifact="$2" expected_path="$3"
   job_body "$jobname" | awk -v artifact="$artifact" -v expected_path="$expected_path" '
-    /^[[:space:]]+- name:/ { in_step = 0 }
-    $0 ~ "^[[:space:]]+name:[[:space:]]*" artifact "[[:space:]]*$" { in_step = 1 }
-    in_step && $0 ~ "^[[:space:]]+path:[[:space:]]*" expected_path "[[:space:]]*$" { found = 1 }
-    END { exit found ? 0 : 1 }
+    function flush_step() {
+      if (has_download && has_name && has_path) {
+        found = 1
+      }
+      has_download = has_name = has_path = 0
+    }
+
+    /^[[:space:]]+-[[:space:]]/ { flush_step() }
+    $0 ~ "uses:[[:space:]]*actions/download-artifact" { has_download = 1 }
+    $0 ~ "^[[:space:]]+name:[[:space:]]*" artifact "[[:space:]]*$" { has_name = 1 }
+    $0 ~ "^[[:space:]]+path:[[:space:]]*" expected_path "[[:space:]]*$" { has_path = 1 }
+    END { flush_step(); exit found ? 0 : 1 }
   '
 }
 

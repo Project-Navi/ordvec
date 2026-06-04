@@ -123,8 +123,7 @@ def shell_vars(name: str) -> set[str]:
 
 def shell_curl_commands(script: str) -> list[list[str]]:
     commands: list[list[str]] = []
-    for raw_line in script.splitlines():
-        line = raw_line.strip()
+    for line in shell_logical_lines(script):
         if "curl" not in line:
             continue
         if line.startswith("if "):
@@ -137,6 +136,50 @@ def shell_curl_commands(script: str) -> list[list[str]]:
         if words and words[0] == "curl":
             commands.append(words)
     return commands
+
+
+def shell_logical_lines(script: str) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        continued = line.endswith("\\")
+        if continued:
+            line = line[:-1].strip()
+        current = f"{current} {line}".strip() if current else line
+        if not continued:
+            lines.append(current)
+            current = ""
+    if current:
+        lines.append(current)
+    return lines
+
+
+def has_cargo_package_arg(words: list[str], package: str) -> bool:
+    for index, word in enumerate(words):
+        if word in {"-p", "--package"}:
+            if index + 1 < len(words) and words[index + 1] == package:
+                return True
+        elif word.startswith("--package=") and word.split("=", 1)[1] == package:
+            return True
+        elif word.startswith("-p") and word != "-p" and word[2:] == package:
+            return True
+    return False
+
+
+def has_cargo_command(run: str, subcommand: str, package: str) -> bool:
+    for line in shell_logical_lines(run):
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            continue
+        if len(words) < 3 or words[0] != "cargo" or words[1] != subcommand:
+            continue
+        if "--locked" in words and has_cargo_package_arg(words[2:], package):
+            return True
+    return False
 
 
 def has_shell_arg(words: list[str], values: set[str]) -> bool:
@@ -341,9 +384,9 @@ def check_publish_crate_job(
         step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
         run = step.get("run")
         if isinstance(run, str):
-            if f"cargo package -p {package} --locked" in run:
+            if has_cargo_command(run, "package", package):
                 package_runs.append(run)
-            if f"cargo publish -p {package} --locked" in run:
+            if has_cargo_command(run, "publish", package):
                 publish_runs.append(run)
         if action_name(step) == "actions/download-artifact":
             with_block = step.get("with", {})
