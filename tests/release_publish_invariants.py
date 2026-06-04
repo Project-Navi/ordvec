@@ -16,6 +16,11 @@ from typing import Any
 
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
+CI_WORKFLOW_PATH = os.environ.get("CI_WORKFLOW_PATH", ".github/workflows/ci.yml")
+COVERAGE_WORKFLOW_PATH = os.environ.get("COVERAGE_WORKFLOW_PATH", ".github/workflows/coverage.yml")
+SDE_ACTION_PATH = os.environ.get(
+    "SDE_ACTION_PATH", ".github/actions/setup-intel-sde/action.yml"
+)
 
 
 def fail(message: str) -> None:
@@ -409,13 +414,79 @@ def check_publish_crate(workflow: dict[str, Any], path: str) -> None:
                 )
 
 
+def check_sde_setup_action(path: str) -> None:
+    action_text = read_text(path)
+    for option in ("--connect-timeout", "--max-time", "--retry-max-time"):
+        if option not in action_text:
+            fail(f"{path}: Intel SDE download curl must set {option}")
+    if "continuing without updating cache" not in action_text:
+        fail(f"{path}: Intel SDE cache population failures must be best-effort warnings")
+
+
+def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+    job_env = mapping(job.get("env"), f"{path}: jobs.{job_name}.env")
+    if not job_env.get("SDE_VERSION"):
+        fail(f"{path}: jobs.{job_name} must define SDE_VERSION")
+    if not job_env.get("SDE_SHA256"):
+        fail(f"{path}: jobs.{job_name} must define SDE_SHA256")
+
+    steps = sequence(job.get("steps"), f"{path}: jobs.{job_name}.steps")
+    cache_steps: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    setup_steps: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        action = action_name(step)
+        if action == "actions/cache":
+            with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
+            if norm_path(with_map.get("path")) == "~/.cache/ordvec-intel-sde":
+                cache_steps.append((index, step, with_map))
+        elif action == "./.github/actions/setup-intel-sde":
+            with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
+            setup_steps.append((index, step, with_map))
+
+    if len(cache_steps) != 1:
+        fail(f"{path}: jobs.{job_name} must restore exactly one Intel SDE archive cache")
+    _, _, cache_with = cache_steps[0]
+    key = cache_with.get("key")
+    expected_key = (
+        "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
+        "${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}"
+    )
+    if key != expected_key:
+        fail(
+            f"{path}: jobs.{job_name} Intel SDE cache key must be version+sha pinned, "
+            "not action-file-hash based"
+        )
+    if contains_text(key, "hashFiles") or contains_text(key, "setup-intel-sde/action.yml"):
+        fail(f"{path}: jobs.{job_name} Intel SDE cache key must not hash the action file")
+
+    if len(setup_steps) != 1:
+        fail(f"{path}: jobs.{job_name} must use exactly one setup-intel-sde action")
+    _, _, setup_with = setup_steps[0]
+    if setup_with.get("version") != "${{ env.SDE_VERSION }}":
+        fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_VERSION")
+    if setup_with.get("sha256") != "${{ env.SDE_SHA256 }}":
+        fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_SHA256")
+
+
+def check_sde_cache_invariants() -> None:
+    check_sde_setup_action(SDE_ACTION_PATH)
+    check_sde_cache_job(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH, "avx512")
+    check_sde_cache_job(load_workflow(COVERAGE_WORKFLOW_PATH), COVERAGE_WORKFLOW_PATH, "coverage")
+
+
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
-    check_hash_requirement_temp_paths([WORKFLOW_PATH, PYTHON_WORKFLOW_PATH])
+    check_hash_requirement_temp_paths(
+        [WORKFLOW_PATH, PYTHON_WORKFLOW_PATH, CI_WORKFLOW_PATH, COVERAGE_WORKFLOW_PATH]
+    )
     check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
     check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
     check_publish_crate(workflow, WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)
+    check_sde_cache_invariants()
 
 
 if __name__ == "__main__":

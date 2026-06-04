@@ -24,6 +24,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    env:
+      SDE_VERSION: sde-external-10.8.0-2026-03-15-lin
+      SDE_SHA256: 50b320cd226acef7a491f5b321fc1be3c3c7984f9e27a456e64894b5b0979dd3
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -42,12 +45,15 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ordvec-intel-sde
-          key: intel-sde-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/actions/setup-intel-sde/action.yml') }}
+          key: intel-sde-${{ runner.os }}-${{ runner.arch }}-${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}
       - name: Install cargo-llvm-cov (pinned)
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: Install Intel SDE
         id: sde
         uses: ./.github/actions/setup-intel-sde
+        with:
+          version: ${{ env.SDE_VERSION }}
+          sha256: ${{ env.SDE_SHA256 }}
       - name: Sanity-check AVX-512 detection under SDE
         env:
           SDE_PATH: ${{ steps.sde.outputs.sde-path }}
