@@ -529,7 +529,7 @@ def cargo_package_files(package: str) -> set[str]:
     try:
         output = subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.strip()
+        stderr = (exc.stderr or "").strip()
         fail(f"{' '.join(cmd)} failed while checking package contents: {stderr}")
     return {line.strip() for line in output.splitlines() if line.strip()}
 
@@ -564,8 +564,8 @@ def check_packaged_readme_links(package: str, files: set[str], readme_path: str)
         if target.startswith("/") or target.startswith("../") or "/../" in target:
             fail(f"{package}: README link {raw_target!r} escapes the packaged crate")
         normalized = posixpath.normpath(target)
-        if normalized not in files:
-            fail(f"{package}: README link {raw_target!r} points to a file not packaged")
+        if normalized not in files and not any(file.startswith(normalized + "/") for file in files):
+            fail(f"{package}: README link {raw_target!r} points to a file or directory not packaged")
 
 
 def check_package_contents() -> None:
@@ -738,17 +738,25 @@ def has_cargo_package_arg(words: list[str], package: str) -> bool:
 def cargo_command_words(run: str, subcommand: str, package: str) -> list[list[str]]:
     commands: list[list[str]] = []
     for line in shell_logical_lines(run):
-        if line.startswith("if "):
-            line = line[3:].strip()
-        line = line.split("; then", 1)[0].strip().rstrip(";")
-        try:
-            words = shlex.split(line)
-        except ValueError:
-            continue
-        if len(words) < 3 or words[0] != "cargo" or words[1] != subcommand:
-            continue
-        if "--locked" in words and has_cargo_package_arg(words[2:], package):
-            commands.append(words)
+        for part in re.split(r"&&|\|\||;", line):
+            part = part.strip()
+            for prefix in ("if ", "then ", "! "):
+                if part.startswith(prefix):
+                    part = part[len(prefix):].strip()
+            if not part:
+                continue
+            try:
+                words = shlex.split(part)
+            except ValueError:
+                continue
+            cmd_idx = 0
+            while cmd_idx < len(words) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[cmd_idx]):
+                cmd_idx += 1
+            cmd = words[cmd_idx:]
+            if len(cmd) < 3 or cmd[0] != "cargo" or cmd[1] != subcommand:
+                continue
+            if "--locked" in cmd and has_cargo_package_arg(cmd[2:], package):
+                commands.append(cmd)
     return commands
 
 
