@@ -416,6 +416,7 @@ impl RankQuant {
                             *s += offset;
                         }
                     }
+                    sort_by_exposed_score_then_row_id(out_scores, out_indices);
                 }
 
                 let _ = bytes_per_vec; // shape clarity
@@ -539,6 +540,11 @@ impl RankQuant {
     /// to global IDs before returning). Results are ordered by score
     /// descending, then global row ID ascending, matching the full-index
     /// search tie policy even when `candidates` is unsorted.
+    ///
+    /// `candidates` may contain duplicate global row IDs. Each candidate entry
+    /// is scored independently, so duplicate IDs may produce duplicate returned
+    /// global IDs. Callers that require unique hits should deduplicate the
+    /// candidate list before calling this method.
     ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just
@@ -669,7 +675,7 @@ impl RankQuant {
             }
         }
         // Map local → global doc IDs.
-        let global_indices: Vec<i64> = local_indices
+        let mut global_indices: Vec<i64> = local_indices
             .iter()
             .map(|&loc| {
                 if loc < 0 {
@@ -679,7 +685,33 @@ impl RankQuant {
                 }
             })
             .collect();
+        if centre_drop_used {
+            sort_by_exposed_score_then_row_id(&mut scores, &mut global_indices);
+        }
         (scores, global_indices)
+    }
+}
+
+// Re-applying a query-constant center offset after TopK finalization can round
+// distinct internal scores onto the same exposed score; enforce the public
+// `(score desc, row ID asc)` order on the finalized top-k slice.
+fn sort_by_exposed_score_then_row_id(scores: &mut [f32], indices: &mut [i64]) {
+    debug_assert_eq!(scores.len(), indices.len());
+    let mut pairs: Vec<(usize, f32, i64)> = scores
+        .iter()
+        .copied()
+        .zip(indices.iter().copied())
+        .enumerate()
+        .map(|(slot, (score, row_id))| (slot, score, row_id))
+        .collect();
+    pairs.sort_unstable_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    for (slot, (_, score, row_id)) in pairs.into_iter().enumerate() {
+        scores[slot] = score;
+        indices[slot] = row_id;
     }
 }
 

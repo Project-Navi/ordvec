@@ -347,6 +347,20 @@ def test_search_asymmetric_subset_ties_use_global_row_ids():
     np.testing.assert_array_equal(scores, np.array([0.0, 0.0], dtype=np.float32))
 
 
+def test_search_asymmetric_subset_duplicate_candidates_remain_duplicates():
+    vectors = np.ones((12, 64), dtype=np.float32)
+    idx = RankQuant(dim=64, bits=2)
+    idx.add(vectors)
+
+    candidates = np.array([7, 8, 7], dtype=np.uint32)
+    scores, ids = idx.search_asymmetric_subset(
+        np.zeros(64, dtype=np.float32), candidates, k=2
+    )
+
+    np.testing.assert_array_equal(ids, np.array([7, 7], dtype=np.int64))
+    np.testing.assert_array_equal(scores, np.array([0.0, 0.0], dtype=np.float32))
+
+
 def test_search_asymmetric_subset_k_caps_at_candidate_count():
     # k > len(candidates) should silently cap — no panic, no sentinel
     # padding beyond the candidate-set size.
