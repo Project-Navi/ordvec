@@ -22,6 +22,7 @@ except ModuleNotFoundError:
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 CI_WORKFLOW_PATH = os.environ.get("CI_WORKFLOW_PATH", ".github/workflows/ci.yml")
+STRICT_STABLE_TAG_PATTERN = r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 
 
 def fail(message: str) -> None:
@@ -203,14 +204,22 @@ def parse_toml_value(value: str) -> Any:
 def minimal_load_toml(path: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current: dict[str, Any] = data
-    in_multiline_array = False
+    multiline_array: list[Any] | None = None
     for lineno, raw_line in enumerate(read_text(path).splitlines(), start=1):
         line = strip_toml_comment(raw_line).strip()
         if not line:
             continue
-        if in_multiline_array:
-            if line == "]" or line.endswith("]"):
-                in_multiline_array = False
+        if multiline_array is not None:
+            closes = line == "]" or line.endswith("]")
+            if closes:
+                line = line[:-1].strip()
+            if line.endswith(","):
+                line = line[:-1].strip()
+            if line:
+                for part in split_inline_table(line):
+                    multiline_array.append(parse_toml_value(part))
+            if closes:
+                multiline_array = None
             continue
         if line.startswith("[[") and line.endswith("]]"):
             current = {}
@@ -226,11 +235,11 @@ def minimal_load_toml(path: str) -> dict[str, Any]:
         if not separator:
             raise ValueError(f"{path}:{lineno}: unsupported TOML line {line!r}")
         if value.strip() == "[":
-            current[key.strip()] = []
-            in_multiline_array = True
+            multiline_array = []
+            current[key.strip()] = multiline_array
             continue
         current[key.strip()] = parse_toml_value(value)
-    if in_multiline_array:
+    if multiline_array is not None:
         raise ValueError(f"{path}: unterminated multiline array")
     return data
 
@@ -251,13 +260,34 @@ def load_toml(path: str) -> dict[str, Any]:
     return data
 
 
-def package_version(path: str) -> str:
+def package_manifest(path: str) -> dict[str, Any]:
     data = load_toml(path)
     package = mapping(data.get("package"), f"{path}: package")
+    return package
+
+
+def package_version(path: str) -> str:
+    package = package_manifest(path)
     version = package.get("version")
     if not isinstance(version, str) or not version:
         fail(f"{path}: package.version must be a non-empty string")
     return version
+
+
+def package_rust_version(path: str) -> str:
+    package = package_manifest(path)
+    rust_version = package.get("rust-version")
+    if not isinstance(rust_version, str) or not rust_version:
+        fail(f"{path}: package.rust-version must be a non-empty string")
+    return rust_version
+
+
+def package_publish_setting(path: str) -> bool:
+    package = package_manifest(path)
+    publish = package.get("publish", True)
+    if not isinstance(publish, bool):
+        fail(f"{path}: package.publish must be a boolean when present")
+    return publish
 
 
 def project_version(path: str) -> str:
@@ -275,6 +305,13 @@ def python_init_version(path: str) -> str:
     if len(matches) != 1:
         fail(f"{path}: must contain exactly one literal __version__ assignment")
     return matches[0]
+
+
+def semver_minor_requirement(version: str) -> str:
+    match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version)
+    if match is None:
+        fail(f"package.version {version!r} is not a strict MAJOR.MINOR.PATCH SemVer")
+    return f"{match.group(1)}.{match.group(2)}"
 
 
 def check_release_version_sync() -> None:
@@ -324,6 +361,134 @@ def check_release_version_sync() -> None:
         fuzz_lock,
     ):
         fail(f"fuzz/Cargo.lock must lock the path dependency ordvec at {core_version}")
+
+
+def check_release_compatibility_sync() -> None:
+    core_version = package_version("Cargo.toml")
+    core_msrv = package_rust_version("Cargo.toml")
+
+    for path in (
+        "ordvec-manifest/Cargo.toml",
+        "ordvec-python/Cargo.toml",
+        "ordvec-ffi/Cargo.toml",
+    ):
+        rust_version = package_rust_version(path)
+        if rust_version != core_msrv:
+            fail(f"{path}: package.rust-version is {rust_version}, expected {core_msrv}")
+
+    readme = read_text("README.md")
+    minor_req = semver_minor_requirement(core_version)
+    quickstart = re.search(r"(?ms)^## Quickstart\b.*?```toml\n(?P<block>.*?)\n```", readme)
+    if quickstart is None:
+        fail("README.md must contain a Quickstart TOML dependency block")
+    if f'ordvec = "{minor_req}"' not in quickstart.group("block"):
+        fail(f"README.md quickstart must install ordvec = {minor_req!r}")
+    if f"MSRV-{core_msrv}-blue.svg" not in readme:
+        fail(f"README.md MSRV badge must mention {core_msrv}")
+    if f"ordvec's MSRV is **Rust {core_msrv}**" not in readme:
+        fail(f"README.md MSRV section must mention Rust {core_msrv}")
+
+    compatibility = read_text("docs/compatibility-policy.md")
+    if f"The Rust MSRV is Rust {core_msrv}." not in compatibility:
+        fail(f"docs/compatibility-policy.md must mention Rust {core_msrv}")
+
+    ci = read_text(".github/workflows/ci.yml")
+    msrv_toolchain = f"{core_msrv}.0"
+    if f"name: msrv ({msrv_toolchain})" not in ci:
+        fail(f".github/workflows/ci.yml MSRV job name must mention {msrv_toolchain}")
+    if f"toolchain: {msrv_toolchain}" not in ci:
+        fail(f".github/workflows/ci.yml MSRV job must pin toolchain {msrv_toolchain}")
+
+
+def check_publication_model() -> None:
+    expected_publish = {
+        "Cargo.toml": True,
+        "ordvec-manifest/Cargo.toml": True,
+        "ordvec-python/Cargo.toml": False,
+        "ordvec-ffi/Cargo.toml": False,
+        "fuzz/Cargo.toml": False,
+    }
+    for path, expected in expected_publish.items():
+        actual = package_publish_setting(path)
+        if actual != expected:
+            wanted = "publishable" if expected else "publish = false"
+            got = "publishable" if actual else "publish = false"
+            fail(f"{path}: publication model is {got}, expected {wanted}")
+
+
+def check_python_package_metadata() -> None:
+    pyproject = load_toml("ordvec-python/pyproject.toml")
+    project = mapping(pyproject.get("project"), "ordvec-python/pyproject.toml: project")
+    if project.get("name") != "ordvec":
+        fail("ordvec-python/pyproject.toml: project.name must be 'ordvec'")
+    if project.get("requires-python") != ">=3.10":
+        fail("ordvec-python/pyproject.toml: project.requires-python must be >=3.10")
+    dependencies = sequence(
+        project.get("dependencies"), "ordvec-python/pyproject.toml: project.dependencies"
+    )
+    if "numpy>=2.2" not in dependencies:
+        fail("ordvec-python/pyproject.toml: project.dependencies must include numpy>=2.2")
+
+    cargo = load_toml("ordvec-python/Cargo.toml")
+    dependencies_table = mapping(cargo.get("dependencies"), "ordvec-python/Cargo.toml: dependencies")
+    pyo3 = mapping(dependencies_table.get("pyo3"), "ordvec-python/Cargo.toml: dependencies.pyo3")
+    pyo3_features = sequence(
+        pyo3.get("features"), "ordvec-python/Cargo.toml: dependencies.pyo3.features"
+    )
+    for feature in ("extension-module", "abi3-py310"):
+        if feature not in pyo3_features:
+            fail(f"ordvec-python/Cargo.toml: pyo3 features must include {feature}")
+
+    readme = read_text("README.md")
+    py_readme = read_text("ordvec-python/README.md")
+    for path, text in (("README.md", readme), ("ordvec-python/README.md", py_readme)):
+        if "CPython 3.10+ (abi3)" not in text:
+            fail(f"{path}: Python install docs must mention CPython 3.10+ (abi3)")
+        if "`numpy>=2.2`" not in text:
+            fail(f"{path}: Python install docs must mention numpy>=2.2")
+
+    dependabot = read_text(".github/dependabot.yml")
+    if "floor >=2.2" not in dependabot:
+        fail(".github/dependabot.yml must keep the Python NumPy floor comment at >=2.2")
+
+
+def check_strict_release_tag_patterns(workflow: dict[str, Any], path: str) -> None:
+    cliff = load_toml("cliff.toml")
+    git = mapping(cliff.get("git"), "cliff.toml: git")
+    tag_pattern = git.get("tag_pattern")
+    if tag_pattern != STRICT_STABLE_TAG_PATTERN:
+        fail(
+            "cliff.toml: git.tag_pattern must match release.yml's strict stable "
+            "SemVer guard"
+        )
+
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    guard = mapping(jobs.get("guard"), f"{path}: jobs.guard")
+    steps = sequence(guard.get("steps"), f"{path}: jobs.guard.steps")
+    semver_runs: list[str] = []
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.guard.steps[{index}]")
+        if step.get("id") != "semver":
+            continue
+        run = step.get("run")
+        if not isinstance(run, str):
+            fail(f"{path}: jobs.guard semver step must be a run step")
+        semver_runs.append(run)
+    if len(semver_runs) != 1:
+        fail(f"{path}: jobs.guard must contain exactly one id: semver step")
+    assignment = f"semver='{STRICT_STABLE_TAG_PATTERN}'"
+    if assignment not in shell_logical_lines(semver_runs[0]):
+        fail(f"{path}: jobs.guard semver step must execute the strict stable SemVer regex")
+
+    compiled = re.compile(STRICT_STABLE_TAG_PATTERN)
+    accepted = ("v0.4.0", "v1.2.3", "v10.20.30")
+    rejected = ("v01.2.3", "v1.02.3", "v1.2.03", "v1.2.3-rc.1", "archive/v1.2.3")
+    for tag in accepted:
+        if compiled.fullmatch(tag) is None:
+            fail(f"strict release tag regex must accept {tag}")
+    for tag in rejected:
+        if compiled.fullmatch(tag) is not None:
+            fail(f"strict release tag regex must reject {tag}")
 
 
 def shell_vars(name: str) -> set[str]:
@@ -837,6 +1002,10 @@ def check_ci_manifest_package_defer(workflow: dict[str, Any], path: str) -> None
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
     check_release_version_sync()
+    check_release_compatibility_sync()
+    check_publication_model()
+    check_python_package_metadata()
+    check_strict_release_tag_patterns(workflow, WORKFLOW_PATH)
     check_hash_requirement_temp_paths([WORKFLOW_PATH, PYTHON_WORKFLOW_PATH])
     check_release_security_gates(workflow, WORKFLOW_PATH)
     check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)

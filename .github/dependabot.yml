@@ -35,7 +35,7 @@ updates:
           - "minor"
           - "patch"
 
-  # ordvec-python's only runtime dep is numpy (floor >=2.0, matching abi3-py310 /
+  # ordvec-python's only runtime dep is numpy (floor >=2.2, matching abi3-py310 /
   # Python >=3.10); maturin is the build dep. Group minor+patch into one PR;
   # majors stay separate for manual review.
   - package-ecosystem: "pip"
