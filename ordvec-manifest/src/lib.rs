@@ -176,7 +176,31 @@ pub fn verify_index_manifest(
     Ok(verify_manifest(&document, options))
 }
 
+pub fn verify_for_load(
+    manifest_path: impl AsRef<Path>,
+    options: VerifyOptions,
+) -> Result<VerifiedLoadPlan, VerifiedLoadPlanError> {
+    let document = load_manifest_file_with_options(manifest_path, &options)?;
+    verify_document_for_load(&document, options)
+}
+
+pub fn verify_document_for_load(
+    document: &ManifestDocument,
+    options: VerifyOptions,
+) -> Result<VerifiedLoadPlan, VerifiedLoadPlanError> {
+    let (report, paths) = verify_manifest_with_path_capture(document, options);
+    VerifiedLoadPlan::from_report(document, report, paths)
+}
+
 pub fn verify_manifest(document: &ManifestDocument, options: VerifyOptions) -> VerificationReport {
+    verify_manifest_with_path_capture(document, options).0
+}
+
+fn verify_manifest_with_path_capture(
+    document: &ManifestDocument,
+    options: VerifyOptions,
+) -> (VerificationReport, VerificationPathCapture) {
+    let mut paths = VerificationPathCapture::default();
     let mut report = VerificationReport::new(Some(document.manifest.manifest_id.clone()));
     validate_manifest_shape(&document.manifest, &options.limits, &mut report);
 
@@ -196,6 +220,7 @@ pub fn verify_manifest(document: &ManifestDocument, options: VerifyOptions) -> V
         "artifact",
         &mut report.errors,
     ) {
+        paths.artifact_path = Some(resolved.canonical_path.clone());
         report.artifact.canonical_path = Some(path_to_display(&resolved.canonical_path));
         match sha256_file(&resolved.resolved_path) {
             Ok(hash) => {
@@ -239,15 +264,15 @@ pub fn verify_manifest(document: &ManifestDocument, options: VerifyOptions) -> V
         }
     }
 
-    verify_auxiliary_artifacts(document, &options, &mut report);
-    verify_row_identity(document, &options, &mut report);
+    verify_auxiliary_artifacts(document, &options, &mut report, &mut paths);
+    verify_row_identity(document, &options, &mut report, &mut paths);
     verify_encoder_distortion(document, &options, &mut report);
     verify_calibration(document, &options, &mut report);
     verify_attestations(&document.manifest, &mut report);
 
     enforce_report_issue_limit(&mut report.errors, &options.limits);
     report.ok = report.errors.is_empty();
-    report
+    (report, paths)
 }
 
 fn validate_manifest_shape(
@@ -647,6 +672,7 @@ fn verify_row_identity(
     document: &ManifestDocument,
     options: &VerifyOptions,
     report: &mut VerificationReport,
+    paths: &mut VerificationPathCapture,
 ) {
     match &document.manifest.row_identity {
         RowIdentity::RowIdIdentity { row_count } => {
@@ -680,6 +706,7 @@ fn verify_row_identity(
                 "row_identity",
                 &mut report.errors,
             ) {
+                paths.row_identity_path = Some(resolved.canonical_path.clone());
                 report.row_identity.canonical_path =
                     Some(path_to_display(&resolved.canonical_path));
                 match validate_jsonl_rows(
@@ -1789,6 +1816,7 @@ fn verify_auxiliary_artifacts(
     document: &ManifestDocument,
     options: &VerifyOptions,
     report: &mut VerificationReport,
+    paths: &mut VerificationPathCapture,
 ) {
     if !check_auxiliary_artifact_count(&document.manifest, &options.limits, report) {
         return;
@@ -1827,10 +1855,12 @@ fn verify_auxiliary_artifacts(
 
     for artifact in artifacts {
         let mut entry = auxiliary_artifact_report_entry(artifact, &document.base_dir);
+        let mut captured_path = None;
 
         if artifact.path.trim().is_empty() {
             mark_auxiliary_artifact_failed(&mut entry, "auxiliary_artifact_path_empty");
             report.auxiliary_artifacts.push(entry);
+            paths.auxiliary_artifact_paths.push(None);
             continue;
         }
 
@@ -1842,6 +1872,7 @@ fn verify_auxiliary_artifacts(
             report,
         ) {
             AuxiliaryPathResolution::Resolved(resolved) => {
+                captured_path = Some(resolved.canonical_path.clone());
                 entry.canonical_path = Some(path_to_display(&resolved.canonical_path));
                 match sha256_file_bounded(
                     &resolved.resolved_path,
@@ -1912,6 +1943,7 @@ fn verify_auxiliary_artifacts(
         }
 
         report.auxiliary_artifacts.push(entry);
+        paths.auxiliary_artifact_paths.push(captured_path);
     }
 }
 
@@ -2195,6 +2227,13 @@ impl Default for ResourceLimits {
 struct ResolvedPath {
     resolved_path: PathBuf,
     canonical_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default)]
+struct VerificationPathCapture {
+    artifact_path: Option<PathBuf>,
+    row_identity_path: Option<PathBuf>,
+    auxiliary_artifact_paths: Vec<Option<PathBuf>>,
 }
 
 fn resolve_existing_path(
@@ -2675,6 +2714,309 @@ impl ManifestIndexParams {
             CoreIndexParams::Bitmap { n_top } => Self::Bitmap { n_top },
             CoreIndexParams::SignBitmap => Self::SignBitmap,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedLoadPlan {
+    manifest_path: Option<PathBuf>,
+    artifact_path: PathBuf,
+    metadata: MetadataReport,
+    row_identity: VerifiedRowIdentityPlan,
+    auxiliary_artifacts: Vec<VerifiedAuxiliaryArtifactPlan>,
+    report: VerificationReport,
+}
+
+impl VerifiedLoadPlan {
+    fn from_report(
+        document: &ManifestDocument,
+        report: VerificationReport,
+        paths: VerificationPathCapture,
+    ) -> Result<Self, VerifiedLoadPlanError> {
+        if !report.ok {
+            return Err(VerifiedLoadPlanError::VerificationFailed(Box::new(report)));
+        }
+
+        let artifact_path =
+            paths
+                .artifact_path
+                .clone()
+                .ok_or_else(|| VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: "verified report is missing the captured artifact path".to_string(),
+                })?;
+        let metadata = report.artifact.metadata.clone().ok_or_else(|| {
+            VerifiedLoadPlanError::IncompletePlan {
+                report: Box::new(report.clone()),
+                message: "verified report is missing probed artifact metadata".to_string(),
+            }
+        })?;
+        let row_identity =
+            VerifiedRowIdentityPlan::from_report(paths.row_identity_path.as_ref(), &report)?;
+        let auxiliary_artifacts = report
+            .auxiliary_artifacts
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                VerifiedAuxiliaryArtifactPlan::from_report(
+                    entry,
+                    paths
+                        .auxiliary_artifact_paths
+                        .get(idx)
+                        .and_then(|path| path.as_ref()),
+                    &report,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            manifest_path: document.source_path.clone(),
+            artifact_path,
+            metadata,
+            row_identity,
+            auxiliary_artifacts,
+            report,
+        })
+    }
+
+    pub fn manifest_path(&self) -> Option<&Path> {
+        self.manifest_path.as_deref()
+    }
+
+    pub fn artifact_path(&self) -> &Path {
+        &self.artifact_path
+    }
+
+    pub fn metadata(&self) -> &MetadataReport {
+        &self.metadata
+    }
+
+    pub fn row_identity(&self) -> &VerifiedRowIdentityPlan {
+        &self.row_identity
+    }
+
+    pub fn auxiliary_artifacts(&self) -> &[VerifiedAuxiliaryArtifactPlan] {
+        &self.auxiliary_artifacts
+    }
+
+    pub fn report(&self) -> &VerificationReport {
+        &self.report
+    }
+
+    pub fn into_report(self) -> VerificationReport {
+        self.report
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedRowIdentityPlan {
+    kind: String,
+    path: Option<PathBuf>,
+    row_count: usize,
+    validated_rows: Option<usize>,
+    sha256: Option<String>,
+}
+
+impl VerifiedRowIdentityPlan {
+    fn from_report(
+        captured_path: Option<&PathBuf>,
+        report: &VerificationReport,
+    ) -> Result<Self, VerifiedLoadPlanError> {
+        let kind = report.row_identity.kind.clone().ok_or_else(|| {
+            VerifiedLoadPlanError::IncompletePlan {
+                report: Box::new(report.clone()),
+                message: "verified report is missing row identity kind".to_string(),
+            }
+        })?;
+        let row_count =
+            report
+                .row_identity
+                .row_count
+                .ok_or_else(|| VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: "verified report is missing row identity row count".to_string(),
+                })?;
+        let path = match kind.as_str() {
+            "row_id_identity" => None,
+            "jsonl" => Some(captured_path.cloned().ok_or_else(|| {
+                VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: "verified report is missing the captured row identity path"
+                        .to_string(),
+                }
+            })?),
+            _ => {
+                return Err(VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: format!("verified report has unsupported row identity kind {kind:?}"),
+                });
+            }
+        };
+
+        Ok(Self {
+            kind,
+            path,
+            row_count,
+            validated_rows: report.row_identity.validated_rows,
+            sha256: report.row_identity.sha256.clone(),
+        })
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    pub fn validated_rows(&self) -> Option<usize> {
+        self.validated_rows
+    }
+
+    pub fn sha256(&self) -> Option<&str> {
+        self.sha256.as_deref()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedAuxiliaryArtifactPlan {
+    name: String,
+    path: Option<PathBuf>,
+    required: bool,
+    state: AuxiliaryArtifactState,
+    reason_code: Option<String>,
+    sha256: Option<String>,
+    size_bytes: Option<u64>,
+}
+
+impl VerifiedAuxiliaryArtifactPlan {
+    fn from_report(
+        entry: &AuxiliaryArtifactReport,
+        captured_path: Option<&PathBuf>,
+        report: &VerificationReport,
+    ) -> Result<Self, VerifiedLoadPlanError> {
+        let path = match entry.state {
+            AuxiliaryArtifactState::Verified => Some(captured_path.cloned().ok_or_else(|| {
+                VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: format!(
+                        "verified auxiliary artifact {:?} is missing its captured path",
+                        entry.name
+                    ),
+                }
+            })?),
+            AuxiliaryArtifactState::OptionalAbsent => None,
+            AuxiliaryArtifactState::MissingRequired | AuxiliaryArtifactState::Failed => {
+                return Err(VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: format!(
+                        "verified report contains non-loadable auxiliary artifact {:?}",
+                        entry.name
+                    ),
+                });
+            }
+        };
+
+        Ok(Self {
+            name: entry.name.clone(),
+            path,
+            required: entry.required,
+            state: entry.state,
+            reason_code: entry.reason_code.clone(),
+            sha256: entry.sha256.clone(),
+            size_bytes: entry.size_bytes,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn required(&self) -> bool {
+        self.required
+    }
+
+    pub fn state(&self) -> AuxiliaryArtifactState {
+        self.state
+    }
+
+    pub fn reason_code(&self) -> Option<&str> {
+        self.reason_code.as_deref()
+    }
+
+    pub fn sha256(&self) -> Option<&str> {
+        self.sha256.as_deref()
+    }
+
+    pub fn size_bytes(&self) -> Option<u64> {
+        self.size_bytes
+    }
+}
+
+#[derive(Debug)]
+pub enum VerifiedLoadPlanError {
+    Manifest(ManifestError),
+    VerificationFailed(Box<VerificationReport>),
+    IncompletePlan {
+        report: Box<VerificationReport>,
+        message: String,
+    },
+}
+
+impl fmt::Display for VerifiedLoadPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manifest(err) => write!(f, "{err}"),
+            Self::VerificationFailed(report) => {
+                write!(
+                    f,
+                    "manifest verification failed{}",
+                    report_issue_summary(&report.errors)
+                )
+            }
+            Self::IncompletePlan { message, .. } => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for VerifiedLoadPlanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Manifest(err) => Some(err),
+            Self::VerificationFailed(_) | Self::IncompletePlan { .. } => None,
+        }
+    }
+}
+
+impl From<ManifestError> for VerifiedLoadPlanError {
+    fn from(value: ManifestError) -> Self {
+        Self::Manifest(value)
+    }
+}
+
+fn report_issue_summary(errors: &[ReportIssue]) -> String {
+    if errors.is_empty() {
+        return String::new();
+    }
+    let codes = errors
+        .iter()
+        .take(3)
+        .map(|issue| issue.code.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if errors.len() > 3 {
+        format!(": {codes}, ...")
+    } else {
+        format!(": {codes}")
     }
 }
 

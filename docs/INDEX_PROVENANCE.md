@@ -54,6 +54,15 @@ The `create` command emits default-verifiable manifests by default: artifact
 and row-identity paths must resolve under the output manifest directory. If a
 deployment intentionally keeps those files outside that directory, create with
 `--allow-path-escape` and verify with the matching path-policy flag.
+Rust callers can use `verify_for_load(manifest_path, VerifyOptions)` to get a
+`VerifiedLoadPlan` containing the canonical artifact path, probed metadata,
+row-identity summary, auxiliary artifact states, and the full verification
+report. Callers that already hold a `ManifestDocument` can use
+`verify_document_for_load(&document, VerifyOptions)` without re-reading the
+manifest file. The plan helpers do not call an ordvec loader, pin file
+descriptors, or make mutable shared storage immutable; callers still own the
+final policy decision and should load from the returned paths only while the
+verified files remain under their control.
 
 The manifest verifier checks:
 
@@ -109,8 +118,8 @@ probabilities. Calibration profiles must match the encoder identity declared by
 `uniform_hypergeometric` null is reserved for top-K overlap calibration and is
 not accepted for bucket, sign, or rank-position ordinalizations.
 
-Recipes that consume sidecar manifests should run the verifier first, then
-load/search/rerank only if verification succeeds.
+Recipes that consume sidecar manifests should run the verifier or plan helper
+first, then load/search/rerank only if verification succeeds.
 
 You can also verify using whatever your deployment already trusts:
 

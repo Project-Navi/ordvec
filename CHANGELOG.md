@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a `signbitmap_rankquant_twostage` fuzz target and deterministic tests
   for the SignBitmap candidate generation plus RankQuant subset rerank
   pipeline used by downstream retrieval systems.
+- Added a verifier-only `VerifiedLoadPlan` helper to `ordvec-manifest` so Rust
+  callers can verify a manifest, retain the typed report, and load from the
+  resolved artifact and sidecar paths without re-resolving manifest strings.
 - Added named auxiliary artifact verification to `ordvec-manifest`, including
   required/optional sidecar states, path/size/SHA-256 checks, deterministic
   report entries, and SQLite cache invalidation for declared sidecar bytes.

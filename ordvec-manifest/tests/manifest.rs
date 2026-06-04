@@ -1,13 +1,14 @@
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
-    load_manifest_file_with_options, sha256_file, verify_index_manifest, verify_manifest_with_base,
-    AuxiliaryArtifact, AuxiliaryArtifactState, CalibrationOrdinalization, CalibrationProfileRef,
-    CreateManifestOptions, CreateRowIdentity, DistortionBounds, DistortionEvidence,
-    DistortionEvidenceKind, DistortionProfileArtifactRef, DistortionScope,
-    EncoderDistortionProfileRef, EncoderSpec, ManifestIndexParams, MetricSpec, NullModelSpec,
-    ProfileArtifactRef, ProfileParameterization, ResourceLimits, RowIdentity, VerifyOptions,
-    CALIBRATION_SCHEMA_VERSION, ENCODER_DISTORTION_SCHEMA_VERSION,
+    load_manifest_file_with_options, sha256_file, verify_document_for_load, verify_for_load,
+    verify_index_manifest, verify_manifest_with_base, AuxiliaryArtifact, AuxiliaryArtifactState,
+    CalibrationOrdinalization, CalibrationProfileRef, CreateManifestOptions, CreateRowIdentity,
+    DistortionBounds, DistortionEvidence, DistortionEvidenceKind, DistortionProfileArtifactRef,
+    DistortionScope, EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind,
+    ManifestIndexParams, MetricSpec, NullModelSpec, ProfileArtifactRef, ProfileParameterization,
+    ResourceLimits, RowIdentity, VerifiedLoadPlanError, VerifyOptions, CALIBRATION_SCHEMA_VERSION,
+    ENCODER_DISTORTION_SCHEMA_VERSION,
 };
 use serde_json::json;
 use std::fs;
@@ -1776,6 +1777,258 @@ fn symlink_escape_reports_observed_canonical_path() {
         PathBuf::from(report.artifact.canonical_path.unwrap()),
         fs::canonicalize(index).unwrap()
     );
+}
+
+#[test]
+fn verify_for_load_returns_resolved_plan_and_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let sidecar = temp.path().join("neighbors.json");
+    fs::write(&sidecar, br#"{"kind":"neighbors"}"#).unwrap();
+    let sidecar_hash = sha256_file(&sidecar).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.auxiliary_artifacts.push(AuxiliaryArtifact {
+        name: "neighbors".to_string(),
+        path: "neighbors.json".to_string(),
+        sha256: sidecar_hash.sha256.clone(),
+        file_size_bytes: sidecar_hash.size_bytes,
+        required: true,
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap();
+
+    assert_eq!(plan.manifest_path(), Some(manifest_path.as_path()));
+    assert_eq!(
+        plan.artifact_path(),
+        fs::canonicalize(&index).unwrap().as_path()
+    );
+    assert_eq!(plan.metadata().kind, ManifestIndexKind::RankQuant);
+    assert_eq!(plan.row_identity().kind(), "row_id_identity");
+    assert_eq!(plan.row_identity().row_count(), 2);
+    assert!(plan.report().ok, "{:?}", plan.report().errors);
+
+    let sidecar_plan = &plan.auxiliary_artifacts()[0];
+    let canonical_sidecar = fs::canonicalize(&sidecar).unwrap();
+    assert_eq!(sidecar_plan.name(), "neighbors");
+    assert_eq!(sidecar_plan.state(), AuxiliaryArtifactState::Verified);
+    assert_eq!(sidecar_plan.path(), Some(canonical_sidecar.as_path()));
+    assert_eq!(sidecar_plan.sha256(), Some(sidecar_hash.sha256.as_str()));
+
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let document_plan = verify_document_for_load(&document, VerifyOptions::default()).unwrap();
+    assert_eq!(document_plan.artifact_path(), plan.artifact_path());
+}
+
+#[test]
+fn verify_for_load_uses_explicit_index_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.artifact.path = "missing.tvrq".to_string();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = verify_for_load(
+        &manifest_path,
+        VerifyOptions {
+            index_override: Some(PathBuf::from("index.tvrq")),
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.artifact_path(),
+        fs::canonicalize(&index).unwrap().as_path()
+    );
+    assert_eq!(
+        plan.report().artifact.observed_path.as_deref(),
+        Some("index.tvrq")
+    );
+}
+
+#[test]
+fn verify_for_load_returns_row_map_path_and_optional_absent_auxiliary() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(
+        &rows,
+        &[
+            ("00000000-0000-0000-0000-000000000001", None),
+            ("00000000-0000-0000-0000-000000000002", None),
+        ],
+    );
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::Jsonl(rows.clone()),
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.auxiliary_artifacts.push(AuxiliaryArtifact {
+        name: "optional-neighbors".to_string(),
+        path: "missing-neighbors.json".to_string(),
+        sha256: "0".repeat(64),
+        file_size_bytes: 0,
+        required: false,
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap();
+
+    assert_eq!(
+        plan.row_identity().path(),
+        Some(fs::canonicalize(&rows).unwrap().as_path())
+    );
+    assert_eq!(plan.row_identity().validated_rows(), Some(2));
+
+    let sidecar_plan = &plan.auxiliary_artifacts()[0];
+    assert_eq!(sidecar_plan.name(), "optional-neighbors");
+    assert_eq!(sidecar_plan.state(), AuxiliaryArtifactState::OptionalAbsent);
+    assert_eq!(
+        sidecar_plan.reason_code(),
+        Some("auxiliary_artifact_optional_absent")
+    );
+    assert_eq!(sidecar_plan.path(), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_for_load_preserves_non_utf8_base_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let case = root
+        .path()
+        .join(OsString::from_vec(b"manifest-\xff".to_vec()));
+    fs::create_dir(&case).unwrap();
+    let index = write_index(&case);
+    let manifest_path = case.join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap();
+
+    assert_eq!(
+        plan.artifact_path(),
+        fs::canonicalize(index).unwrap().as_path()
+    );
+}
+
+#[test]
+fn verify_for_load_fails_closed_with_report_for_default_path_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().join("manifests");
+    fs::create_dir(&base).unwrap();
+    let index = write_index(root.path());
+    let manifest_path = base.join("manifest.json");
+    let mut manifest = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            allow_path_escape: true,
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap();
+    manifest.artifact.path = "../index.tvrq".to_string();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap_err();
+    let VerifiedLoadPlanError::VerificationFailed(report) = err else {
+        panic!("expected verification failure");
+    };
+    assert!(error_codes(&report).contains(&"artifact_path_escape_rejected"));
+
+    let plan = verify_for_load(
+        &manifest_path,
+        VerifyOptions {
+            allow_path_escape: true,
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plan.artifact_path(),
+        fs::canonicalize(index).unwrap().as_path()
+    );
+}
+
+#[test]
+fn verify_for_load_fails_closed_with_report_for_corrupted_artifact() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&index)
+        .unwrap()
+        .write_all(b"\0")
+        .unwrap();
+
+    let err = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap_err();
+    let VerifiedLoadPlanError::VerificationFailed(report) = err else {
+        panic!("expected verification failure");
+    };
+    assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
+    assert!(error_codes(&report).contains(&"artifact_file_size_mismatch"));
 }
 
 #[test]

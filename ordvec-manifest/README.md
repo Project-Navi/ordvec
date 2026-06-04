@@ -27,6 +27,20 @@ verify with default settings. If an artifact or JSONL row map lives outside the
 manifest directory, pass `--allow-path-escape` at create time and again at
 verify time.
 
+Library callers that need a verify-then-load sequence can use
+`verify_for_load(manifest_path, VerifyOptions)` to obtain a `VerifiedLoadPlan`.
+The helper verifies the manifest with the supplied options, fails closed by
+returning `VerifiedLoadPlanError::VerificationFailed(report)` when report
+errors exist, and otherwise returns the canonical primary artifact path, probed
+metadata, row-identity summary, declared auxiliary artifact states, and the full
+report. Callers that already hold a `ManifestDocument` can use
+`verify_document_for_load(&document, VerifyOptions)` without re-reading the
+manifest file. These helpers do not call `Rank::load`, `RankQuant::load`,
+`Bitmap::load`, or `SignBitmap::load`, and they do not pin file descriptors or
+lock mutable storage. Callers should load from the returned paths immediately on
+storage they control, or re-verify if the backing files can change between
+verification and load.
+
 Verification uses bounded parser/report defaults on both CLI and library paths.
 Stable limit codes are part of the contract:
 
