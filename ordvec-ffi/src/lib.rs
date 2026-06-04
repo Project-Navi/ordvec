@@ -73,6 +73,8 @@ pub struct ordvec_search_params_t {
     pub query: *const f32,
     pub dim: u64,
     pub k: u64,
+    /// Optional subset row IDs. These are entry lists, not sets: duplicate
+    /// candidates are scored independently and can produce duplicate hits.
     pub candidate_rows: *const u32,
     pub candidate_count: u64,
     pub flags: u64,
@@ -870,6 +872,11 @@ pub unsafe extern "C" fn ordvec_index_free(index: *mut ordvec_index_t) {
 
 #[no_mangle]
 /// Run a synchronous single-query search.
+///
+/// When `params.candidate_rows` is supplied, those IDs are global row ordinals
+/// and may be unsorted or duplicated. Duplicate candidates are scored as
+/// separate entries and can produce duplicate hits; callers that need unique
+/// output rows must deduplicate before calling.
 ///
 /// # Safety
 ///

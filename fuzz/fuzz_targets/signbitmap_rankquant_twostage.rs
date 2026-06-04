@@ -11,7 +11,9 @@
 //! reranking agrees with a full RankQuant search.
 //!
 //! Contract: no panic, abort, or out-of-bounds access on any in-range candidate
-//! input, and full-corpus candidate reranking must match full RankQuant search.
+//! input, subset reranking must preserve score-descending/doc-ID-ascending
+//! ordering, and full-corpus candidate reranking must match full RankQuant
+//! search.
 #![no_main]
 
 use libfuzzer_sys::{
@@ -29,6 +31,18 @@ struct TwoStageInput {
     k: usize,
     duplicate_case: u8,
     payload: Vec<u8>,
+}
+
+fn assert_score_then_id_order(scores: &[f32], ids: &[i64]) {
+    for slot in 1..scores.len() {
+        let prev = (scores[slot - 1], ids[slot - 1]);
+        let cur = (scores[slot], ids[slot]);
+        assert!(
+            cur.0 < prev.0 || (cur.0 == prev.0 && cur.1 >= prev.1),
+            "subset rerank violates score-desc/doc-id-asc order at slots {} and {slot}",
+            slot - 1,
+        );
+    }
 }
 
 impl<'a> Arbitrary<'a> for TwoStageInput {
@@ -108,7 +122,7 @@ fuzz_target!(|input: TwoStageInput| {
     assert_eq!(scores.len(), k_eff);
     assert_eq!(ids.len(), k_eff);
     assert!(scores.iter().all(|score| score.is_finite()));
-    assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]));
+    assert_score_then_id_order(&scores, &ids);
     for &id in &ids {
         assert!(id >= 0);
         assert!(subset_candidates.contains(&(id as u32)));

@@ -52,6 +52,10 @@ typedef struct {
   const float *query;
   uint64_t dim;
   uint64_t k;
+  /**
+   * Optional subset row IDs. These are entry lists, not sets: duplicate
+   * candidates are scored independently and can produce duplicate hits.
+   */
   const uint32_t *candidate_rows;
   uint64_t candidate_count;
   uint64_t flags;
@@ -223,6 +227,11 @@ void ordvec_index_free(ordvec_index_t *index);
 
 /**
  * Run a synchronous single-query search.
+ *
+ * When `params.candidate_rows` is supplied, those IDs are global row ordinals
+ * and may be unsorted or duplicated. Duplicate candidates are scored as
+ * separate entries and can produce duplicate hits; callers that need unique
+ * output rows must deduplicate before calling.
  *
  * # Safety
  *

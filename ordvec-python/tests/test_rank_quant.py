@@ -310,8 +310,9 @@ def test_search_asymmetric_subset_returns_global_ids():
     assert ids.dtype == np.int64
     # Self-query against a candidate set containing self → top-1 is self.
     assert int(ids[0]) == 0
-    # All returned ids are from the candidate set (or sentinel -1).
-    candidate_set = set(candidates.tolist()) | {-1}
+    # All returned ids are from the candidate set; k is capped instead of
+    # sentinel-padding unfilled slots.
+    candidate_set = set(candidates.tolist())
     for i in ids:
         assert int(i) in candidate_set
 
@@ -344,6 +345,20 @@ def test_search_asymmetric_subset_ties_use_global_row_ids():
     )
 
     np.testing.assert_array_equal(ids, np.array([1, 3], dtype=np.int64))
+    np.testing.assert_array_equal(scores, np.array([0.0, 0.0], dtype=np.float32))
+
+
+def test_search_asymmetric_subset_duplicates_remain_duplicate_entries():
+    vectors = np.ones((12, 64), dtype=np.float32)
+    idx = RankQuant(dim=64, bits=2)
+    idx.add(vectors)
+
+    candidates = np.array([7, 8, 7], dtype=np.uint32)
+    scores, ids = idx.search_asymmetric_subset(
+        np.zeros(64, dtype=np.float32), candidates, k=2
+    )
+
+    np.testing.assert_array_equal(ids, np.array([7, 7], dtype=np.int64))
     np.testing.assert_array_equal(scores, np.array([0.0, 0.0], dtype=np.float32))
 
 

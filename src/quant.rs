@@ -539,6 +539,9 @@ impl RankQuant {
     /// to global IDs before returning). Results are ordered by score
     /// descending, then global row ID ascending, matching the full-index
     /// search tie policy even when `candidates` is unsorted.
+    /// Duplicate candidate IDs are scored as separate entries and can
+    /// produce duplicate hits; callers that require unique row IDs should
+    /// deduplicate before calling.
     ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just

@@ -731,9 +731,14 @@ impl RankQuant {
     /// Asymmetric scoring restricted to a candidate subset (e.g. the top-M
     /// shortlist from a [`Bitmap`] or [`SignBitmap`] probe). Returns
     /// ``(scores, global_ids)`` where ``global_ids`` are the original doc
-    /// indices (mapped from the local candidate slot); slots that could not be
-    /// filled are returned as ``-1``. Uses the same AVX-512 → AVX2 → scalar
-    /// dispatch as ``search_asymmetric``.
+    /// indices (mapped from the local candidate slot). ``k`` is capped to the
+    /// candidate-list length; the subset path does not add sentinel padding.
+    /// Uses the same AVX-512 → AVX2 → scalar dispatch as ``search_asymmetric``.
+    ///
+    /// ``candidates`` may be unsorted and may contain duplicates. Duplicate
+    /// candidate IDs are scored as separate entries and can produce duplicate
+    /// hits; callers that require unique row IDs should deduplicate before
+    /// calling.
     ///
     /// If the shortlist came from [`Bitmap`], this is the exact RankQuant
     /// rerank stage over that survivor set; it does not itself apply or

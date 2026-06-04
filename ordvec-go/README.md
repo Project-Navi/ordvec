@@ -19,3 +19,7 @@ Search with `nil` options or `nil` `SearchOptions.Candidates` performs a full
 search. An empty, non-nil `Candidates` slice is treated as an explicit empty
 subset and returns a typed `StatusBadArgument`, matching the C ABI v1
 pointer/count contract.
+
+`SearchOptions.Candidates` is an entry list of global row ordinals, not a set.
+Duplicate candidates are scored independently and can produce duplicate hits;
+deduplicate before searching when unique row IDs are required.

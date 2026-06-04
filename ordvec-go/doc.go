@@ -6,4 +6,8 @@
 // Search pins and passes caller-owned query and candidate slices to the C ABI
 // without copying them. Callers must not mutate those slices until Search
 // returns.
+//
+// Candidate slices are entry lists, not sets. Duplicate candidate IDs are scored
+// independently and can produce duplicate hits; callers that require unique row
+// IDs should deduplicate before Search.
 package ordvec
