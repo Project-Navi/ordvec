@@ -82,8 +82,8 @@
 #         workflow_dispatch setting (branch = `main` only) would now deadlock
 #         publishing — this workflow runs on `refs/tags/...`, never on
 #         `refs/heads/main`. The "tag must come from main" guarantee is preserved
-#         by `require-ci-green` (which queries `?branch=main&status=success` for
-#         the SHA), plus branch protection on `main`. See RELEASING.md.
+#         by `require-ci-green` (which queries successful push runs on `main`
+#         for the SHA), plus branch protection on `main`. See RELEASING.md.
 #
 # Tag glob is deliberately loose (`v[0-9]*...`); the `guard` job enforces strict
 # SemVer (no leading zeros, no pre-release/build suffix). The tag name is only
@@ -166,16 +166,16 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Require a SUCCESSFUL run for this SHA *on main* for each workflow.
+          # Require a SUCCESSFUL push run for this SHA *on main* for each workflow.
           # Filtering on branch as well as head_sha stops a green run for the same
           # commit on an unrelated branch from satisfying the gate.
           for wf in ci.yml python.yml fuzz.yml codeql.yml actionlint.yml zizmor.yml; do
             ok="$(gh api \
-              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&status=success&per_page=20" \
-              --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"
-            echo "successful ${wf} runs for ${SHA} on main: ${ok}"
+              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&event=push&status=success&per_page=20" \
+              --jq '[.workflow_runs[] | select(.head_branch == "main" and .event == "push" and .conclusion == "success")] | length')"
+            echo "successful push ${wf} runs for ${SHA} on main: ${ok}"
             if [ "${ok}" -lt 1 ]; then
-              echo "::error::no successful ${wf} run for ${SHA} on main. Push to main, let CI pass, then re-tag."
+              echo "::error::no successful push ${wf} run for ${SHA} on main. Push to main, let CI pass, then re-tag."
               exit 1
             fi
           done

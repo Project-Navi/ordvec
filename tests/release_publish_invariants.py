@@ -464,6 +464,7 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
     steps = sequence(require_job.get("steps"), f"{path}: jobs.require-ci-green.steps")
     gated_workflows = ("ci.yml", "python.yml", "fuzz.yml", "codeql.yml", "actionlint.yml", "zizmor.yml")
     found_loop: tuple[str, ...] | None = None
+    found_gate_run: str | None = None
     for index, raw_step in enumerate(steps):
         step = mapping(raw_step, f"{path}: jobs.require-ci-green.steps[{index}]")
         run = step.get("run")
@@ -472,6 +473,7 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         match = re.search(r"(?m)^\s*for\s+wf\s+in\s+(.+?);\s+do\s*$", run)
         if match:
             found_loop = tuple(shlex.split(match.group(1)))
+            found_gate_run = run
             break
     if found_loop is None:
         fail(f"{path}: require-ci-green must loop over the release-gated workflow filenames")
@@ -479,6 +481,8 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         fail(
             f"{path}: require-ci-green gates {found_loop!r}; expected {gated_workflows!r}"
         )
+    if found_gate_run is None or "event=push" not in found_gate_run or '.event == "push"' not in found_gate_run:
+        fail(f"{path}: require-ci-green must require successful push workflow runs")
 
     allowed_id_token_jobs = {
         "attest",
