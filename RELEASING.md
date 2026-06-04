@@ -126,9 +126,10 @@ filename. Until either is updated, the corresponding gated publish fails
      useful for this release;
    - distinguish `ordvec` primitive API/file compatibility from downstream
      application database behavior.
-3. Bump the version (crate `Cargo.toml`, and `ordvec-python` if the wheel
-   changed) and update `CHANGELOG.md` with migration notes for every
-   intentional compatibility break. Commit on `main`.
+3. Bump the version (crate `Cargo.toml`, `ordvec-manifest/Cargo.toml`, and
+   `ordvec-python` if the wheel changed) and update `CHANGELOG.md` with
+   migration notes for every intentional compatibility break. Commit on
+   `main`.
 4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`, and

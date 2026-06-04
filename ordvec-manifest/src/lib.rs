@@ -1,3 +1,19 @@
+//! Manifest verification for ordvec index artifacts.
+//!
+//! This crate verifies JSON manifests that bind an ordvec index file to
+//! SHA-256 digests, probed loader metadata, row identity, caller-owned
+//! auxiliary artifacts, optional encoder-distortion profiles, optional
+//! calibration profiles, and attestation-shape metadata. It is intentionally a
+//! verifier, not a trust oracle: it does not sign artifacts, manage keys, call
+//! networks, mutate index files, estimate model geometry, or decide deployment
+//! policy.
+//!
+//! Library callers can use [`load_manifest_file_with_options`] and
+//! [`verify_document_for_load`], or use [`verify_for_load`] when they need a
+//! verified snapshot of the canonical artifact path and related load metadata.
+//! The `ordvec-manifest` binary exposes the same bounded verification surfaces
+//! for command-line use.
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use ordvec::{
     probe_index_metadata, IndexKind as CoreIndexKind, IndexMetadata as CoreIndexMetadata,

@@ -5,10 +5,10 @@ changes. The project nevertheless treats downstream embedders as real users:
 patch releases should be safe for stable surfaces, and any intentional break
 must be visible in release notes before users discover it at build or load time.
 
-This policy covers the published Rust crate, the PyPI bindings, repo-local
-sidecars (C ABI, Go, and Manifest), the primitive persisted index formats, and
-project examples and documentation. It does not promise a database or
-application-store lifecycle outside `ordvec` itself.
+This policy covers the published Rust crates, the PyPI bindings, repo-local
+sidecars (C ABI and Go), the primitive persisted index formats, and project
+examples and documentation. It does not promise a database or application-store
+lifecycle outside `ordvec` itself.
 
 ## Versioning Rules
 
@@ -93,11 +93,11 @@ Python, NumPy, or wheel-platform floor changes are minor-release changes unless
 a supported upstream version has reached end-of-life or a security issue makes
 the old floor unsafe. Such changes require release-note migration text.
 
-### Repo-Local Sidecars (C ABI, Go, and Manifest)
+### Sidecars (C ABI, Go, and Manifest)
 
-`ordvec-ffi`, `ordvec-go`, and `ordvec-manifest` are repo-local sidecars, not
-part of the published core `.crate`. They are still consumed by embedders from
-the GitHub checkout, so their compatibility must be reviewed before releases.
+`ordvec-manifest` is a lockstep crate for manifest verification. `ordvec-ffi`
+and `ordvec-go` remain repo-local sidecars consumed by embedders from the
+GitHub checkout. All three surfaces must be reviewed before releases.
 
 The C ABI is versioned by `ORDVEC_ABI_VERSION`. ABI v1 currently supports
 loading persisted `RankQuant` and `Bitmap` files, metadata inspection, and
@@ -110,10 +110,11 @@ a new ABI version or clear migration notes.
 The Go wrapper follows the C ABI. Source-breaking Go API changes require the
 same compatibility classification in release notes.
 
-The `ordvec-manifest` CLI and its v1 JSON schema are also treated as stable
-repo-local surfaces. Patch releases should not introduce breaking changes to
-the CLI arguments, emitted error codes, or JSON schema structure. Minor
-releases may introduce schema or CLI updates with documented migration steps.
+The `ordvec-manifest` CLI, library API, and v1 JSON schema are treated as
+stable release surfaces. Patch releases should not introduce breaking changes
+to the CLI arguments, emitted error codes, library report shapes, or JSON
+schema structure. Minor releases may introduce schema, CLI, or library updates
+with documented migration steps.
 
 ### Primitive Persisted Formats
 

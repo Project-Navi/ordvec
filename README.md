@@ -173,10 +173,10 @@ candidate slices passed to `Search` until the call returns.
   [`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md),
   [`docs/determinism.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/determinism.md),
   [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)
-- **Repo-local manifest verifier, C ABI, and Go wrapper:**
-  available from the full GitHub checkout. These sidecars are not part of the
-  published core `.crate`; use the GitHub checkout for `ordvec-manifest/`,
-  `ordvec-ffi/`, `ordvec-go/`, and
+- **Manifest verifier, C ABI, and Go wrapper:**
+  `ordvec-manifest` is versioned in lockstep with the core crate and is
+  package-gated separately; use the GitHub checkout for `ordvec-ffi/`,
+  `ordvec-go/`, and
   [`docs/c-api.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/c-api.md).
 - **Pre-1.0 compatibility policy:**
   [`docs/compatibility-policy.md`](docs/compatibility-policy.md) defines the
@@ -186,7 +186,7 @@ candidate slices passed to `Search` until the call returns.
   including its [`proof-spine`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/proof-spine.md),
   [`theorem-map`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/theorem-map.md),
   and [`reviewer brief`](https://github.com/Fieldnote-Echo/ordvec-formalization/blob/main/docs/reviewer-brief.md).
-- **API docs:** <https://docs.rs/ordvec>
+- **API docs:** <https://docs.rs/ordvec>, <https://docs.rs/ordvec-manifest>
 - **Paper (OrdVec / RankQuant):** _link TBD — see
   [Research collaboration](#research-collaboration)._
 
@@ -285,12 +285,11 @@ checksum, MAC, or signature — by design.** The loaders validate *structure*
 (magic, version, bounds, exact-length payload) but not *origin*: a
 structurally valid file can still be untrusted. If an index file crosses a
 trust boundary (network transfer, shared storage), verify it before loading.
-The full GitHub checkout includes a publish=false sidecar CLI,
-`ordvec-manifest`, that binds an index file to a JSON manifest by SHA-256,
-header metadata, row identity, named auxiliary sidecars, and attestation shape
-checks. It does not sign artifacts, manage keys, or decide deployment trust
-policy. No in-format crypto is shipped because it would add key management the
-library can't own. See
+`ordvec-manifest` binds an index file to a JSON manifest by SHA-256, header
+metadata, row identity, named auxiliary sidecars, and attestation shape checks.
+It does not sign artifacts, manage keys, or decide deployment trust policy. No
+in-format crypto is shipped because it would add key management the library
+can't own. See
 [`docs/PERSISTED_FORMAT.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/PERSISTED_FORMAT.md),
 [`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md),
 and [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)

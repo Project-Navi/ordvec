@@ -79,10 +79,10 @@ opt-level = 3
 
 # Workspace: the `ordvec-python` member holds the PyO3/maturin bindings shipped to
 # PyPI as `ordvec`; `ordvec-ffi` holds the C ABI; and `ordvec-manifest` is a
-# repo-local, publish=false sidecar verifier. `default-members = ["."]` keeps
-# bare `cargo build/test/clippy` scoped to the core crate, so the existing CI
-# gates are unaffected; non-core members get explicit CI lanes. The single
-# workspace `Cargo.lock` carries their transitive dependencies.
+# lockstep manifest verifier crate. `default-members = ["."]` keeps bare
+# `cargo build/test/clippy` scoped to the core crate, so the existing CI gates
+# are unaffected; non-core members get explicit CI lanes. The single workspace
+# `Cargo.lock` carries their transitive dependencies.
 [workspace]
 resolver = "2"
 members = ["ordvec-python", "ordvec-ffi", "ordvec-manifest"]

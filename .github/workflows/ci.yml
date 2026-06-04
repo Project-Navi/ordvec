@@ -95,9 +95,9 @@ jobs:
         run: cargo clippy -p ordvec-ffi --all-targets -- -D warnings
 
   # ----------------------------------------------------------------------
-  # Repo-local manifest verifier. Kept out of default-members so the core
-  # crate's default no-system-deps contract stays unchanged; this explicit lane
-  # covers its no-default-features surface, optional SQLite support, and clippy.
+  # Manifest verifier crate. Kept out of default-members so the core crate's
+  # default no-system-deps contract stays unchanged; this explicit lane covers
+  # its no-default-features surface, optional SQLite support, and clippy.
   # ----------------------------------------------------------------------
   manifest:
     name: manifest verifier
@@ -219,7 +219,7 @@ jobs:
   # ----------------------------------------------------------------------
   # No-system-deps guarantee + packaging check. Fails if any forbidden
   # numerical/BLAS crate has crept into the dependency tree, then dry-runs
-  # the publish to catch packaging problems before a real release.
+  # the publishable crates to catch packaging problems before a real release.
   # ----------------------------------------------------------------------
   deps:
     name: deps (no-system-deps + publish dry-run)
@@ -255,9 +255,11 @@ jobs:
           echo "OK: no forbidden dependencies"
       - name: cargo publish --dry-run
         # Explicit -p ordvec: in a workspace, publish should never infer the package
-        # from the current directory. Only the core crate goes to crates.io
-        # (ordvec-python is publish = false and ships to PyPI via maturin).
+        # from the current directory. The Python binding remains publish = false
+        # and ships to PyPI via maturin.
         run: cargo publish -p ordvec --dry-run --locked
+      - name: cargo publish --dry-run -p ordvec-manifest
+        run: cargo publish -p ordvec-manifest --dry-run --locked
 
   # ----------------------------------------------------------------------
   # Pin the release-publish invariants. release.yml is tag-triggered (with the

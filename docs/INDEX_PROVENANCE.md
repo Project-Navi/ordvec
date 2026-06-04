@@ -43,7 +43,7 @@ The loaders validate **structure, not origin or truth**:
 
 If you load index files that were produced elsewhere, transferred over a
 network, or stored on shared/mutable infrastructure, verify them **before**
-loading. The repo-local `ordvec-manifest` crate provides a sidecar verifier for
+loading. The lockstep `ordvec-manifest` crate provides a sidecar verifier for
 that pre-load step:
 
 ```sh

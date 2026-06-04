@@ -2,7 +2,7 @@
 
 > **Status:** v0.3.0 (pre-1.0), 2026-05-29. This is the maintained threat model
 > for the `ordvec` Rust crate, C ABI, Go wrapper, PyO3/maturin Python bindings,
-> and the repo-local `ordvec-manifest` sidecar verifier. It is reviewed when the
+> and the `ordvec-manifest` sidecar verifier. It is reviewed when the
 > attack surface changes (new persistence formats, new `unsafe` kernels, new
 > FFI surface, or release-pipeline changes).
 >
@@ -67,7 +67,7 @@ absence of a second maintainer is itself a tracked supply-chain residual
 | Layer | Components | Trust boundary |
 |---|---|---|
 | **Deserialization** | `rank_io.rs` — `.tvr` / `.tvrq` / `.tvbm` / `.tvsb` loaders | Untrusted filesystem / network byte stream |
-| **Manifest verification** | `ordvec-manifest` — publish=false JSON sidecar verifier | Manifest + index + optional row-map files before load |
+| **Manifest verification** | `ordvec-manifest` — JSON sidecar verifier | Manifest + index + optional row-map files before load |
 | **Compute kernels** | `fastscan.rs`, `quant_kernels.rs`, `bitmap.rs`, `sign_bitmap.rs` | Trust established after format validation |
 | **Index API** | `rank.rs`, `quant.rs`, `bitmap.rs`, `sign_bitmap.rs` | Caller-controlled query embeddings |
 | **C ABI** | `ordvec-ffi` (`include/ordvec.h`) | C caller ↔ Rust boundary; raw pointers and opaque handles |
@@ -146,7 +146,7 @@ problem, not a parser problem. *Mitigation (no format change):*
 validates structure, not origin, and lists verification options (checksum
 manifest, artifact-store integrity, Sigstore / GitHub artifact attestation)
 for deployments where index files cross trust boundaries. The repo now includes
-`ordvec-manifest`, a publish=false sidecar verifier that binds an index file to
+`ordvec-manifest`, a sidecar verifier that binds an index file to
 JSON manifest metadata by SHA-256, allocation-resistant header probing, strict
 row identity checks, and attestation shape checks. It deliberately does **not**
 sign, manage keys, call networks, mutate index files, change the C ABI, or

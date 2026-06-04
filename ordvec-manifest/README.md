@@ -1,6 +1,7 @@
 # ordvec-manifest
 
-Repo-local, publish=false sidecar verifier for ordvec index manifests.
+Manifest verifier for ordvec index provenance and caller-owned sidecar
+artifacts.
 
 It verifies index bytes, probed header metadata, row identity, named auxiliary
 artifacts, optional encoder distortion profile references, optional
@@ -9,15 +10,23 @@ ordvec index. It does not sign artifacts, manage keys, call networks, mutate
 index files, decide deployment trust policy, estimate encoder geometry, compute
 calibration statistics, or change the C ABI.
 
+`ordvec-manifest` is versioned in lockstep with the core `ordvec` crate. Before
+the first crates.io release that includes this package, use it from the GitHub
+workspace checkout; after that release, install it with `cargo install
+ordvec-manifest`.
+
 ```sh
-cargo run -p ordvec-manifest -- create \
+ordvec-manifest create \
   --index path/to/index.tvrq \
   --row-id-is-identity \
   --embedding-model bge-small-en-v1.5 \
   --out path/to/index.manifest.json
 
-cargo run -p ordvec-manifest -- verify --manifest path/to/index.manifest.json
+ordvec-manifest verify --manifest path/to/index.manifest.json
 ```
+
+From a pre-release workspace checkout, prefix the same commands with
+`cargo run -p ordvec-manifest --`.
 
 The schema version is `ordvec.index_manifest.v1`. Relative paths resolve from
 the manifest file's directory, absolute paths are rejected by default, and
