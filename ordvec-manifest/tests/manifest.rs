@@ -2856,6 +2856,152 @@ fn sqlite_cache_key_includes_calibration_profile_bytes() {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_cache_key_is_scoped_to_manifest_location() {
+    use rusqlite::Connection;
+
+    let root = tempfile::tempdir().unwrap();
+    let case_a = root.path().join("case-a");
+    let case_b = root.path().join("case-b");
+    fs::create_dir(&case_a).unwrap();
+    fs::create_dir(&case_b).unwrap();
+
+    let index_a = write_index(&case_a);
+    let manifest_a = case_a.join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index_a,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_a,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_a,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let index_b = case_b.join("index.tvrq");
+    let manifest_b = case_b.join("manifest.json");
+    fs::copy(&index_a, &index_b).unwrap();
+    fs::copy(&manifest_a, &manifest_b).unwrap();
+
+    let document_a = load_manifest_file(&manifest_a).unwrap();
+    let document_b = load_manifest_file(&manifest_b).unwrap();
+    let db = root.path().join("registry.sqlite");
+
+    let report_a = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document_a,
+        &manifest_a,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report_a.ok, "{:?}", report_a.errors);
+    assert_eq!(
+        report_a.artifact.canonical_path.as_deref(),
+        Some(fs::canonicalize(&index_a).unwrap().to_str().unwrap())
+    );
+
+    let report_b = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document_b,
+        &manifest_b,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report_b.ok, "{:?}", report_b.errors);
+    assert_eq!(
+        report_b.artifact.canonical_path.as_deref(),
+        Some(fs::canonicalize(&index_b).unwrap().to_str().unwrap())
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "copied manifests at distinct locations must not reuse canonical-path reports"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_cache_key_includes_jsonl_row_identity_bytes() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(
+        &rows,
+        &[
+            ("00000000-0000-0000-0000-000000000001", None),
+            ("00000000-0000-0000-0000-000000000002", None),
+        ],
+    );
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::Jsonl(rows.clone()),
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("registry.sqlite");
+
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    write_row_map(
+        &rows,
+        &[
+            ("00000000-0000-0000-0000-000000000011", None),
+            ("00000000-0000-0000-0000-000000000012", None),
+        ],
+    );
+    let cached = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(
+        !cached.ok,
+        "row identity drift must force fresh verification"
+    );
+    assert!(error_codes(&cached).contains(&"row_identity_sha256_mismatch"));
+
+    let conn = Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 2, "row-map drift must store a fresh report");
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_cache_key_includes_auxiliary_artifact_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_index(temp.path());

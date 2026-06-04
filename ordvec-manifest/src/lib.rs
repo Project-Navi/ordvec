@@ -192,6 +192,15 @@ pub fn verify_index_manifest(
     Ok(verify_manifest(&document, options))
 }
 
+/// Verify a manifest file and return a point-in-time load plan.
+///
+/// This helper fails closed when verification reports any errors. On success it
+/// returns canonical artifact and sidecar paths plus the verification report so
+/// callers can load without parsing report text.
+///
+/// This is not TOCTOU protection: it does not open, pin, lock, or make the
+/// backing files immutable. Load from the returned paths immediately on storage
+/// you control, or re-verify if files may change between verification and load.
 pub fn verify_for_load(
     manifest_path: impl AsRef<Path>,
     options: VerifyOptions,
@@ -200,6 +209,11 @@ pub fn verify_for_load(
     verify_document_for_load(&document, options)
 }
 
+/// Verify an already-loaded manifest document and return a point-in-time load plan.
+///
+/// This has the same fail-closed and TOCTOU boundary as [`verify_for_load`], but
+/// uses the document's existing `base_dir` and `source_path` instead of reading
+/// the manifest JSON again.
 pub fn verify_document_for_load(
     document: &ManifestDocument,
     options: VerifyOptions,
@@ -2733,6 +2747,13 @@ impl ManifestIndexParams {
     }
 }
 
+/// Verified paths and metadata for a caller-managed load.
+///
+/// A `VerifiedLoadPlan` means the manifest, primary artifact, row-identity
+/// file, and declared auxiliary artifacts verified at the time verification
+/// ran. It is not a durable capability over mutable storage: the plan does not
+/// pin file descriptors, hold locks, or guarantee that bytes at the returned
+/// paths remain unchanged after verification.
 #[derive(Clone, Debug)]
 pub struct VerifiedLoadPlan {
     manifest_path: Option<PathBuf>,
