@@ -227,10 +227,14 @@ func TestConcurrentSearchInfoAndClose(t *testing.T) {
 	const iterations = 64
 
 	start := make(chan struct{})
+	searchReady := make(chan struct{})
+	infoReady := make(chan struct{})
 	errCh := make(chan error, workers*iterations)
+	var searchReadyOnce sync.Once
+	var infoReadyOnce sync.Once
 	var wg sync.WaitGroup
 
-	run := func(name string, fn func() error) {
+	run := func(name string, fn func() error, markReady func()) {
 		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
@@ -240,6 +244,9 @@ func TestConcurrentSearchInfoAndClose(t *testing.T) {
 		<-start
 		for i := 0; i < iterations; i++ {
 			err := fn()
+			if err == nil {
+				markReady()
+			}
 			if err != nil && !errors.Is(err, ErrClosed) {
 				errCh <- fmt.Errorf("%s returned unexpected error: %w", name, err)
 			}
@@ -249,18 +256,28 @@ func TestConcurrentSearchInfoAndClose(t *testing.T) {
 	query := query16()
 	for i := 0; i < workers/2; i++ {
 		wg.Add(1)
-		go run("Search", func() error {
-			_, _, err := idx.Search(query, 2, nil)
-			return err
-		})
+		go run(
+			"Search",
+			func() error {
+				_, _, err := idx.Search(query, 2, nil)
+				return err
+			},
+			func() { searchReadyOnce.Do(func() { close(searchReady) }) },
+		)
 		wg.Add(1)
-		go run("Info", func() error {
-			_, err := idx.Info()
-			return err
-		})
+		go run(
+			"Info",
+			func() error {
+				_, err := idx.Info()
+				return err
+			},
+			func() { infoReadyOnce.Do(func() { close(infoReady) }) },
+		)
 	}
 
 	close(start)
+	<-searchReady
+	<-infoReady
 	if err := idx.Close(); err != nil {
 		t.Errorf("Close returned unexpected error: %v", err)
 	}
