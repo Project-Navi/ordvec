@@ -433,6 +433,89 @@ def check_hash_requirement_temp_paths(paths: list[str]) -> None:
             fail(f"{path}: hash requirement files must be written under ${{RUNNER_TEMP}}, not /tmp")
 
 
+def trigger_names(on_value: Any) -> set[str]:
+    if isinstance(on_value, str):
+        return {on_value}
+    if isinstance(on_value, list):
+        return {item for item in on_value if isinstance(item, str)}
+    if isinstance(on_value, dict):
+        return {key for key in on_value if isinstance(key, str)}
+    return set()
+
+
+def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
+    blocked_triggers = {"pull_request_target", "workflow_run"}
+    on_value = workflow.get("on", workflow.get(True))
+    blocked = trigger_names(on_value) & blocked_triggers
+    if blocked:
+        fail(
+            f"{path}: release workflow must not use trusted-publishing-blocked triggers: "
+            f"{', '.join(sorted(blocked))}"
+        )
+
+    top_permissions = workflow.get("permissions")
+    if isinstance(top_permissions, dict) and top_permissions.get("id-token") == "write":
+        fail(f"{path}: id-token: write must be scoped to explicit signing/publishing jobs, not workflow-wide")
+
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    require_job = mapping(jobs.get("require-ci-green"), f"{path}: jobs.require-ci-green")
+    steps = sequence(require_job.get("steps"), f"{path}: jobs.require-ci-green.steps")
+    gated_workflows = ("ci.yml", "python.yml", "fuzz.yml", "codeql.yml", "actionlint.yml", "zizmor.yml")
+    found_loop: tuple[str, ...] | None = None
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.require-ci-green.steps[{index}]")
+        run = step.get("run")
+        if not isinstance(run, str):
+            continue
+        match = re.search(r"(?m)^\s*for\s+wf\s+in\s+(.+?);\s+do\s*$", run)
+        if match:
+            found_loop = tuple(shlex.split(match.group(1)))
+            break
+    if found_loop is None:
+        fail(f"{path}: require-ci-green must loop over the release-gated workflow filenames")
+    if found_loop != gated_workflows:
+        fail(
+            f"{path}: require-ci-green gates {found_loop!r}; expected {gated_workflows!r}"
+        )
+
+    allowed_id_token_jobs = {
+        "attest",
+        "provenance",
+        "publish-crate",
+        "attest-manifest",
+        "manifest-provenance",
+        "publish-manifest-crate",
+        "publish-pypi",
+    }
+    for job_name, raw_job in jobs.items():
+        if not isinstance(job_name, str):
+            continue
+        job = mapping(raw_job, f"{path}: jobs.{job_name}")
+        permissions = job.get("permissions")
+        if not isinstance(permissions, dict):
+            continue
+        id_token = permissions.get("id-token")
+        if id_token == "write" and job_name not in allowed_id_token_jobs:
+            fail(
+                f"{path}: jobs.{job_name} grants id-token: write but is not an allowed "
+                "release signing/publishing job"
+            )
+
+    for job_name, environment in (
+        ("publish-crate", "crates-io"),
+        ("publish-manifest-crate", "crates-io"),
+        ("publish-pypi", "pypi"),
+    ):
+        job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+        raw_environment = job.get("environment")
+        if isinstance(raw_environment, dict):
+            actual = raw_environment.get("name")
+        else:
+            actual = raw_environment
+        if actual != environment:
+            fail(f"{path}: jobs.{job_name} must use environment {environment!r}; got {actual!r}")
+
+
 def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     job = mapping(jobs.get("smoke-linux-aarch64-wheel"), f"{path}: jobs.smoke-linux-aarch64-wheel")
@@ -747,6 +830,7 @@ def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
     check_release_version_sync()
     check_hash_requirement_temp_paths([WORKFLOW_PATH, PYTHON_WORKFLOW_PATH])
+    check_release_security_gates(workflow, WORKFLOW_PATH)
     check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
     check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
     check_publish_crates(workflow, WORKFLOW_PATH)

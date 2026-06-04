@@ -140,12 +140,13 @@ jobs:
     # The build jobs below rebuild + retest, but do NOT cover the core crate's
     # lint / no-default / experimental / MSRV 1.89 / deps + cargo-deny gates
     # (ci.yml), the binding's full OS/Python matrix (python.yml), the loader /
-    # FastScan fuzz smoke (fuzz.yml), or the CodeQL scan (codeql.yml). Require
+    # FastScan fuzz smoke (fuzz.yml), the CodeQL scan (codeql.yml), and the
+    # workflow syntax/security lint gates (actionlint.yml, zizmor.yml). Require
     # each to have concluded `success` for this exact SHA on main.
     #
     # Only per-push-to-main workflows are gated, so a run for the release SHA is
     # guaranteed to exist: audit.yml is schedule-only; coverage*/scorecard are
-    # advisory/external-flaky; zizmor/actionlint are pre-merge hygiene.
+    # advisory/external-flaky.
     name: require full CI green for this commit
     needs: guard
     if: needs.guard.outputs.ok == 'true'
@@ -158,7 +159,7 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
-      - name: assert ci.yml, python.yml, fuzz.yml and codeql.yml are green for this commit
+      - name: assert release-gated workflows are green for this commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -168,7 +169,7 @@ jobs:
           # Require a SUCCESSFUL run for this SHA *on main* for each workflow.
           # Filtering on branch as well as head_sha stops a green run for the same
           # commit on an unrelated branch from satisfying the gate.
-          for wf in ci.yml python.yml fuzz.yml codeql.yml; do
+          for wf in ci.yml python.yml fuzz.yml codeql.yml actionlint.yml zizmor.yml; do
             ok="$(gh api \
               "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&status=success&per_page=20" \
               --jq '[.workflow_runs[] | select(.head_branch == "main" and .conclusion == "success")] | length')"

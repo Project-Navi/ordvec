@@ -22,7 +22,8 @@ The unified `release.yml`:
   step rejects pre-release / leading-zero / non-SemVer tags so they wake the
   workflow but skip every job below the gate;
 - runs a **`require-ci-green`** gate confirming the per-commit CI is green on
-  `main` for the tagged SHA — `ci.yml`, `python.yml`, `fuzz.yml`, `codeql.yml`
+  `main` for the tagged SHA — `ci.yml`, `python.yml`, `fuzz.yml`, `codeql.yml`,
+  `actionlint.yml`, `zizmor.yml`
   (a *successful* run for that exact SHA on `main`);
 - publishes via **OIDC trusted publishing** (no long-lived crates.io / PyPI
   tokens in the repo) for both Rust crates and the Python distribution;
@@ -150,8 +151,8 @@ filename. Until a record is updated, the corresponding gated publish fails
    compatibility break. Commit on `main`.
 4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
-   `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`, and
-   `codeql.yml`.
+   `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`,
+   `codeql.yml`, `actionlint.yml`, and `zizmor.yml`.
    - **Do not merge another PR between the release commit and the tag push.**
      `ci.yml` / `python.yml` use `cancel-in-progress`, so merging again moves
      `main` HEAD and cancels the previous commit's in-flight CI. The
