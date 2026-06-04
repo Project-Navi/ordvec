@@ -167,10 +167,14 @@ the candidate entry count, including duplicates. `prepare_ns`, `score_ns`,
 
 ## Threading
 
-Concurrent searches and info calls on one loaded handle are allowed.
-`ordvec_index_free` must not race with any other call on the same handle.
-`ordvec_index_free(NULL)` is a no-op. Use after free and double free are
-undefined behavior.
+Concurrent `ordvec_index_search` and `ordvec_index_info` calls on one loaded
+handle are allowed. Search borrows caller-owned query and candidate buffers in
+place for the duration of the call; callers must not mutate those buffers until
+the call returns.
+
+Mutation is exclusive. `ordvec_index_free` must not race with any other call on
+the same handle. `ordvec_index_free(NULL)` is a no-op. Use after free and
+double free are undefined behavior.
 
 ## V1 Exclusions
 

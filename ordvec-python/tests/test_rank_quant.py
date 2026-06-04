@@ -9,6 +9,8 @@ bilinear identity, recall bounds) lives in the crate's Rust tests under
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 
@@ -111,6 +113,25 @@ def test_search_asymmetric_shape(bits):
     )
     assert scores.shape == (3, 10)
     assert indices.shape == (3, 10)
+
+
+def test_search_asymmetric_read_concurrent_results_match_baseline():
+    corpus = np.ascontiguousarray(unit_vectors(64, 128, seed=101))
+    queries = np.ascontiguousarray(unit_vectors(5, 128, seed=202))
+    idx = RankQuant(dim=128, bits=2)
+    idx.add(corpus)
+
+    baseline_scores, baseline_indices = idx.search_asymmetric(queries, k=8)
+
+    def run_search():
+        return idx.search_asymmetric(queries, k=8)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: run_search(), range(40)))
+
+    for scores, indices in results:
+        np.testing.assert_array_equal(indices, baseline_indices)
+        np.testing.assert_allclose(scores, baseline_scores, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("bits", [1, 2, 4])

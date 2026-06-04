@@ -148,6 +148,21 @@ Wheels target CPython 3.10+ (abi3); to build from source instead, see
 [`ordvec-python/`](https://github.com/Fieldnote-Echo/ordvec/tree/main/ordvec-python).
 The runtime dependency floor is `numpy>=2.2`.
 
+### Threading / concurrency
+
+`ordvec` supports concurrent read-only/search use. Mutation is exclusive.
+
+Python search, candidate-generation, and scoring methods release the GIL and
+read NumPy inputs in place. Callers must not mutate query, corpus, candidate,
+or scoring input arrays passed to those methods until the call returns.
+
+The C ABI allows concurrent search and info calls on one loaded handle.
+`ordvec_index_free` must not race with any other call on the same handle.
+
+The Go wrapper serializes `Close` against `Search` and `Info`; after `Close`,
+`Search` and `Info` return `ErrClosed`. Callers must not mutate query or
+candidate slices passed to `Search` until the call returns.
+
 ## Documentation
 
 - **Design deep-dive & reproducible benchmark tables:**
