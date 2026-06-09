@@ -35,10 +35,10 @@ class CanonicalPyPIDistTests(unittest.TestCase):
             write(built / "ordvec-0.3.0-cp310-abi3-win_amd64.whl", b"fresh wheel")
 
             old_fetch = canonical.fetch_pypi_payload
-            canonical.fetch_pypi_payload = lambda version: None
+            canonical.fetch_pypi_payload = lambda project, version: None
             try:
                 with redirect_stdout(io.StringIO()):
-                    canonical.canonicalize("0.3.0", built, out)
+                    canonical.canonicalize("ordvec", "0.3.0", built, out)
             finally:
                 canonical.fetch_pypi_payload = old_fetch
 
@@ -75,10 +75,10 @@ class CanonicalPyPIDistTests(unittest.TestCase):
             }
 
             old_fetch = canonical.fetch_pypi_payload
-            canonical.fetch_pypi_payload = lambda version: payload
+            canonical.fetch_pypi_payload = lambda project, version: payload
             try:
                 with redirect_stdout(io.StringIO()):
-                    canonical.canonicalize("0.3.0", built, out)
+                    canonical.canonicalize("ordvec", "0.3.0", built, out)
             finally:
                 canonical.fetch_pypi_payload = old_fetch
 
@@ -104,10 +104,10 @@ class CanonicalPyPIDistTests(unittest.TestCase):
             }
 
             old_fetch = canonical.fetch_pypi_payload
-            canonical.fetch_pypi_payload = lambda version: payload
+            canonical.fetch_pypi_payload = lambda project, version: payload
             try:
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                    canonical.canonicalize("0.3.0", built, out)
+                    canonical.canonicalize("ordvec", "0.3.0", built, out)
             finally:
                 canonical.fetch_pypi_payload = old_fetch
 
@@ -129,7 +129,7 @@ class CanonicalPyPIDistTests(unittest.TestCase):
 
             old_fetch = canonical.fetch_pypi_payload
             old_sleep = canonical.time.sleep
-            def fetch(version: str) -> dict[str, object] | None:
+            def fetch(project: str, version: str) -> dict[str, object] | None:
                 response = responses.pop(0)
                 if isinstance(response, Exception):
                     raise response
@@ -139,7 +139,7 @@ class CanonicalPyPIDistTests(unittest.TestCase):
             canonical.time.sleep = sleeps.append
             try:
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    canonical.verify("0.3.0", dist, attempts=2, sleep_seconds=0.25)
+                    canonical.verify("ordvec", "0.3.0", dist, attempts=2, sleep_seconds=0.25)
             finally:
                 canonical.fetch_pypi_payload = old_fetch
                 canonical.time.sleep = old_sleep
@@ -164,11 +164,11 @@ class CanonicalPyPIDistTests(unittest.TestCase):
 
             old_fetch = canonical.fetch_pypi_payload
             old_sleep = canonical.time.sleep
-            canonical.fetch_pypi_payload = lambda version: responses.pop(0)
+            canonical.fetch_pypi_payload = lambda project, version: responses.pop(0)
             canonical.time.sleep = sleeps.append
             try:
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    canonical.verify("0.3.0", dist, attempts=2, sleep_seconds=0.5)
+                    canonical.verify("ordvec", "0.3.0", dist, attempts=2, sleep_seconds=0.5)
             finally:
                 canonical.fetch_pypi_payload = old_fetch
                 canonical.time.sleep = old_sleep
@@ -184,12 +184,12 @@ class CanonicalPyPIDistTests(unittest.TestCase):
             write(built / "ordvec-0.3.0.tar.gz", b"fresh sdist")
 
             old_fetch = canonical.fetch_pypi_payload
-            canonical.fetch_pypi_payload = lambda version: (_ for _ in ()).throw(
+            canonical.fetch_pypi_payload = lambda project, version: (_ for _ in ()).throw(
                 canonical.PyPIReadError("temporary PyPI 503")
             )
             try:
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                    canonical.canonicalize("0.3.0", built, out)
+                    canonical.canonicalize("ordvec", "0.3.0", built, out)
             finally:
                 canonical.fetch_pypi_payload = old_fetch
 

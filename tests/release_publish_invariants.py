@@ -369,6 +369,15 @@ def check_release_version_sync() -> None:
         "ordvec-python/python/ordvec/__init__.py __version__": python_init_version(
             "ordvec-python/python/ordvec/__init__.py"
         ),
+        "ordvec-manifest-python/Cargo.toml package.version": package_version(
+            "ordvec-manifest-python/Cargo.toml"
+        ),
+        "ordvec-manifest-python/pyproject.toml project.version": project_version(
+            "ordvec-manifest-python/pyproject.toml"
+        ),
+        "ordvec-manifest-python/python/ordvec_manifest/__init__.py __version__": python_init_version(
+            "ordvec-manifest-python/python/ordvec_manifest/__init__.py"
+        ),
         "ordvec-manifest/Cargo.toml package.version": package_version("ordvec-manifest/Cargo.toml"),
         "ordvec-ffi/Cargo.toml package.version": package_version("ordvec-ffi/Cargo.toml"),
     }
@@ -415,6 +424,7 @@ def check_release_compatibility_sync() -> None:
     for path in (
         "ordvec-manifest/Cargo.toml",
         "ordvec-python/Cargo.toml",
+        "ordvec-manifest-python/Cargo.toml",
         "ordvec-ffi/Cargo.toml",
     ):
         rust_version = package_rust_version(path)
@@ -450,6 +460,7 @@ def check_publication_model() -> None:
         "Cargo.toml": True,
         "ordvec-manifest/Cargo.toml": True,
         "ordvec-python/Cargo.toml": False,
+        "ordvec-manifest-python/Cargo.toml": False,
         "ordvec-ffi/Cargo.toml": False,
         "fuzz/Cargo.toml": False,
     }
@@ -483,6 +494,44 @@ def check_python_package_metadata() -> None:
     for feature in ("extension-module", "abi3-py310"):
         if feature not in pyo3_features:
             fail(f"ordvec-python/Cargo.toml: pyo3 features must include {feature}")
+
+    manifest_pyproject = load_toml("ordvec-manifest-python/pyproject.toml")
+    manifest_project = mapping(
+        manifest_pyproject.get("project"),
+        "ordvec-manifest-python/pyproject.toml: project",
+    )
+    if manifest_project.get("name") != "ordvec-manifest":
+        fail("ordvec-manifest-python/pyproject.toml: project.name must be 'ordvec-manifest'")
+    if manifest_project.get("requires-python") != ">=3.10":
+        fail("ordvec-manifest-python/pyproject.toml: project.requires-python must be >=3.10")
+
+    manifest_cargo = load_toml("ordvec-manifest-python/Cargo.toml")
+    manifest_dependencies = mapping(
+        manifest_cargo.get("dependencies"),
+        "ordvec-manifest-python/Cargo.toml: dependencies",
+    )
+    manifest_pyo3 = mapping(
+        manifest_dependencies.get("pyo3"),
+        "ordvec-manifest-python/Cargo.toml: dependencies.pyo3",
+    )
+    manifest_pyo3_features = sequence(
+        manifest_pyo3.get("features"),
+        "ordvec-manifest-python/Cargo.toml: dependencies.pyo3.features",
+    )
+    for feature in ("extension-module", "abi3-py310"):
+        if feature not in manifest_pyo3_features:
+            fail(f"ordvec-manifest-python/Cargo.toml: pyo3 features must include {feature}")
+
+    manifest_tool = mapping(
+        manifest_pyproject.get("tool"),
+        "ordvec-manifest-python/pyproject.toml: tool",
+    )
+    manifest_maturin = mapping(
+        manifest_tool.get("maturin"),
+        "ordvec-manifest-python/pyproject.toml: tool.maturin",
+    )
+    if manifest_maturin.get("module-name") != "ordvec_manifest._ordvec_manifest":
+        fail("ordvec-manifest-python/pyproject.toml: tool.maturin.module-name must target ordvec_manifest._ordvec_manifest")
 
     readme = read_text("README.md")
     py_readme = read_text("ordvec-python/README.md")
@@ -618,6 +667,7 @@ def check_package_contents() -> None:
             "ordvec-ffi/",
             "ordvec-go/",
             "ordvec-manifest/",
+            "ordvec-manifest-python/",
             "ordvec-python/",
             "target/",
             "tests/release_",
@@ -654,6 +704,7 @@ def check_package_contents() -> None:
             "ordvec-ffi/",
             "ordvec-go/",
             "ordvec-manifest/",
+            "ordvec-manifest-python/",
             "ordvec-python/",
             "target/",
             "tests/release_",
@@ -882,6 +933,7 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         "manifest-provenance",
         "publish-manifest-crate",
         "publish-pypi",
+        "publish-manifest-pypi",
     }
     for job_name, raw_job in jobs.items():
         if not isinstance(job_name, str):
@@ -903,6 +955,7 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         ("publish-crate", "crates-io"),
         ("publish-manifest-crate", "crates-io"),
         ("publish-pypi", "pypi"),
+        ("publish-manifest-pypi", "pypi"),
     ):
         job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
         raw_environment = job.get("environment")
@@ -937,18 +990,29 @@ def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:
         fail(f"{path}: linux/aarch64 wheel selector must match architecture and assert exactly one wheel")
 
 
-def check_pypi_canonical_dist(workflow: dict[str, Any], path: str) -> None:
+def check_pypi_canonical_dist(
+    workflow: dict[str, Any],
+    path: str,
+    *,
+    job_name: str = "pypi-canonical-dist",
+    wheel_build_job: str = "build-wheels",
+    sdist_build_job: str = "build-sdist",
+    wheel_artifact_pattern: str = "wheels-*",
+    sdist_artifact_name: str = "sdist",
+    canonical_artifact_name: str = "pypi-canonical-dist",
+    project: str | None = None,
+) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
-    job = mapping(jobs.get("pypi-canonical-dist"), f"{path}: jobs.pypi-canonical-dist")
-    steps = sequence(job.get("steps"), f"{path}: jobs.pypi-canonical-dist.steps")
+    job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+    steps = sequence(job.get("steps"), f"{path}: jobs.{job_name}.steps")
 
-    for needed in ("build-wheels", "build-sdist"):
+    for needed in (wheel_build_job, sdist_build_job):
         if not has_need(job, needed):
-            fail(f"{path}: pypi-canonical-dist must need {needed}")
+            fail(f"{path}: {job_name} must need {needed}")
 
-    outputs = mapping(job.get("outputs"), f"{path}: jobs.pypi-canonical-dist.outputs")
+    outputs = mapping(job.get("outputs"), f"{path}: jobs.{job_name}.outputs")
     if outputs.get("source") != "${{ steps.canonicalize.outputs.source }}":
-        fail(f"{path}: pypi-canonical-dist must expose the canonical source output")
+        fail(f"{path}: {job_name} must expose the canonical source output")
 
     wheels_downloads: list[int] = []
     sdist_downloads: list[int] = []
@@ -956,38 +1020,40 @@ def check_pypi_canonical_dist(workflow: dict[str, Any], path: str) -> None:
     uploads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
 
     for index, raw_step in enumerate(steps):
-        step = mapping(raw_step, f"{path}: jobs.pypi-canonical-dist.steps[{index}]")
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
         action = action_name(step)
         if action == "actions/download-artifact":
             with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
             artifact_path = norm_path(with_map.get("path"))
-            if with_map.get("pattern") == "wheels-*" and boolish_true(with_map.get("merge-multiple")):
+            if with_map.get("pattern") == wheel_artifact_pattern and boolish_true(with_map.get("merge-multiple")):
                 if artifact_path != "built-dist":
-                    fail(f"{path}: canonical wheel download must target built-dist")
+                    fail(f"{path}: {job_name} canonical wheel download must target built-dist")
                 wheels_downloads.append(index)
-            elif with_map.get("name") == "sdist":
+            elif with_map.get("name") == sdist_artifact_name:
                 if artifact_path != "built-dist":
-                    fail(f"{path}: canonical sdist download must target built-dist")
+                    fail(f"{path}: {job_name} canonical sdist download must target built-dist")
                 sdist_downloads.append(index)
         elif action == "actions/upload-artifact":
             with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
-            if with_map.get("name") == "pypi-canonical-dist":
+            if with_map.get("name") == canonical_artifact_name:
                 uploads.append((index, step, with_map))
 
         run = step.get("run")
         if contains_text(run, "tests/release_pypi_canonical_dist.py canonicalize"):
             canonicalize_steps.append(step)
             if "--built-dir built-dist" not in run or "--out-dir canonical-dist" not in run:
-                fail(f"{path}: canonicalize step must read built-dist and write canonical-dist")
+                fail(f"{path}: {job_name} canonicalize step must read built-dist and write canonical-dist")
+            if project is not None and f"--project {project}" not in run:
+                fail(f"{path}: {job_name} canonicalize step must pass --project {project}")
 
     if len(wheels_downloads) != 1:
-        fail(f"{path}: pypi-canonical-dist must download exactly one wheels-* artifact set")
+        fail(f"{path}: {job_name} must download exactly one {wheel_artifact_pattern} artifact set")
     if len(sdist_downloads) != 1:
-        fail(f"{path}: pypi-canonical-dist must download exactly one sdist artifact")
+        fail(f"{path}: {job_name} must download exactly one {sdist_artifact_name} artifact")
     if len(canonicalize_steps) != 1:
-        fail(f"{path}: pypi-canonical-dist must run release_pypi_canonical_dist.py canonicalize")
+        fail(f"{path}: {job_name} must run release_pypi_canonical_dist.py canonicalize")
     if len(uploads) != 1:
-        fail(f"{path}: pypi-canonical-dist must upload exactly one pypi-canonical-dist artifact")
+        fail(f"{path}: {job_name} must upload exactly one {canonical_artifact_name} artifact")
 
     _, _, upload_with = uploads[0]
     upload_path = upload_with.get("path")
@@ -995,30 +1061,38 @@ def check_pypi_canonical_dist(workflow: dict[str, Any], path: str) -> None:
         contains_text(upload_path, "canonical-dist/*.whl")
         and contains_text(upload_path, "canonical-dist/*.tar.gz")
     ):
-        fail(f"{path}: pypi-canonical-dist upload must include canonical wheels and sdist")
+        fail(f"{path}: {job_name} upload must include canonical wheels and sdist")
 
 
-def check_publish_pypi(workflow: dict[str, Any], path: str) -> None:
+def check_publish_pypi(
+    workflow: dict[str, Any],
+    path: str,
+    *,
+    job_name: str = "publish-pypi",
+    canonical_job: str = "pypi-canonical-dist",
+    canonical_artifact_name: str = "pypi-canonical-dist",
+    project: str | None = None,
+) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
-    job = mapping(jobs.get("publish-pypi"), f"{path}: jobs.publish-pypi")
-    steps = sequence(job.get("steps"), f"{path}: jobs.publish-pypi.steps")
+    job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+    steps = sequence(job.get("steps"), f"{path}: jobs.{job_name}.steps")
 
-    if not has_need(job, "pypi-canonical-dist"):
-        fail(f"{path}: publish-pypi must need pypi-canonical-dist")
+    if not has_need(job, canonical_job):
+        fail(f"{path}: {job_name} must need {canonical_job}")
 
     publish_steps: list[tuple[int, dict[str, Any]]] = []
     canonical_downloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
     verify_steps: list[dict[str, Any]] = []
 
     for index, raw_step in enumerate(steps):
-        step = mapping(raw_step, f"{path}: jobs.publish-pypi.steps[{index}]")
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
         action = action_name(step)
         if action == "pypa/gh-action-pypi-publish":
             publish_steps.append((index, step))
         if action == "actions/download-artifact":
             with_block = step.get("with", {})
             with_map = mapping(with_block, f"{path}: {step_label(index, step)} with")
-            if with_map.get("name") == "pypi-canonical-dist":
+            if with_map.get("name") == canonical_artifact_name:
                 canonical_downloads.append((index, step, with_map))
             elif norm_path(with_map.get("path")) == "dist":
                 fail(f"{path}: {step_label(index, step)} downloads a non-canonical artifact into dist")
@@ -1027,30 +1101,32 @@ def check_publish_pypi(workflow: dict[str, Any], path: str) -> None:
         if contains_text(run, "tests/release_pypi_canonical_dist.py verify"):
             verify_steps.append(step)
             if "--dist-dir dist" not in run:
-                fail(f"{path}: PyPI verify step must verify dist")
+                fail(f"{path}: {job_name} PyPI verify step must verify dist")
+            if project is not None and f"--project {project}" not in run:
+                fail(f"{path}: {job_name} PyPI verify step must pass --project {project}")
 
     if len(publish_steps) != 1:
-        fail(f"{path}: publish-pypi must have exactly one pypa/gh-action-pypi-publish step")
+        fail(f"{path}: {job_name} must have exactly one pypa/gh-action-pypi-publish step")
 
     publish_index, publish_step = publish_steps[0]
-    if publish_step.get("if") != "needs.pypi-canonical-dist.outputs.source == 'build'":
-        fail(f"{path}: PyPI publish step must only run when canonical source is the current build")
+    if publish_step.get("if") != f"needs.{canonical_job}.outputs.source == 'build'":
+        fail(f"{path}: {job_name} PyPI publish step must only run when canonical source is the current build")
     publish_with = mapping(
         publish_step.get("with", {}), f"{path}: {step_label(publish_index, publish_step)} with"
     )
     if norm_path(publish_with.get("packages-dir")) != "dist":
-        fail(f"{path}: PyPI publish step must upload packages-dir: dist")
+        fail(f"{path}: {job_name} PyPI publish step must upload packages-dir: dist")
 
     if len(canonical_downloads) != 1:
-        fail(f"{path}: publish-pypi must download exactly one pypi-canonical-dist artifact")
+        fail(f"{path}: {job_name} must download exactly one {canonical_artifact_name} artifact")
     download_index, download_step, download_with = canonical_downloads[0]
     if download_index > publish_index:
         fail(f"{path}: {step_label(download_index, download_step)} must run before the PyPI publish step")
     if norm_path(download_with.get("path")) != "dist":
-        fail(f"{path}: publish-pypi must download pypi-canonical-dist into dist")
+        fail(f"{path}: {job_name} must download {canonical_artifact_name} into dist")
 
     if len(verify_steps) != 1:
-        fail(f"{path}: publish-pypi must run release_pypi_canonical_dist.py verify exactly once")
+        fail(f"{path}: {job_name} must run release_pypi_canonical_dist.py verify exactly once")
 
     for index, step in enumerate(steps):
         if action_name(step) != "actions/download-artifact":
@@ -1058,7 +1134,7 @@ def check_publish_pypi(workflow: dict[str, Any], path: str) -> None:
         with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
         label = step_label(index, step)
         artifact_path = norm_path(with_map.get("path"))
-        if artifact_path == "dist" and with_map.get("name") != "pypi-canonical-dist":
+        if artifact_path == "dist" and with_map.get("name") != canonical_artifact_name:
             fail(f"{path}: {label} must not place non-canonical artifacts in dist")
 
 
@@ -1472,9 +1548,28 @@ def main() -> None:
     check_release_security_gates(workflow, WORKFLOW_PATH)
     check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
     check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
+    check_pypi_canonical_dist(
+        workflow,
+        WORKFLOW_PATH,
+        job_name="pypi-manifest-canonical-dist",
+        wheel_build_job="build-manifest-wheels",
+        sdist_build_job="build-manifest-sdist",
+        wheel_artifact_pattern="wheels-manifest-*",
+        sdist_artifact_name="sdist-manifest",
+        canonical_artifact_name="pypi-manifest-canonical-dist",
+        project="ordvec-manifest",
+    )
     check_publish_crates(workflow, WORKFLOW_PATH)
     check_ci_manifest_package_defer(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)
+    check_publish_pypi(
+        workflow,
+        WORKFLOW_PATH,
+        job_name="publish-manifest-pypi",
+        canonical_job="pypi-manifest-canonical-dist",
+        canonical_artifact_name="pypi-manifest-canonical-dist",
+        project="ordvec-manifest",
+    )
     check_sde_cache_invariants()
 
 

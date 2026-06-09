@@ -7,9 +7,11 @@
 # unsigned releases may keep the score below 10 temporarily. The same graph
 # keeps the build-attest-publish chain honest:
 #
-#     build-{crate,manifest-crate,wheels,sdist}   (raw artifacts)
+#     build-{crate,manifest-crate,wheels,manifest-wheels,sdist,manifest-sdist}
+#         (raw artifacts)
 #         |
 #         +-> pypi-canonical-dist (current build, or verified immutable PyPI files)
+#         +-> pypi-manifest-canonical-dist (same for ordvec-manifest)
 #         |
 #         +-> attest         (id-token + attestations + .sigstore.json;
 #         |                   Rust-crates-only when PyPI files already exist)
@@ -23,9 +25,10 @@
 #         +--> publish-pypi  (Trusted Publishing, or existing-file verification)
 #         |
 #         +-> build/attest/provenance/release-manifest-assets-draft
-#         |      (after publish-crate; uploads manifest .crate/.sigstore.json/.intoto.jsonl)
+#         |      (after publish-crate; uploads manifest .crate/.whl/.tar.gz/.sigstore.json/.intoto.jsonl)
 #         |
 #         +--> publish-manifest-crate (same byte-identity proof after manifest assets stage)
+#         +--> publish-manifest-pypi  (Trusted Publishing, or existing-file verification)
 #               |
 #               v
 #         publish-github-release (un-draft, ONLY after all registry publishes succeed)
@@ -126,12 +129,22 @@ job_needs release-manifest-assets-draft attest-manifest \
   || fail "release-manifest-assets-draft must \`needs: attest-manifest\`"
 job_needs release-manifest-assets-draft manifest-provenance \
   || fail "release-manifest-assets-draft must \`needs: manifest-provenance\`"
+job_needs release-manifest-assets-draft pypi-manifest-canonical-dist \
+  || fail "release-manifest-assets-draft must \`needs: pypi-manifest-canonical-dist\`"
+job_needs release-manifest-assets-draft smoke-linux-aarch64-manifest-wheel \
+  || fail "release-manifest-assets-draft must \`needs: smoke-linux-aarch64-manifest-wheel\`"
 job_downloads_artifact_to_path release-manifest-assets-draft dist-manifest-crate dist \
   || fail "release-manifest-assets-draft must download the manifest dist-manifest-crate artifact into dist"
 job_downloads_artifact_to_path release-manifest-assets-draft sigstore-bundle-manifest dist \
   || fail "release-manifest-assets-draft must download the manifest Sigstore bundle into dist"
+job_downloads_artifact_to_path release-manifest-assets-draft pypi-manifest-canonical-dist dist \
+  || fail "release-manifest-assets-draft must download the canonical manifest Python dist into dist"
 printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.crate([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.crate"
+printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.whl([^a-zA-Z]|$)' \
+  || fail "release-manifest-assets-draft must upload dist/*.whl"
+printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.tar\.gz([^a-zA-Z]|$)' \
+  || fail "release-manifest-assets-draft must upload dist/*.tar.gz"
 printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.sigstore\.json([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.sigstore.json"
 printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.intoto\.jsonl([^a-zA-Z]|$)' \
@@ -195,15 +208,23 @@ printf '%s\n' "$att_manifest" | grep -qE '^[[:space:]]+attestations:[[:space:]]*
   || fail "attest-manifest job must grant \`attestations: write\` (persist to the GitHub attestation store)"
 job_needs attest-manifest build-manifest-crate \
   || fail "attest-manifest must \`needs: build-manifest-crate\`"
+job_needs attest-manifest pypi-manifest-canonical-dist \
+  || fail "attest-manifest must \`needs: pypi-manifest-canonical-dist\`"
 job_downloads_artifact_to_path attest-manifest dist-manifest-crate dist \
   || fail "attest-manifest must download the dist-manifest-crate artifact into dist"
+job_downloads_artifact_to_path attest-manifest pypi-manifest-canonical-dist dist \
+  || fail "attest-manifest must download the canonical manifest Python dist into dist"
 
 comb="$(job_body combine-hashes)"
 comb_manifest="$(job_body combine-manifest-hash)"
 job_needs combine-manifest-hash build-manifest-crate \
   || fail "combine-manifest-hash must \`needs: build-manifest-crate\` so the manifest .crate is a SLSA subject"
+job_needs combine-manifest-hash pypi-manifest-canonical-dist \
+  || fail "combine-manifest-hash must \`needs: pypi-manifest-canonical-dist\` so manifest Python dist can be SLSA subjects"
 job_downloads_artifact_to_path combine-manifest-hash dist-manifest-crate dist \
   || fail "combine-manifest-hash must download the dist-manifest-crate artifact into dist"
+job_downloads_artifact_to_path combine-manifest-hash pypi-manifest-canonical-dist dist \
+  || fail "combine-manifest-hash must download the canonical manifest Python dist when it is built by this run"
 
 build_manifest="$(job_body build-manifest-crate)"
 job_needs build-manifest-crate publish-crate \
@@ -231,6 +252,11 @@ job_needs publish-manifest-crate release-manifest-assets-draft \
   || fail "publish-manifest-crate must \`needs: release-manifest-assets-draft\`"
 job_needs publish-manifest-crate publish-crate \
   || fail "publish-manifest-crate must \`needs: publish-crate\`"
+body="$(job_body publish-manifest-pypi)"
+printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+  || fail "publish-manifest-pypi must grant \`id-token: write\` (Trusted Publishing OIDC)"
+job_needs publish-manifest-pypi release-manifest-assets-draft \
+  || fail "publish-manifest-pypi must \`needs: release-manifest-assets-draft\`"
 
 # ----------------------------------------------------------------------
 # (9) Rust crate publish jobs prove byte-identity vs the attested .crate on BOTH
@@ -291,6 +317,13 @@ printf '%s\n' "$pcd" | grep -qE 'release_pypi_canonical_dist\.py canonicalize' \
   || fail "pypi-canonical-dist must canonicalize Python artifacts before attestation/release upload"
 printf '%s\n' "$pcd" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
   || fail "pypi-canonical-dist must upload the canonical Python dist artifact"
+pcd_manifest="$(job_body pypi-manifest-canonical-dist)"
+printf '%s\n' "$pcd_manifest" | grep -qE 'release_pypi_canonical_dist\.py canonicalize' \
+  || fail "pypi-manifest-canonical-dist must canonicalize manifest Python artifacts before attestation/release upload"
+printf '%s\n' "$pcd_manifest" | grep -qE -- '--project[[:space:]]+ordvec-manifest' \
+  || fail "pypi-manifest-canonical-dist must canonicalize the ordvec-manifest PyPI project"
+printf '%s\n' "$pcd_manifest" | grep -qE 'name:[[:space:]]*pypi-manifest-canonical-dist' \
+  || fail "pypi-manifest-canonical-dist must upload the canonical manifest Python dist artifact"
 
 ppb="$(job_body publish-pypi)"
 job_needs publish-pypi pypi-canonical-dist \
@@ -299,13 +332,22 @@ printf '%s\n' "$ppb" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
   || fail "publish-pypi must consume pypi-canonical-dist, not raw rebuilt wheel/sdist artifacts"
 printf '%s\n' "$ppb" | grep -qE 'release_pypi_canonical_dist\.py verify' \
   || fail "publish-pypi must verify PyPI-served wheel/sdist hashes against canonical dist"
+mppb="$(job_body publish-manifest-pypi)"
+job_needs publish-manifest-pypi pypi-manifest-canonical-dist \
+  || fail "publish-manifest-pypi must \`needs: pypi-manifest-canonical-dist\` (publish/verify exactly the canonical manifest files)"
+printf '%s\n' "$mppb" | grep -qE 'name:[[:space:]]*pypi-manifest-canonical-dist' \
+  || fail "publish-manifest-pypi must consume pypi-manifest-canonical-dist, not raw rebuilt wheel/sdist artifacts"
+printf '%s\n' "$mppb" | grep -qE 'release_pypi_canonical_dist\.py verify' \
+  || fail "publish-manifest-pypi must verify PyPI-served manifest wheel/sdist hashes against canonical dist"
+printf '%s\n' "$mppb" | grep -qE -- '--project[[:space:]]+ordvec-manifest' \
+  || fail "publish-manifest-pypi must verify the ordvec-manifest PyPI project"
 grep -q 'pypi.org/pypi' tests/release_pypi_canonical_dist.py \
   || fail "release_pypi_canonical_dist.py must query PyPI for served file hashes"
 
 # ----------------------------------------------------------------------
 # (10) publish-github-release un-drafts ONLY AFTER all registry publishes succeed.
 # ----------------------------------------------------------------------
-for dep in publish-crate publish-manifest-crate publish-pypi; do
+for dep in publish-crate publish-manifest-crate publish-pypi publish-manifest-pypi; do
   job_needs publish-github-release "$dep" \
     || fail "publish-github-release must \`needs: $dep\` (un-draft only after all registry publishes succeed)"
 done

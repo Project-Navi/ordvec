@@ -1,10 +1,11 @@
 name: python
 
-# Bindings CI: lint + build the ordvec-python extension with maturin and run the
-# pytest suite across OS and Python versions. Kept separate from ci.yml (the
-# core-crate gates) so the binding's pyo3/numpy/ndarray toolchain never entangles
-# the core checks, and so a green run proves the bindings build cold from a
-# checkout (the paper's reproducibility requirement).
+# Bindings CI: lint + build the ordvec-python and ordvec-manifest-python
+# extensions with maturin and run their pytest suites across OS and Python
+# versions. Kept separate from ci.yml (the core-crate gates) so the binding
+# pyo3/numpy/ndarray toolchains never entangle the core checks, and so a green
+# run proves the bindings build cold from a checkout (the paper's
+# reproducibility requirement).
 on:
   # Push runs on EVERY commit to main (no paths filter): release.yml's
   # require-ci-green gate asserts a successful python.yml run exists for the exact
@@ -17,6 +18,8 @@ on:
   pull_request:
     paths:
       - "ordvec-python/**"
+      - "ordvec-manifest-python/**"
+      - "ordvec-manifest/**"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -48,7 +51,9 @@ jobs:
       # The core ci.yml clippy is scoped to the core crate via default-members,
       # so the binding gets its quality gate here instead.
       - run: cargo fmt -p ordvec-python --check
+      - run: cargo fmt -p ordvec-manifest-python --check
       - run: cargo clippy -p ordvec-python --all-targets -- -D warnings
+      - run: cargo clippy -p ordvec-manifest-python --all-targets -- -D warnings
 
   test:
     name: py${{ matrix.python }} on ${{ matrix.os }}
@@ -119,3 +124,31 @@ jobs:
           python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
       - name: pytest
         run: python -m pytest ordvec-python/tests -q
+      - name: build the manifest wheel (abi3, release)
+        working-directory: ordvec-manifest-python
+        run: maturin build --release --out dist
+      - name: install the built manifest wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL="$(python - <<'PY'
+          from pathlib import Path
+          wheels = sorted(Path("ordvec-manifest-python/dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one manifest wheel, found {wheels}")
+          print(wheels[0])
+          PY
+          )"
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-manifest-wheel-requirements.txt"
+          python - <<'PY' "$WHEEL" > "$REQ_FILE"
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1]).resolve()
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          print(f"ordvec-manifest @ {wheel.as_uri()} --hash=sha256:{digest}")
+          PY
+          python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
+      - name: pytest manifest bindings
+        run: python -m pytest ordvec-manifest-python/tests -q

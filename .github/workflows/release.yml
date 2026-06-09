@@ -1,4 +1,4 @@
-# Unified, tag-triggered release pipeline for ordvec (Rust crates + Python wheel).
+# Unified, tag-triggered release pipeline for ordvec (Rust crates + Python wheels).
 #
 # Cutting a stable `vMAJOR.MINOR.PATCH` tag fully automates: build (crates +
 # wheels + sdist) -> canonicalize the Python dist (current build for new
@@ -6,11 +6,12 @@
 # version) -> attest / SLSA-provenance the files this run actually built ->
 # stage core/Python assets on the DRAFT GitHub Release (`release-assets-draft`)
 # -> publish the core crate -> build/attest/stage the lockstep manifest crate
-# (now that the core version exists on crates.io) -> gated registry publishes /
-# verification -> un-draft ONLY after all registry jobs succeed
-# (`publish-github-release`). The registry gates (two crates.io jobs plus PyPI)
-# are bound to GitHub Environments with Required Reviewers, so they pause for a
-# human.
+# plus `ordvec-manifest` Python assets (now that the core version exists on
+# crates.io) -> gated registry publishes / verification -> un-draft ONLY after
+# all registry jobs succeed
+# (`publish-github-release`). The registry gates (two crates.io jobs plus two
+# PyPI jobs) are bound to GitHub Environments with Required Reviewers, so they
+# pause for a human.
 #
 # The un-draft-after-publish ordering is deliberate: it prevents a public
 # GitHub Release from existing for a version that crates.io / PyPI later
@@ -75,6 +76,8 @@
 #       `crates-io`).
 #   * PyPI: ordvec > publishing > edit the GitHub publisher -> workflow =
 #       `release.yml` (env stays `pypi`).
+#   * PyPI: ordvec-manifest > publishing > add or edit the GitHub publisher
+#       -> workflow = `release.yml` (env stays `pypi`).
 #   * GitHub Environments `crates-io` AND `pypi`:
 #       - keep "Required reviewers" (the human publish gate);
 #       - set "Deployment branches and tags" to **Selected branches and tags**
@@ -525,6 +528,140 @@ jobs:
           path: ordvec-python/ordvec-python.cdx.json
           if-no-files-found: error
 
+  build-manifest-wheels:
+    name: manifest wheel ${{ matrix.platform.target }} (${{ matrix.platform.runner }})
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  target: x86_64,  manylinux: auto }
+          - { runner: ubuntu-latest,  target: aarch64, manylinux: auto }
+          - { runner: macos-latest,   target: aarch64, manylinux: auto }
+          - { runner: windows-latest, target: x64,     manylinux: auto }
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Build manifest abi3 wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: ordvec-manifest-python
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist
+      - name: Set up Python to test the built manifest wheel
+        if: ${{ !(matrix.platform.runner == 'ubuntu-latest' && matrix.platform.target == 'aarch64') }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Install the built manifest wheel and run pytest
+        if: ${{ !(matrix.platform.runner == 'ubuntu-latest' && matrix.platform.target == 'aarch64') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL="$(python - <<'PY'
+          from pathlib import Path
+          wheels = sorted(Path("ordvec-manifest-python/dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one manifest wheel, found {wheels}")
+          print(wheels[0])
+          PY
+          )"
+          python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-manifest-wheel-requirements.txt"
+          python - <<'PY' "$WHEEL" > "$REQ_FILE"
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1]).resolve()
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          print(f"ordvec-manifest @ {wheel.as_uri()} --hash=sha256:{digest}")
+          PY
+          python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
+          python -m pytest ordvec-manifest-python/tests -q
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheels-manifest-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: ordvec-manifest-python/dist/*.whl
+          if-no-files-found: error
+
+  build-manifest-sdist:
+    name: build manifest sdist + SBOM
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Build the manifest sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: ordvec-manifest-python
+          command: sdist
+          args: --out dist
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - name: Set up Python to test the manifest sdist
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Install from the manifest sdist and run pytest
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDIST="$(python - <<'PY'
+          from pathlib import Path
+          sdists = sorted(Path("ordvec-manifest-python/dist").glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"expected exactly one manifest sdist, found {sdists}")
+          print(sdists[0])
+          PY
+          )"
+          python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-manifest-sdist-requirements.txt"
+          python - <<'PY' "$SDIST" > "$REQ_FILE"
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          sdist = Path(sys.argv[1]).resolve()
+          digest = hashlib.sha256(sdist.read_bytes()).hexdigest()
+          print(f"ordvec-manifest @ {sdist.as_uri()} --hash=sha256:{digest}")
+          PY
+          python -m pip install --require-hashes --no-index --no-deps --no-build-isolation -r "$REQ_FILE"
+          python -m pytest ordvec-manifest-python/tests -q
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdist-manifest
+          path: ordvec-manifest-python/dist/*.tar.gz
+          if-no-files-found: error
+      - name: Install cargo-cyclonedx
+        shell: bash
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - name: Generate CycloneDX SBOM for the manifest binding crate
+        shell: bash
+        run: cargo cyclonedx --manifest-path ordvec-manifest-python/Cargo.toml --format json
+      - name: Upload the manifest binding SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-manifest-python
+          path: ordvec-manifest-python/ordvec-manifest-python.cdx.json
+          if-no-files-found: error
+
   pypi-canonical-dist:
     name: canonicalize Python dist for PyPI/GitHub Release
     needs: [guard, build-wheels, build-sdist]
@@ -570,6 +707,118 @@ jobs:
             canonical-dist/*.whl
             canonical-dist/*.tar.gz
           if-no-files-found: error
+
+  pypi-manifest-canonical-dist:
+    name: canonicalize ordvec-manifest Python dist for PyPI/GitHub Release
+    needs: [guard, build-manifest-wheels, build-manifest-sdist]
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.canonicalize.outputs.source }}
+      pypi_exists: ${{ steps.canonicalize.outputs.pypi_exists }}
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Collect the built manifest wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheels-manifest-*
+          path: built-dist
+          merge-multiple: true
+      - name: Collect the built manifest sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdist-manifest
+          path: built-dist
+      - name: Select canonical ordvec-manifest Python dist
+        id: canonicalize
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 tests/release_pypi_canonical_dist.py canonicalize \
+            --project ordvec-manifest \
+            --version "$VERSION" \
+            --built-dir built-dist \
+            --out-dir canonical-dist
+      - name: Upload the canonical ordvec-manifest Python dist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-manifest-canonical-dist
+          path: |
+            canonical-dist/*.whl
+            canonical-dist/*.tar.gz
+          if-no-files-found: error
+
+  smoke-linux-aarch64-manifest-wheel:
+    name: smoke linux/aarch64 ordvec-manifest wheel
+    needs: [guard, pypi-manifest-canonical-dist]
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Set up Python to test the canonical manifest wheel
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Download the canonical manifest Python dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-manifest-canonical-dist
+          path: wheelhouse
+      - name: Install exact manifest wheel and run tiny verifier smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL="$(python - <<'PY'
+          from pathlib import Path
+          wheels = sorted(
+              wheel
+              for wheel in Path("wheelhouse").glob("*.whl")
+              if "aarch64" in wheel.name and ("manylinux" in wheel.name or "musllinux" in wheel.name)
+          )
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one linux/aarch64 manifest wheel, found {wheels}")
+          print(wheels[0])
+          PY
+          )"
+          python -m pip install --require-hashes -r ordvec-python/requirements-dev.txt
+          REQ_FILE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/ordvec-manifest-aarch64-wheel-requirements.txt"
+          python - <<'PY' "$WHEEL" > "$REQ_FILE"
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1]).resolve()
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          print(f"ordvec-manifest @ {wheel.as_uri()} --hash=sha256:{digest}")
+          PY
+          python -m pip install --require-hashes --no-index --no-deps -r "$REQ_FILE"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import tempfile
+
+          import ordvec_manifest
+
+          with tempfile.TemporaryDirectory() as tmp:
+              path = Path(tmp) / "artifact.bin"
+              path.write_bytes(b"ordvec-manifest smoke")
+              got = ordvec_manifest.sha256_file(path)
+              assert got["sha256"] == hashlib.sha256(b"ordvec-manifest smoke").hexdigest()
+              assert got["size_bytes"] == len(b"ordvec-manifest smoke")
+          PY
 
   attest:
     name: GitHub artifact attestation (+ .sigstore.json bundle)
@@ -867,7 +1116,7 @@ jobs:
 
   attest-manifest:
     name: GitHub artifact attestation for ordvec-manifest
-    needs: [guard, build-manifest-crate]
+    needs: [guard, build-manifest-crate, pypi-manifest-canonical-dist]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -885,14 +1134,29 @@ jobs:
         with:
           name: dist-manifest-crate
           path: dist
-      - name: Attest build provenance for manifest crate
-        id: attest_manifest
+      - name: Collect the canonical ordvec-manifest Python dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-manifest-canonical-dist
+          path: dist
+      - name: Attest build provenance for manifest crate + canonical manifest wheels + sdist
+        id: attest_manifest_all
+        if: needs.pypi-manifest-canonical-dist.outputs.source == 'build'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.crate
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Attest build provenance for manifest crate only
+        id: attest_manifest_crate
+        if: needs.pypi-manifest-canonical-dist.outputs.source == 'pypi'
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: dist/*.crate
       - name: Stage the manifest Sigstore bundle as a release asset
         env:
-          BUNDLE: ${{ steps.attest_manifest.outputs.bundle-path }}
+          BUNDLE: ${{ steps.attest_manifest_all.outputs.bundle-path || steps.attest_manifest_crate.outputs.bundle-path }}
           VERSION: ${{ needs.guard.outputs.version }}
         run: cp "$BUNDLE" "ordvec-manifest-${VERSION}.sigstore.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -902,8 +1166,8 @@ jobs:
           if-no-files-found: error
 
   combine-manifest-hash:
-    name: combine ordvec-manifest digest for SLSA provenance
-    needs: [guard, build-manifest-crate]
+    name: combine ordvec-manifest digests for SLSA provenance
+    needs: [guard, build-manifest-crate, pypi-manifest-canonical-dist]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -918,12 +1182,28 @@ jobs:
         with:
           name: dist-manifest-crate
           path: dist
-      - name: Compute base64 sha256sum over manifest SLSA subject
+      - name: Collect the canonical ordvec-manifest Python dist
+        if: needs.pypi-manifest-canonical-dist.outputs.source == 'build'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-manifest-canonical-dist
+          path: dist
+      - name: Compute base64 sha256sum over manifest SLSA subjects
         id: hash
         working-directory: dist
+        env:
+          PYPI_SOURCE: ${{ needs.pypi-manifest-canonical-dist.outputs.source }}
         run: |
           set -euo pipefail
-          echo "hashes=$(sha256sum ./*.crate | base64 -w0)" >> "$GITHUB_OUTPUT"
+          if [ "$PYPI_SOURCE" = "build" ]; then
+            echo "hashes=$(sha256sum ./*.crate ./*.whl ./*.tar.gz | base64 -w0)" >> "$GITHUB_OUTPUT"
+          elif [ "$PYPI_SOURCE" = "pypi" ]; then
+            echo "::notice::ordvec-manifest PyPI dist already exists; SLSA subjects are limited to the manifest crate built by this run."
+            echo "hashes=$(sha256sum ./*.crate | base64 -w0)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::unexpected pypi-manifest-canonical-dist source: $PYPI_SOURCE"
+            exit 1
+          fi
 
   manifest-provenance:
     name: SLSA provenance for ordvec-manifest (.intoto.jsonl)
@@ -941,7 +1221,7 @@ jobs:
 
   release-manifest-assets-draft:
     name: stage ordvec-manifest assets on the DRAFT Release (does NOT un-draft)
-    needs: [guard, build-manifest-crate, attest-manifest, manifest-provenance]
+    needs: [guard, build-manifest-crate, attest-manifest, manifest-provenance, pypi-manifest-canonical-dist, smoke-linux-aarch64-manifest-wheel]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -960,6 +1240,11 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: sigstore-bundle-manifest
+          path: dist
+      - name: Collect the canonical ordvec-manifest Python dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-manifest-canonical-dist
           path: dist
       - name: Collect workflow artifacts for manifest SLSA provenance
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -986,6 +1271,8 @@ jobs:
           set -euo pipefail
           gh release upload "$TAG_NAME" \
             dist/*.crate \
+            dist/*.whl \
+            dist/*.tar.gz \
             dist/*.sigstore.json \
             dist/*.intoto.jsonl \
             --clobber
@@ -1109,6 +1396,49 @@ jobs:
           fi
           echo "OK: crates.io-served manifest .crate is byte-identical to the SLSA-attested artifact ($A_SHA)."
 
+  publish-manifest-pypi:
+    name: publish ordvec-manifest to PyPI
+    needs: [guard, pypi-manifest-canonical-dist, release-manifest-assets-draft]
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi # MANUAL GATE — Required reviewer
+      url: https://pypi.org/p/ordvec-manifest
+    permissions:
+      contents: read
+      id-token: write # Trusted Publishing (OIDC); PEP 740 attestations on by default
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Collect the canonical ordvec-manifest Python dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pypi-manifest-canonical-dist
+          path: dist
+      - name: Skip ordvec-manifest PyPI upload when the immutable version already exists
+        if: needs.pypi-manifest-canonical-dist.outputs.source == 'pypi'
+        run: |
+          echo "::notice::PyPI already serves ordvec-manifest for this version; verifying existing canonical files instead of uploading."
+      - name: Publish ordvec-manifest to PyPI (Trusted Publishing; PEP 740 attestations on by default)
+        if: needs.pypi-manifest-canonical-dist.outputs.source == 'build'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist
+      - name: Verify ordvec-manifest PyPI hashes match canonical dist
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 tests/release_pypi_canonical_dist.py verify \
+            --project ordvec-manifest \
+            --version "$VERSION" \
+            --dist-dir dist
+
   publish-pypi:
     name: publish to PyPI
     needs: [guard, pypi-canonical-dist, release-assets-draft]
@@ -1153,7 +1483,7 @@ jobs:
 
   publish-github-release:
     name: un-draft the GitHub Release (only after all registry publishes succeed)
-    needs: [guard, publish-crate, publish-manifest-crate, publish-pypi]
+    needs: [guard, publish-crate, publish-manifest-crate, publish-pypi, publish-manifest-pypi]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:

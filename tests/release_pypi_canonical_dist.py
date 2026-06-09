@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROJECT = "ordvec"
+DEFAULT_PROJECT = "ordvec"
 DIST_SUFFIXES = (".whl", ".tar.gz")
 
 
@@ -65,8 +65,8 @@ def dist_files(directory: Path) -> dict[str, Path]:
     return files
 
 
-def fetch_pypi_payload(version: str) -> dict[str, Any] | None:
-    url = f"https://pypi.org/pypi/{PROJECT}/{version}/json"
+def fetch_pypi_payload(project: str, version: str) -> dict[str, Any] | None:
+    url = f"https://pypi.org/pypi/{project}/{version}/json"
     try:
         with urllib.request.urlopen(url, timeout=20) as response:
             return json.load(response)
@@ -130,11 +130,11 @@ def ensure_same_filenames(local: dict[str, Path], remote: dict[str, dict[str, st
         )
 
 
-def canonicalize(version: str, built_dir: Path, out_dir: Path) -> None:
+def canonicalize(project: str, version: str, built_dir: Path, out_dir: Path) -> None:
     built = dist_files(built_dir)
     prepare_empty_dir(out_dir)
     try:
-        payload = fetch_pypi_payload(version)
+        payload = fetch_pypi_payload(project, version)
     except PyPIReadError as exc:
         fail(str(exc))
 
@@ -143,7 +143,7 @@ def canonicalize(version: str, built_dir: Path, out_dir: Path) -> None:
             shutil.copy2(path, out_dir / filename)
         set_output("source", "build")
         set_output("pypi_exists", "false")
-        print(f"OK: PyPI has no {PROJECT} {version}; canonical dist uses current build")
+        print(f"OK: PyPI has no {project} {version}; canonical dist uses current build")
         return
 
     try:
@@ -170,11 +170,11 @@ def canonicalize(version: str, built_dir: Path, out_dir: Path) -> None:
 
     set_output("source", "pypi")
     set_output("pypi_exists", "true")
-    print(f"OK: PyPI already has {PROJECT} {version}; canonical dist uses verified PyPI files")
+    print(f"OK: PyPI already has {project} {version}; canonical dist uses verified PyPI files")
 
 
-def remote_hashes(version: str) -> dict[str, str] | None:
-    payload = fetch_pypi_payload(version)
+def remote_hashes(project: str, version: str) -> dict[str, str] | None:
+    payload = fetch_pypi_payload(project, version)
     if payload is None:
         return None
     return {name: item["sha256"] for name, item in pypi_dist_map(payload).items()}
@@ -184,15 +184,15 @@ def local_hashes(dist_dir: Path) -> dict[str, str]:
     return {name: sha256_file(path) for name, path in dist_files(dist_dir).items()}
 
 
-def verify(version: str, dist_dir: Path, attempts: int, sleep_seconds: float) -> None:
+def verify(project: str, version: str, dist_dir: Path, attempts: int, sleep_seconds: float) -> None:
     local = local_hashes(dist_dir)
-    url = f"https://pypi.org/pypi/{PROJECT}/{version}/json"
+    url = f"https://pypi.org/pypi/{project}/{version}/json"
     last_error = "not checked"
     for attempt in range(1, attempts + 1):
         try:
-            remote = remote_hashes(version)
+            remote = remote_hashes(project, version)
             if remote == local:
-                print(f"OK: PyPI-served hashes match canonical dist for {PROJECT} {version}")
+                print(f"OK: PyPI-served hashes match canonical dist for {project} {version}")
                 return
             last_error = f"local={local!r} remote={remote!r}"
         except PyPIReadError as exc:
@@ -208,11 +208,13 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     canonical = subparsers.add_parser("canonicalize")
+    canonical.add_argument("--project", default=DEFAULT_PROJECT)
     canonical.add_argument("--version", required=True)
     canonical.add_argument("--built-dir", required=True, type=Path)
     canonical.add_argument("--out-dir", required=True, type=Path)
 
     verify_parser = subparsers.add_parser("verify")
+    verify_parser.add_argument("--project", default=DEFAULT_PROJECT)
     verify_parser.add_argument("--version", required=True)
     verify_parser.add_argument("--dist-dir", required=True, type=Path)
     verify_parser.add_argument("--attempts", default=24, type=int)
@@ -224,10 +226,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.command == "canonicalize":
-        canonicalize(args.version, args.built_dir, args.out_dir)
+        canonicalize(args.project, args.version, args.built_dir, args.out_dir)
         return
     if args.command == "verify":
-        verify(args.version, args.dist_dir, args.attempts, args.sleep_seconds)
+        verify(args.project, args.version, args.dist_dir, args.attempts, args.sleep_seconds)
         return
     raise AssertionError(f"unknown command: {args.command}")
 
