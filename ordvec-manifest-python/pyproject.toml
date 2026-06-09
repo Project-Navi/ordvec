@@ -1,0 +1,50 @@
+[build-system]
+requires = ["maturin>=1.13.3,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ordvec-manifest"
+version = "0.4.0"
+description = "Python bindings for ordvec index manifest verification"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+authors = [
+    { name = "Nelson Spence" },
+]
+keywords = [
+    "vector-search",
+    "manifest",
+    "provenance",
+    "verification",
+    "quantization",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/Fieldnote-Echo/ordvec"
+Repository = "https://github.com/Fieldnote-Echo/ordvec"
+Issues = "https://github.com/Fieldnote-Echo/ordvec/issues"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "ordvec_manifest._ordvec_manifest"

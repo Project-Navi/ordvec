@@ -632,6 +632,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ordvec-manifest-python"
+version = "0.4.0"
+dependencies = [
+ "ordvec-manifest",
+ "pyo3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ordvec-python"
 version = "0.4.0"
 dependencies = [
