@@ -257,6 +257,10 @@ printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
   || fail "publish-manifest-pypi must grant \`id-token: write\` (Trusted Publishing OIDC)"
 job_needs publish-manifest-pypi release-manifest-assets-draft \
   || fail "publish-manifest-pypi must \`needs: release-manifest-assets-draft\`"
+job_needs publish-manifest-pypi publish-manifest-crate \
+  || fail "publish-manifest-pypi must \`needs: publish-manifest-crate\` (manifest crate publishes before manifest PyPI)"
+job_needs publish-pypi publish-crate \
+  || fail "publish-pypi must \`needs: publish-crate\` (core crate publishes before core PyPI)"
 
 # ----------------------------------------------------------------------
 # (9) Rust crate publish jobs prove byte-identity vs the attested .crate on BOTH

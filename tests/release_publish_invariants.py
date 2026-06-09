@@ -547,6 +547,26 @@ def check_python_package_metadata() -> None:
         fail(".github/dependabot.yml must keep the Python NumPy floor comment at >=2.2")
 
 
+def check_release_docs_include_manifest_pypi_lane() -> None:
+    releasing = read_text("RELEASING.md")
+    normalized_releasing = " ".join(releasing.split())
+    for required in (
+        "`ordvec-manifest` on PyPI",
+        "`publish-manifest-pypi`",
+        "four registry publish jobs",
+        "PyPI must point both `ordvec` and `ordvec-manifest`",
+        "https://pypi.org/p/ordvec-manifest",
+    ):
+        if " ".join(required.split()) not in normalized_releasing:
+            fail(f"RELEASING.md must mention {required!r}")
+
+    threat_model = read_text("THREAT_MODEL.md")
+    normalized_threat_model = " ".join(threat_model.split())
+    for required in ("`publish-manifest-pypi`", "two **`pypi`** publish jobs"):
+        if " ".join(required.split()) not in normalized_threat_model:
+            fail(f"THREAT_MODEL.md must mention {required!r}")
+
+
 def check_strict_release_tag_patterns(workflow: dict[str, Any], path: str) -> None:
     try:
         tag_pattern = read_toml_string_in_section("cliff.toml", "git", "tag_pattern")
@@ -925,6 +945,12 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         )
     if found_gate_run is None or "event=push" not in found_gate_run or '.event == "push"' not in found_gate_run:
         fail(f"{path}: require-ci-green must require successful push workflow runs")
+    if (
+        found_gate_run is None
+        or "repos/${REPO}/commits/main" not in found_gate_run
+        or "MAIN_SHA" not in found_gate_run
+    ):
+        fail(f"{path}: require-ci-green must verify the release tag points at current main")
 
     allowed_id_token_jobs = {
         "attest",
@@ -1090,6 +1116,7 @@ def check_publish_pypi(
     canonical_job: str = "pypi-canonical-dist",
     canonical_artifact_name: str = "pypi-canonical-dist",
     project: str | None = None,
+    crate_publish_job: str = "publish-crate",
 ) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
@@ -1097,6 +1124,8 @@ def check_publish_pypi(
 
     if not has_need(job, canonical_job):
         fail(f"{path}: {job_name} must need {canonical_job}")
+    if not has_need(job, crate_publish_job):
+        fail(f"{path}: {job_name} must need {crate_publish_job} to avoid a partial PyPI-first release")
 
     publish_steps: list[tuple[int, dict[str, Any]]] = []
     canonical_downloads: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
@@ -1174,6 +1203,7 @@ def check_publish_crate_job(
     publish_runs: list[tuple[int, str]] = []
     publish_dry_runs: list[tuple[int, str]] = []
     auth_steps: list[int] = []
+    recovery_steps: list[tuple[int, dict[str, Any]]] = []
 
     for index, raw_step in enumerate(steps):
         step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
@@ -1188,6 +1218,8 @@ def check_publish_crate_job(
                     publish_runs.append((index, run))
         if action_name(step) == "rust-lang/crates-io-auth-action":
             auth_steps.append(index)
+        if step.get("name") == f"Check for existing {package} .crate recovery":
+            recovery_steps.append((index, step))
         if action_name(step) == "actions/download-artifact":
             with_block = step.get("with", {})
             with_map = mapping(with_block, f"{path}: {step_label(index, step)} with")
@@ -1231,6 +1263,55 @@ def check_publish_crate_job(
             found_names.add(name)
     if found_names != verify_step_names:
         fail(f"{path}: {job_name} must have both attested .crate verification steps")
+
+    recovery_id = "crate_recovery" if package == "ordvec" else "manifest_crate_recovery"
+    if len(recovery_steps) != 1:
+        fail(f"{path}: {job_name} must have exactly one first-publish recovery check")
+    recovery_index, recovery_step = recovery_steps[0]
+    if recovery_step.get("id") != recovery_id:
+        fail(f"{path}: {job_name} recovery step must have id {recovery_id}")
+    recovery_run = recovery_step.get("run")
+    if not isinstance(recovery_run, str):
+        fail(f"{path}: {job_name} recovery step must be a run step")
+    for required in (
+        "already_published=true",
+        "already_published=false",
+        "Refusing recovery",
+        f"crates.io already serves byte-identical {package}",
+    ):
+        if required not in recovery_run:
+            fail(f"{path}: {job_name} recovery step must contain {required!r}")
+    for url_var in ("API_URL", "STATIC_URL"):
+        if not any(
+            has_shell_arg(words, shell_vars(url_var))
+            and has_shell_option_value(
+                words, {"--user-agent", "-A"}, shell_vars("CRATES_IO_USER_AGENT")
+            )
+            and has_shell_option_value(words, {"--output", "-o"}, shell_vars("EXISTING"))
+            for words in shell_curl_commands(recovery_run)
+        ):
+            fail(
+                f"{path}: {job_name} recovery step must curl ${url_var} "
+                "with CRATES_IO_USER_AGENT into $EXISTING"
+            )
+
+    protected_step_names = {
+        "Mint a short-lived crates.io credential (OIDC)",
+        "cargo publish",
+    }
+    if require_publish_dry_run:
+        protected_step_names.add("Validate manifest publish dry-run")
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        name = step.get("name")
+        if name in protected_step_names:
+            if index < recovery_index:
+                fail(f"{path}: {name} must run after the {package} crate recovery check")
+            if step.get("if") != f"steps.{recovery_id}.outputs.already_published != 'true'":
+                fail(
+                    f"{path}: {name} must be skipped when {package} crate recovery found "
+                    "byte-identical existing bytes"
+                )
 
     if require_publish_dry_run:
         dry_run_index = publish_dry_runs[0][0]
@@ -1557,6 +1638,7 @@ def main() -> None:
     check_release_compatibility_sync()
     check_publication_model()
     check_python_package_metadata()
+    check_release_docs_include_manifest_pypi_lane()
     check_strict_release_tag_patterns(workflow, WORKFLOW_PATH)
     check_package_contents()
     check_ci_package_guards(ci_workflow, CI_WORKFLOW_PATH)
@@ -1587,6 +1669,7 @@ def main() -> None:
         canonical_job="pypi-manifest-canonical-dist",
         canonical_artifact_name="pypi-manifest-canonical-dist",
         project="ordvec-manifest",
+        crate_publish_job="publish-manifest-crate",
     )
     check_sde_cache_invariants()
 

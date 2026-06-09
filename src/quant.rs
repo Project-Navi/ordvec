@@ -596,7 +596,9 @@ impl RankQuant {
     /// `candidates` may contain duplicate global row IDs. Each candidate entry
     /// is scored independently, so duplicate IDs may produce duplicate returned
     /// global IDs. Callers that require unique hits should deduplicate the
-    /// candidate list before calling this method.
+    /// candidate list before calling this method. The candidate list length is
+    /// still bounded by `n_vectors`; this keeps duplicate-heavy inputs from
+    /// allocating more scratch space than a full-corpus scan.
     ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just
@@ -621,6 +623,12 @@ impl RankQuant {
     ) -> (Vec<f32>, Vec<i64>) {
         assert_eq!(query.len(), self.dim);
         assert_all_finite(query);
+        assert!(
+            candidates.len() <= self.n_vectors,
+            "search_asymmetric_subset: candidate list length {} exceeds n_vectors {}; deduplicate repeated ids before calling",
+            candidates.len(),
+            self.n_vectors,
+        );
         // Bounds-check candidate ids before the gather below indexes
         // `self.packed[src..src + bpv]` with `src = di * bpv`. An OOB id
         // otherwise surfaces as a cryptic slice-range panic; fail fast
@@ -657,7 +665,10 @@ impl RankQuant {
         // Pack the candidate docs' bytes into a contiguous buffer so
         // the SIMD kernels can scan them as if they were a small dense
         // sub-index. Cost: m * bpv copy (small for typical m).
-        let mut sub_packed = vec![0u8; m * bpv];
+        let sub_packed_len = m
+            .checked_mul(bpv)
+            .expect("search_asymmetric_subset: candidate scratch length overflows usize");
+        let mut sub_packed = vec![0u8; sub_packed_len];
         for (i, &di) in candidates.iter().enumerate() {
             let src = (di as usize) * bpv;
             sub_packed[i * bpv..(i + 1) * bpv].copy_from_slice(&self.packed[src..src + bpv]);

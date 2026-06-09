@@ -307,11 +307,13 @@ trust model requires be pinned by version *tag*); `persist-credentials: false`
 on every checkout; `permissions: contents: read` default. The **release
 workflow** (`release.yml`) is tag-triggered with a strict-SemVer guard; build,
 GitHub attestation, SLSA provenance, Release-asset attach, and un-draft all
-run automatically, while the two **`crates.io`** publish jobs (`ordvec` first,
-then lockstep `ordvec-manifest`) and the **`pypi`** publish job are gated
-behind GitHub Environments with **Required reviewers** (the only manual step).
-It runs a `require-ci-green` gate against `main`, publishes via **OIDC trusted
-publishing** (no long-lived registry tokens), and emits **SLSA build
+run automatically, while the two **`crates.io`** publish jobs (`publish-crate`
+for `ordvec` first, then `publish-manifest-crate` for lockstep
+`ordvec-manifest`) and the two **`pypi`** publish jobs (`publish-pypi` and
+`publish-manifest-pypi`) are gated behind GitHub Environments with **Required
+reviewers** (the only manual step). It runs a `require-ci-green` gate against
+current `main` HEAD, publishes via **OIDC trusted publishing** (no long-lived
+registry tokens), and emits **SLSA build
 provenance** (`actions/attest-build-provenance` + a `slsa-github-generator`
 `*.intoto.jsonl` attached to the GitHub Release) **before** publish — a failed
 attestation fails the release closed. Each Rust publish job proves pre- and

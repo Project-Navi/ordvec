@@ -150,7 +150,8 @@ file as required auxiliary artifact name `ordinaldb.ids`. That makes the vector
 row count an ordvec invariant while leaving OrdinalDB's `u64` document IDs as a
 caller-owned sidecar. Do not encode `ids.bin` as `RowIdentity::Jsonl`: v1 JSONL
 row identity is UUID-oriented (`id_kind = "uuid"`), and generic row-map ID
-formats are intentionally deferred.
+formats are intentionally deferred. The reserved `row_identity.db` metadata
+block is rejected in v1 because it is not byte-bound or path-checked.
 
 The unified JSON report carries per-sidecar audit fields. A successful
 auxiliary artifact verification includes the manifest path, resolved/canonical

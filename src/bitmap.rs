@@ -234,6 +234,7 @@ impl Bitmap {
     /// cheap relative to the cost it saves at M ≥ 1000.
     #[must_use = "this scans the corpus to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
+        assert_eq!(q.len(), self.dim);
         assert_all_finite(q);
         let m_eff = m.min(self.n_vectors);
         if m_eff == 0 {

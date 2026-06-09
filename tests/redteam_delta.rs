@@ -539,6 +539,22 @@ fn delta_c4_subset_dup_plus_oob_still_rejected() {
     let _ = idx.search_asymmetric_subset(&query, &[5, 999, 5], 3);
 }
 
+/// DELTA-C5: duplicate ids are accepted, but a candidate list longer than the
+/// corpus is not. This caps scratch-gather size for adversarial duplicate-heavy
+/// lists while still allowing repeated ids within a bounded candidate budget.
+#[test]
+#[should_panic(expected = "candidate list length")]
+fn delta_c5_subset_duplicate_overrun_list_rejected() {
+    let dim = 64;
+    let n = 2;
+    let corpus = make_corpus(8451, n, dim);
+    let mut idx = RankQuant::new(dim, 2);
+    idx.add(&corpus);
+    let query = make_corpus(8452, 1, dim);
+
+    let _ = idx.search_asymmetric_subset(&query, &[0, 0, 0], 3);
+}
+
 // =====================================================================
 // DELTA-D — empty-index / empty-input search paths.
 // =====================================================================

@@ -8,9 +8,10 @@
 > push.
 
 `ordvec` (the Rust crate), `ordvec-manifest` (the lockstep manifest verifier
-crate), and `ordvec` on PyPI (the PyO3 wheel built from `ordvec-python/`) are
-released by **pushing a `vMAJOR.MINOR.PATCH` tag** to a commit on `main`. The
-release workflow handles build, canonical Python artifact selection,
+crate), `ordvec` on PyPI (the PyO3 wheel built from `ordvec-python/`), and
+`ordvec-manifest` on PyPI (the PyO3 wheel built from
+`ordvec-manifest-python/`) are released by **pushing a `vMAJOR.MINOR.PATCH` tag**
+to current `main` HEAD. The release workflow handles build, canonical Python artifact selection,
 attestation, SLSA provenance, Release-asset attach, and un-draft automatically;
 only the registry environment approvals are manual.
 
@@ -21,13 +22,13 @@ The unified `release.yml`:
 - triggers on **tag push** (`v[0-9]*.[0-9]*.[0-9]*`); a strict-SemVer guard
   step rejects pre-release / leading-zero / non-SemVer tags so they wake the
   workflow but skip every job below the gate;
-- runs a **`require-ci-green`** gate confirming the per-commit CI is green on
-  `main` for the tagged SHA — `ci.yml`, `python.yml`, `fuzz.yml`, `codeql.yml`,
-  `actionlint.yml`, `zizmor.yml`
-  (a *successful* run for that exact SHA on `main`);
+- runs a **`require-ci-green`** gate confirming the tag points at current `main`
+  HEAD and that per-commit CI is green on `main` for that SHA — `ci.yml`,
+  `python.yml`, `fuzz.yml`, `codeql.yml`, `actionlint.yml`, `zizmor.yml` (a
+  *successful* run for that exact SHA on `main`);
 - publishes via **OIDC trusted publishing** (no long-lived crates.io / PyPI
-  tokens in the repo) for both Rust crates and the Python distribution;
-- canonicalizes the Python dist before attestation and release upload: for a
+  tokens in the repo) for both Rust crates and both Python distributions;
+- canonicalizes each Python dist before attestation and release upload: for a
   new PyPI version it uses the current run's wheels/sdist; if PyPI already owns
   that immutable version during recovery, it downloads the exact PyPI-served
   files, verifies their SHA-256 digests from PyPI JSON, and uses those bytes as
@@ -69,7 +70,7 @@ The unified `release.yml`:
   `cargo package -p ordvec-manifest --locked` and byte-compares that output to
   the attested artifact before minting its own OIDC token;
 - **un-drafts the GitHub Release ONLY after `publish-crate`,
-  `publish-manifest-crate`, AND `publish-pypi` succeed**
+  `publish-manifest-crate`, `publish-pypi`, AND `publish-manifest-pypi` succeed**
   (`publish-github-release` is the sole un-draft point). If any publish fails
   or is skipped, the Release stays DRAFT — no public Release ever exists for a
   version the registries refused;
@@ -116,7 +117,10 @@ filename. Until a record is updated, the corresponding gated publish fails
   requires an initial owner bootstrap before a new crate's Trusted Publisher can
   be configured, do that explicit maintainer-approved bootstrap before tagging.
 - **PyPI** → `ordvec` → Publishing → GitHub publisher: `workflow = release.yml`,
-  `environment = pypi`.
+  `environment = pypi`, project URL `https://pypi.org/p/ordvec`.
+- **PyPI** → `ordvec-manifest` → Publishing → GitHub publisher:
+  `workflow = release.yml`, `environment = pypi`, project URL
+  `https://pypi.org/p/ordvec-manifest`.
 
 ### Tag and branch protection
 
@@ -188,7 +192,7 @@ filename. Until a record is updated, the corresponding gated publish fails
    and accept only the stable release tag pattern. Separately verify the
    registry Trusted Publisher records by hand: crates.io must point both
    `ordvec` and `ordvec-manifest` to `release.yml` / `crates-io`, and PyPI must
-   point `ordvec` to `release.yml` / `pypi`.
+   point both `ordvec` and `ordvec-manifest` to `release.yml` / `pypi`.
 6. Get the maintainer's explicit go to publish.
 7. Push the version tag from `main` (signed):
 
@@ -198,18 +202,20 @@ filename. Until a record is updated, the corresponding gated publish fails
    ```
 
    `release.yml` triggers automatically. It builds the core `.crate`, wheels,
-   and sdist; selects the canonical Python dist (current build for a new PyPI
-   version, verified PyPI bytes for an existing immutable version); attests the
-   files this run can honestly attest (GitHub attestation store +
+   and sdist for both Python packages; selects the canonical Python dists
+   (current build for a new PyPI version, verified PyPI bytes for an existing
+   immutable version); attests the files this run can honestly attest (GitHub
+   attestation store +
    `*.sigstore.json`); generates SLSA `*.intoto.jsonl`; and stages the core and
    Python assets on the GitHub Release — **as a DRAFT**. After `publish-crate`
    succeeds, it builds, attests, generates SLSA provenance for, and stages the
    lockstep `ordvec-manifest` `.crate`, then pauses at the manifest registry
    environment gate.
 8. **Approve each publish environment pause** in the Actions UI. There are
-   three registry publish jobs: `publish-crate`, `publish-manifest-crate`, and
-   `publish-pypi`. The two crates.io jobs use the same `crates-io` environment
-   and may require separate approvals; PyPI uses the `pypi` environment.
+   four registry publish jobs: `publish-crate`, `publish-manifest-crate`,
+   `publish-pypi`, and `publish-manifest-pypi`. The two crates.io jobs use the
+   same `crates-io` environment and may require separate approvals; the two PyPI
+   jobs use the `pypi` environment and may also require separate approvals.
    Required-reviewer approval is what authorises each registry push.
    - `publish-crate` and `publish-manifest-crate` first sha256-compare their
      repackaged `.crate` to the SLSA-attested artifact — if either diverges
@@ -219,10 +225,11 @@ filename. Until a record is updated, the corresponding gated publish fails
      un-drafts the GitHub Release automatically. If one gate fails, the Release
      stays DRAFT — investigate and re-run from a fixed workflow rather than
      approving another registry into a partial state.
-   - `publish-pypi` either uploads the fresh canonical dist or, if PyPI already
-     serves that version, skips upload and verifies the existing files. In both
-     modes it compares every PyPI-served wheel/sdist SHA-256 digest against the
-     canonical `dist/` files before the GitHub Release can un-draft.
+   - `publish-pypi` and `publish-manifest-pypi` either upload their fresh
+     canonical dist or, if PyPI already serves that version, skip upload and
+     verify the existing files. In both modes they compare every PyPI-served
+     wheel/sdist SHA-256 digest against the canonical `dist/` files before the
+     GitHub Release can un-draft.
 9. Verify each published artifact and its provenance:
    - crates.io / docs.rs for `ordvec` and `ordvec-manifest`;
    - PyPI (confirm the post-publish hash-verification log, optionally

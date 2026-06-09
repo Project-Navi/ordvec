@@ -379,6 +379,7 @@ fn validate_manifest_shape(
         path,
         sha256,
         id_kind,
+        db,
         ..
     } = &manifest.row_identity
     {
@@ -398,6 +399,12 @@ fn validate_manifest_shape(
             report.error(
                 "row_identity_id_kind_unsupported",
                 "row_identity.id_kind must be uuid in v1",
+            );
+        }
+        if db.is_some() {
+            report.error(
+                "row_identity_db_unsupported",
+                "row_identity.db is reserved for a future schema and is not verified in v1",
             );
         }
     }
@@ -1839,7 +1846,9 @@ fn expected_profile_shape(
         ProfileParameterization::MarginalTopKFrequency => Some(vec![ordinalization.dim()]),
         ProfileParameterization::SignFrequency => Some(vec![ordinalization.dim()]),
         ProfileParameterization::BucketFrequency => match ordinalization {
-            CalibrationOrdinalization::Bucket { dim, bits } => Some(vec![*dim, 1usize << *bits]),
+            CalibrationOrdinalization::Bucket { dim, bits } if matches!(*bits, 1 | 2 | 4) => {
+                Some(vec![*dim, 1usize << *bits])
+            }
             _ => None,
         },
         ProfileParameterization::RankPositionFrequency => {
@@ -3790,7 +3799,9 @@ fn validate_row_id_string(
     limits: &ResourceLimits,
     errors: &mut Vec<ReportIssue>,
 ) {
+    let mut structurally_invalid = false;
     if value.is_empty() {
+        structurally_invalid = true;
         push_report_issue_bounded(
             errors,
             limits,
@@ -3799,11 +3810,20 @@ fn validate_row_id_string(
         );
     }
     if value.contains('\0') {
+        structurally_invalid = true;
         push_report_issue_bounded(
             errors,
             limits,
             format!("row_identity_{field}_contains_nul"),
             format!("line {line_idx} {field} contains NUL"),
+        );
+    }
+    if !structurally_invalid && Uuid::parse_str(value).is_err() {
+        push_report_issue_bounded(
+            errors,
+            limits,
+            format!("row_identity_{field}_invalid_uuid"),
+            format!("line {line_idx} {field} must be a UUID because row_identity.id_kind is uuid"),
         );
     }
 }

@@ -37,6 +37,14 @@ fn bitmap_top_m_candidates_rejects_nan() {
 }
 
 #[test]
+#[should_panic]
+fn bitmap_top_m_candidates_zero_m_validates_query_len() {
+    let idx = Bitmap::new(D, D / 4);
+    let q = vec![0.1f32; D - 1];
+    let _ = idx.top_m_candidates(&q, 0);
+}
+
+#[test]
 #[should_panic(expected = "non-finite")]
 fn sign_bitmap_build_query_rejects_neg_inf() {
     let idx = SignBitmap::new(D);
@@ -73,4 +81,22 @@ fn bitmap_build_query_bitmap_fp32_rejects_nan() {
     let mut q = vec![0.1f32; D];
     q[0] = f32::NAN;
     let _ = idx.build_query_bitmap_fp32(&q);
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn sign_bitmap_top_m_candidates_zero_m_rejects_nan() {
+    let idx = SignBitmap::new(D);
+    let mut q = vec![0.1f32; D];
+    q[0] = f32::NAN;
+    let _ = idx.top_m_candidates(&q, 0);
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn sign_bitmap_batched_zero_m_rejects_nan() {
+    let idx = SignBitmap::new(D);
+    let mut queries = vec![0.1f32; D * 2];
+    queries[D] = f32::NAN;
+    let _ = idx.top_m_candidates_batched(&queries, 0);
 }

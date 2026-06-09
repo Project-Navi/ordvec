@@ -1496,6 +1496,42 @@ fn calibration_encoder_identity_must_match_embedding() {
 }
 
 #[test]
+fn calibration_invalid_bucket_bits_reports_without_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let case = tempfile::tempdir_in(temp.path()).unwrap();
+    let index = write_index_kind(case.path(), FixtureKind::RankQuant);
+    let manifest_path = case.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    let profile_hash = write_profile(
+        &case.path().join("bucket.f64"),
+        manifest.artifact.dim * std::mem::size_of::<f64>(),
+    );
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "bucket.f64",
+        profile_hash,
+        CalibrationOrdinalization::Bucket {
+            dim: manifest.artifact.dim,
+            bits: 255,
+        },
+        ProfileParameterization::BucketFrequency,
+        vec![manifest.artifact.dim, 1],
+    ));
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_manifest_with_base(manifest, case.path(), VerifyOptions::default())
+    }))
+    .expect("invalid bucket bits must report errors instead of panicking");
+    assert!(error_codes(&report).contains(&"calibration_ordinalization_artifact_mismatch"));
+}
+
+#[test]
 fn calibration_ordinalization_matches_artifact_formats() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -2360,6 +2396,66 @@ fn jsonl_row_identity_is_strict_and_duplicate_ids_need_opt_in() {
 }
 
 #[test]
+fn jsonl_row_identity_rejects_non_uuid_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 2);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(&rows, &[("doc-a", None), ("doc-b", Some("doc-a"))]);
+    let row_hash = sha256_file(&rows).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: row_hash.sha256,
+        row_count: 2,
+        id_kind: "uuid".to_string(),
+        db: None,
+    };
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    let codes = error_codes(&report);
+    assert!(codes.contains(&"row_identity_db_id_invalid_uuid"));
+    assert!(codes.contains(&"row_identity_parent_id_invalid_uuid"));
+}
+
+#[test]
+fn jsonl_row_identity_rejects_reserved_db_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 1);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(&rows, &[("00000000-0000-0000-0000-000000000001", None)]);
+    let row_hash = sha256_file(&rows).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: row_hash.sha256,
+        row_count: 1,
+        id_kind: "uuid".to_string(),
+        db: Some(ordvec_manifest::RowIdentityDb {
+            path: Some("/etc/passwd".to_string()),
+            table: Some("documents".to_string()),
+            id_column: Some("id".to_string()),
+        }),
+    };
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"row_identity_db_unsupported"));
+}
+
+#[test]
 fn auxiliary_artifacts_verify_and_report_deterministically() {
     let root = tempfile::tempdir().unwrap();
     let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
@@ -2929,6 +3025,56 @@ fn verify_index_manifest_uses_explicit_index_override() {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_refuses_to_migrate_unknown_verification_reports_table() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("foreign.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("CREATE TABLE verification_reports(id INTEGER)", [])
+        .unwrap();
+    drop(conn);
+
+    let err = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("unsupported verification_reports schema"));
+
+    let conn = Connection::open(&db).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(verification_reports)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(columns, vec!["id"]);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
     use rusqlite::Connection;
     use std::fs::OpenOptions;
@@ -3076,7 +3222,16 @@ fn sqlite_combined_verified_load_matrix_respects_limits_paths_and_cache() {
 
     let index = write_index_kind(&assets, FixtureKind::RankQuant);
     let row_map_path = assets.join("rows.jsonl");
-    write_row_map(&row_map_path, &[("doc-a", None), ("doc-b", Some("doc-a"))]);
+    write_row_map(
+        &row_map_path,
+        &[
+            ("00000000-0000-0000-0000-000000000001", None),
+            (
+                "00000000-0000-0000-0000-000000000002",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+        ],
+    );
     let required_path = assets.join("required-sidecar.json");
     fs::write(&required_path, b"{\"required\":true}\n").unwrap();
     let required_hash = sha256_file(&required_path).unwrap();

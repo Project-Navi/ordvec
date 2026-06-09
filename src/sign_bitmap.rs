@@ -158,6 +158,8 @@ impl SignBitmap {
     /// [`crate::Bitmap::top_m_candidates`].
     #[must_use = "this scans the corpus to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
+        assert_eq!(q.len(), self.dim);
+        crate::util::assert_all_finite(q);
         let m_eff = m.min(self.n_vectors);
         if m_eff == 0 {
             return Vec::new();
@@ -194,6 +196,7 @@ impl SignBitmap {
         let dim = self.dim;
         let batch = queries.len() / dim;
         assert_eq!(queries.len(), batch * dim);
+        crate::util::assert_all_finite(queries);
         let m_eff = m.min(self.n_vectors);
         if batch == 0 || m_eff == 0 {
             return vec![Vec::new(); batch];

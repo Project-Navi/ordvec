@@ -685,20 +685,44 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sqlite_err)?;
-    Ok(!columns.iter().any(|column| column == "report_id")
-        || !columns.iter().any(|column| column == "manifest_sha256")
-        || !columns
-            .iter()
-            .any(|column| column == "manifest_location_sha256")
-        || !columns
-            .iter()
-            .any(|column| column == "calibration_profile_sha256")
-        || !columns
-            .iter()
-            .any(|column| column == "auxiliary_artifacts_sha256")
-        || !columns
-            .iter()
-            .any(|column| column == "encoder_distortion_profile_sha256"))
+    let current_required = [
+        "report_id",
+        "manifest_id",
+        "manifest_path",
+        "checked_at",
+        "ok",
+        "manifest_location_sha256",
+        "manifest_sha256",
+        "options_sha256",
+        "artifact_sha256",
+        "row_identity_sha256",
+        "calibration_profile_sha256",
+        "auxiliary_artifacts_sha256",
+        "encoder_distortion_profile_sha256",
+        "report_json",
+    ];
+    if current_required
+        .iter()
+        .all(|required| columns.iter().any(|column| column == required))
+    {
+        return Ok(false);
+    }
+
+    let legacy_schema = [
+        "manifest_id",
+        "manifest_path",
+        "checked_at",
+        "ok",
+        "report_json",
+    ];
+    if columns.iter().map(String::as_str).eq(legacy_schema) {
+        return Ok(true);
+    }
+
+    Err(ManifestError::invalid(format!(
+        "unsupported verification_reports schema {:?}; refusing destructive migration",
+        columns
+    )))
 }
 
 fn sqlite_err(err: rusqlite::Error) -> ManifestError {

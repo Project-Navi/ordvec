@@ -108,7 +108,9 @@ OrdinalDB v0.1 should use `row_id_identity` for the ordvec vector row count and
 declare `ids.bin` as required auxiliary artifact name `ordinaldb.ids`. The
 OrdinalDB `u64` IDs remain caller-owned sidecar bytes. Do not model `ids.bin`
 as JSONL row identity: v1 JSONL row identity is UUID-only, and generic row-map
-ID formats are deferred until there is a separate schema contract for them.
+ID formats are deferred until there is a separate schema contract for them. The
+reserved `row_identity.db` block is rejected in v1 because it is not byte-bound
+or path-checked.
 
 When present, `encoder_distortion` records a scoped encoder geometry profile:
 source metric, embedding metric, lower/upper distortion-style bounds when
