@@ -46,6 +46,67 @@ def test_search_shape():
     assert indices.shape == (4, 10)
 
 
+def test_search_subset_matches_full_when_candidates_eq_all():
+    vectors = unit_vectors(40, 128, seed=0)
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(vectors)
+
+    query = unit_vectors(1, 128, seed=99)[0]
+    candidates = np.arange(40, dtype=np.uint32)
+    subset_scores, subset_ids = idx.search_subset(query, candidates, k=10)
+
+    full_scores, full_ids = idx.search(query[None, :], k=10)
+    np.testing.assert_array_equal(subset_ids, full_ids[0])
+    np.testing.assert_array_equal(subset_scores, full_scores[0])
+
+
+def test_search_subset_allows_unsorted_duplicates_and_ties_by_row_id():
+    vectors = np.ones((12, 64), dtype=np.float32)
+    idx = Bitmap(dim=64, n_top=16)
+    idx.add(vectors)
+
+    scores, ids = idx.search_subset(
+        np.zeros(64, dtype=np.float32),
+        np.array([9, 3, 3, 1], dtype=np.uint32),
+        k=3,
+    )
+
+    np.testing.assert_array_equal(ids, np.array([1, 3, 3], dtype=np.int64))
+    assert scores.dtype == np.float32
+    np.testing.assert_array_equal(scores, np.full(3, scores[0], dtype=np.float32))
+
+
+def test_search_subset_validates_doc_ids():
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(unit_vectors(10, 128))
+    q = unit_vectors(1, 128, seed=1)[0]
+
+    with pytest.raises(IndexError):
+        idx.search_subset(q, np.array([0, 99], dtype=np.uint32), k=2)
+    with pytest.raises(ValueError, match="out of range"):
+        idx.search_subset(q, np.array([-1], dtype=np.int64), k=1)
+    with pytest.raises(TypeError, match="integer"):
+        idx.search_subset(q, np.array([0.0], dtype=np.float32), k=1)
+    with pytest.raises(ValueError, match="finite"):
+        idx.search_subset(np.full(128, np.nan, dtype=np.float32), np.array([0]), k=1)
+    with pytest.raises(ValueError, match="dim"):
+        idx.search_subset(np.zeros(64, dtype=np.float32), np.array([0]), k=1)
+
+
+def test_search_subset_accepts_strided_int64_doc_ids_and_caps_k():
+    vectors = unit_vectors(10, 128, seed=2)
+    idx = Bitmap(dim=128, n_top=32)
+    idx.add(vectors)
+    q = unit_vectors(1, 128, seed=3)[0]
+
+    doc_ids = np.arange(10, dtype=np.int64)[::2]
+    scores, ids = idx.search_subset(q, doc_ids, k=99)
+
+    assert scores.shape == (5,)
+    assert ids.shape == (5,)
+    assert set(ids.tolist()).issubset(set(doc_ids.tolist()))
+
+
 def test_top_m_candidates_shape_and_dtype():
     idx = Bitmap(dim=128, n_top=32)
     idx.add(unit_vectors(50, 128))

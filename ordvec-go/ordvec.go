@@ -70,6 +70,13 @@ const (
 	KindBitmap    Kind = C.ORDVEC_INDEX_KIND_BITMAP
 )
 
+const (
+	CapFullSearch    uint64 = C.ORDVEC_CAP_FULL_SEARCH
+	CapSubsetSearch  uint64 = C.ORDVEC_CAP_SUBSET_SEARCH
+	CapStats         uint64 = C.ORDVEC_CAP_STATS
+	CapIDEqualsRowID uint64 = C.ORDVEC_CAP_ID_EQUALS_ROW_ID
+)
+
 var ErrClosed = errors.New("ordvec: index closed")
 
 type StatusError struct {
@@ -172,6 +179,24 @@ func callStatus(fn func() C.ordvec_status_t) error {
 	return statusError(st)
 }
 
+func Probe(path string) (Info, error) {
+	if strings.IndexByte(path, 0) >= 0 {
+		return Info{}, errors.New("ordvec: path contains null byte")
+	}
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+
+	var ci C.ordvec_index_info_t
+	C.ordvec_index_info_init(&ci)
+	err := callStatus(func() C.ordvec_status_t {
+		return C.ordvec_index_probe(cpath, 0, &ci)
+	})
+	if err != nil {
+		return Info{}, err
+	}
+	return infoFromC(ci), nil
+}
+
 func Load(path string) (*Index, error) {
 	if strings.IndexByte(path, 0) >= 0 {
 		return nil, errors.New("ordvec: path contains null byte")
@@ -232,6 +257,10 @@ func (idx *Index) infoLocked() (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
+	return infoFromC(ci), nil
+}
+
+func infoFromC(ci C.ordvec_index_info_t) Info {
 	return Info{
 		Kind:                Kind(ci.kind),
 		FormatVersion:       uint32(ci.format_version),
@@ -242,7 +271,7 @@ func (idx *Index) infoLocked() (Info, error) {
 		BytesPerVec:         uint64(ci.bytes_per_vec),
 		SourceFileSizeBytes: uint64(ci.source_file_size_bytes),
 		Capabilities:        uint64(ci.capabilities),
-	}, nil
+	}
 }
 
 func (idx *Index) Search(query []float32, k uint64, opts *SearchOptions) ([]Hit, Stats, error) {

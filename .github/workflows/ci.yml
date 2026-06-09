@@ -84,7 +84,7 @@ jobs:
       - name: install cbindgen
         env:
           RUSTFLAGS: ""
-        run: cargo install cbindgen --version 0.29.2 --locked
+        run: cargo install cbindgen --version 0.29.3 --locked
       - name: cbindgen --verify
         run: cbindgen ordvec-ffi --config ordvec-ffi/cbindgen.toml --output ordvec-ffi/include/ordvec.h --verify
       - name: cargo build -p ordvec-ffi

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::ptr;
 use std::time::Instant;
 
-use ordvec::{Bitmap, RankQuant};
+use ordvec::{probe_index_metadata, Bitmap, IndexKind, IndexMetadata, IndexParams, RankQuant};
 
 pub type ordvec_status_t = u32;
 pub type ordvec_index_kind_t = u32;
@@ -362,6 +362,38 @@ fn info_for_handle(handle: &IndexHandle) -> ordvec_index_info_t {
     info
 }
 
+fn info_for_metadata(meta: &IndexMetadata) -> Result<ordvec_index_info_t, FfiError> {
+    let mut info = default_info();
+    info.kind =
+        match meta.kind {
+            IndexKind::RankQuant => ORDVEC_INDEX_KIND_RANK_QUANT,
+            IndexKind::Bitmap => ORDVEC_INDEX_KIND_BITMAP,
+            IndexKind::Rank | IndexKind::SignBitmap => return Err(FfiError::new(
+                ORDVEC_STATUS_UNSUPPORTED_FORMAT,
+                "ABI v1 supports metadata probes only for TVRQ RankQuant and TVBM Bitmap indexes",
+            )),
+        };
+    info.format_version = u32::from(meta.format_version);
+    info.dim = meta.dim as u64;
+    info.vector_count = meta.vector_count as u64;
+    info.bytes_per_vec = meta.bytes_per_vec as u64;
+    info.source_file_size_bytes = meta.file_size_bytes;
+    match meta.params {
+        IndexParams::RankQuant { bits } => {
+            info.bit_width = u32::from(bits);
+        }
+        IndexParams::Bitmap { n_top } => {
+            info.n_top = n_top as u32;
+        }
+        IndexParams::Rank | IndexParams::SignBitmap => {}
+    }
+    info.capabilities = ORDVEC_CAP_FULL_SEARCH
+        | ORDVEC_CAP_SUBSET_SEARCH
+        | ORDVEC_CAP_STATS
+        | ORDVEC_CAP_ID_EQUALS_ROW_ID;
+    Ok(info)
+}
+
 fn copy_hits(scores: &[f32], indices: &[i64], hits_out: *mut ordvec_hit_t) {
     debug_assert_eq!(scores.len(), indices.len());
     for (slot, (&score, &row)) in scores.iter().zip(indices).enumerate() {
@@ -643,8 +675,8 @@ pub unsafe extern "C" fn ordvec_search_stats_init(stats: *mut ordvec_search_stat
 ///
 /// # Safety
 ///
-/// `path` must be a non-null, NUL-terminated C string. `out` must be non-null
-/// and point to writable memory for one `ordvec_index_t *`.
+/// `path` must be a non-null, NUL-terminated, valid UTF-8 C string. `out`
+/// must be non-null and point to writable memory for one `ordvec_index_t *`.
 pub unsafe extern "C" fn ordvec_index_load(
     path: *const c_char,
     flags: u64,
@@ -715,6 +747,70 @@ pub unsafe extern "C" fn ordvec_index_load(
         // SAFETY: out is non-null and writable; ownership moves to the caller.
         unsafe {
             *out = Box::into_raw(handle) as *mut ordvec_index_t;
+        }
+        Ok(())
+    })
+}
+
+#[no_mangle]
+/// Probe on-disk metadata for a `.tvrq` RankQuant or `.tvbm` Bitmap index
+/// without loading payload rows into an index handle.
+///
+/// This validates the fixed header, declared dimensions, payload byte count,
+/// and exact file length. Full row-invariant validation remains the job of
+/// `ordvec_index_load`.
+///
+/// # Safety
+///
+/// `path` must be a non-null, NUL-terminated, valid UTF-8 C string. `info_out`
+/// must be non-null, initialized with `ordvec_index_info_init`, and point to
+/// writable memory for `ordvec_index_info_t`.
+pub unsafe extern "C" fn ordvec_index_probe(
+    path: *const c_char,
+    flags: u64,
+    info_out: *mut ordvec_index_info_t,
+) -> ordvec_status_t {
+    ffi_boundary(|| {
+        if path.is_null() {
+            return Err(FfiError::new(
+                ORDVEC_STATUS_NULL_POINTER,
+                "path pointer is NULL",
+            ));
+        }
+        if info_out.is_null() {
+            return Err(FfiError::new(
+                ORDVEC_STATUS_NULL_POINTER,
+                "info_out pointer is NULL",
+            ));
+        }
+        if flags != 0 {
+            return Err(FfiError::new(
+                ORDVEC_STATUS_BAD_ARGUMENT,
+                format!("unknown probe flags: {flags}"),
+            ));
+        }
+        // SAFETY: info_out is non-null; read only the leading struct_size
+        // field before overwriting the full output struct.
+        let info_size = unsafe { ptr::addr_of!((*info_out).struct_size).read() };
+        check_exact_size(
+            info_size,
+            std::mem::size_of::<ordvec_index_info_t>(),
+            "ordvec_index_info_t",
+        )?;
+        // SAFETY: path is a non-null NUL-terminated C string by caller contract.
+        let path = unsafe { CStr::from_ptr(path) };
+        let path = path.to_str().map_err(|_| {
+            FfiError::new(
+                ORDVEC_STATUS_BAD_ARGUMENT,
+                "path must be valid UTF-8 in ABI v1",
+            )
+        })?;
+        let meta =
+            probe_index_metadata(path).map_err(|err| io_to_ffi(err, "probe index metadata"))?;
+        let info = info_for_metadata(&meta)?;
+        // SAFETY: info_out is non-null and points to writable output storage.
+        unsafe {
+            ptr::write(info_out, info);
         }
         Ok(())
     })
@@ -954,6 +1050,32 @@ mod tests {
             );
             ordvec_index_free(handle);
             ordvec_index_free(ptr::null_mut());
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn probe_rankquant_metadata_without_loading() {
+        let path = make_rankquant_fixture();
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        unsafe {
+            let mut info = default_info();
+            assert_eq!(
+                ordvec_index_probe(cpath.as_ptr(), 0, &mut info),
+                ORDVEC_STATUS_OK
+            );
+            assert_eq!(info.kind, ORDVEC_INDEX_KIND_RANK_QUANT);
+            assert_eq!(info.format_version, 1);
+            assert_eq!(info.dim, 16);
+            assert_eq!(info.bit_width, 2);
+            assert_eq!(info.n_top, 0);
+            assert_eq!(info.vector_count, 4);
+            assert_eq!(info.bytes_per_vec, 4);
+            assert!(info.source_file_size_bytes > 0);
+            assert_eq!(
+                info.capabilities & ORDVEC_CAP_SUBSET_SEARCH,
+                ORDVEC_CAP_SUBSET_SEARCH
+            );
         }
         std::fs::remove_file(path).ok();
     }

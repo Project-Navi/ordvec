@@ -108,19 +108,27 @@ fn c_program_links_and_runs_against_static_library() {
 #include "ordvec.h"
 
 int main(void) {{
-    ordvec_index_t *idx = 0;
-    ordvec_status_t st = ordvec_index_load({fixture}, 0, &idx);
+    ordvec_index_info_t probed;
+    ordvec_index_info_init(&probed);
+    ordvec_status_t st = ordvec_index_probe({fixture}, 0, &probed);
     if (st != ORDVEC_STATUS_OK) return 1;
+    if (probed.kind != ORDVEC_INDEX_KIND_RANK_QUANT || probed.dim != 16 || probed.vector_count != 4) {{
+        return 2;
+    }}
+
+    ordvec_index_t *idx = 0;
+    st = ordvec_index_load({fixture}, 0, &idx);
+    if (st != ORDVEC_STATUS_OK) return 3;
 
     ordvec_index_info_t info;
     ordvec_index_info_init(&info);
     if (ordvec_index_info(idx, &info) != ORDVEC_STATUS_OK) {{
         ordvec_index_free(idx);
-        return 2;
+        return 4;
     }}
     if (info.kind != ORDVEC_INDEX_KIND_RANK_QUANT || info.dim != 16 || info.vector_count != 4) {{
         ordvec_index_free(idx);
-        return 3;
+        return 5;
     }}
 
     float q[16] = {{0}};
@@ -137,9 +145,9 @@ int main(void) {{
 
     st = ordvec_index_search(idx, &p, hits, 2, &returned, &stats);
     ordvec_index_free(idx);
-    if (st != ORDVEC_STATUS_OK) return 4;
-    if (returned > 2) return 5;
-    if (stats.returned_count != returned) return 6;
+    if (st != ORDVEC_STATUS_OK) return 6;
+    if (returned > 2) return 7;
+    if (stats.returned_count != returned) return 8;
     return 0;
 }}
 "#,

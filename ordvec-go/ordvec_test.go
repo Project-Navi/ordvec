@@ -101,6 +101,10 @@ func TestLoadInfoSearchRankQuant(t *testing.T) {
 	if info.Kind != KindRankQuant || info.Dim != 16 || info.BitWidth != 2 || info.VectorCount != 4 {
 		t.Fatalf("unexpected info: %+v", info)
 	}
+	wantCaps := CapFullSearch | CapSubsetSearch | CapStats | CapIDEqualsRowID
+	if info.Capabilities&wantCaps != wantCaps {
+		t.Fatalf("missing capabilities: got %#x want all %#x", info.Capabilities, wantCaps)
+	}
 
 	hits, stats, err := idx.Search(query16(), 2, &SearchOptions{UserTag: 99})
 	if err != nil {
@@ -114,6 +118,34 @@ func TestLoadInfoSearchRankQuant(t *testing.T) {
 	}
 	if stats.UserTag != 99 || stats.CandidateCount != 4 || stats.VectorsScored != 4 || stats.ReturnedCount != 2 {
 		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestProbeRankQuantInfo(t *testing.T) {
+	path := writeRankQuantFixture(t)
+
+	probed, err := Probe(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probed.Kind != KindRankQuant || probed.Dim != 16 || probed.BitWidth != 2 || probed.VectorCount != 4 {
+		t.Fatalf("unexpected probed info: %+v", probed)
+	}
+	if probed.BytesPerVec != 4 || probed.SourceFileSizeBytes == 0 {
+		t.Fatalf("unexpected probed byte metadata: %+v", probed)
+	}
+
+	idx, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	loaded, err := idx.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probed != loaded {
+		t.Fatalf("probe/load metadata mismatch: probe=%+v load=%+v", probed, loaded)
 	}
 }
 

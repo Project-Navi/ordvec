@@ -116,6 +116,17 @@ Search is synchronous. Caller pointers are borrowed only for the duration of
 `ordvec_index_search`; no query, candidate, hit, stats, or path pointer is
 retained after the function returns.
 
+`ordvec_index_load` takes a non-null, NUL-terminated, valid UTF-8 path string.
+Invalid UTF-8 paths return `ORDVEC_STATUS_BAD_ARGUMENT` in ABI v1.
+
+`ordvec_index_probe` is the metadata-only inspection path for C and Go callers.
+It takes the same UTF-8 path contract as `ordvec_index_load` and fills
+`ordvec_index_info_t` without returning an index handle or allocating payload
+rows. The probe validates the fixed header, declared dimensions, payload byte
+count, and exact file length. It does not validate row payload invariants;
+call `ordvec_index_load` when the caller needs a searchable handle and full
+loader validation.
+
 Rows are internal row ordinals. ABI v1 has no external ID map:
 `ordvec_hit_t.id` is always equal to `ordvec_hit_t.row_id` widened to
 `uint64_t`.

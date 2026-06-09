@@ -906,6 +906,33 @@ impl Bitmap {
         Ok((scores, indices))
     }
 
+    /// Search one query against a caller-supplied subset of document IDs.
+    ///
+    /// `doc_ids` are global row ordinals. They may be unsorted and may contain
+    /// duplicates; each entry is scored independently, so duplicate IDs can
+    /// produce duplicate hits. Results are ordered by bitmap-overlap descending,
+    /// then row ID ascending, matching the Rust core tie policy.
+    fn search_subset<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'py, PyAny>,
+        doc_ids: &Bound<'py, PyAny>,
+        k: usize,
+    ) -> PyResult<SubsetArrays<'py>> {
+        let query = as_f32_1d(query, Some(self.inner.dim()))?;
+        let q = query.as_array();
+        let q_slice = q.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "array must be C-contiguous; call np.ascontiguousarray() first",
+            )
+        })?;
+        let ids = as_u32_ids_1d(doc_ids, "doc id")?;
+        let ids_slice = ids.as_slice()?;
+        check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
+        let (scores, out_ids) = py.detach(|| self.inner.search_subset(q_slice, ids_slice, k));
+        Ok((scores.into_pyarray(py), out_ids.into_pyarray(py)))
+    }
+
     /// Return top-`m` candidate doc IDs for a single query as a 1-D `uint32`
     /// array. Used as the candidate generator for two-stage retrieval (bitmap
     /// probe → exact RankQuant rerank). This is a fixed-budget shortlist over
