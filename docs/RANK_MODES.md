@@ -427,6 +427,9 @@ serialisers living in [`src/rank_io.rs`](../src/rank_io.rs) and
 [`src/sign_bitmap.rs`](../src/sign_bitmap.rs). `RankQuant`
 additionally exposes `search_asymmetric_subset` for scoring a
 precomputed candidate set — the rerank half of the two-stage pattern.
+Candidate IDs are global row ordinals; duplicate candidates are scored as
+separate entries and can produce duplicate hits, so callers that need
+unique output rows should deduplicate candidate lists before reranking.
 
 `RankQuantFastscan` (re-exported `#[doc(hidden)]`) is an optional
 single-pass b=2 fast path; it supports `add`/`search` but not

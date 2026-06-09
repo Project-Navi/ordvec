@@ -64,7 +64,7 @@ fn assert_rankquant_result_shape_and_order(
             let prev = (scores[slot - 1], ids[slot - 1]);
             let cur = (scores[slot], ids[slot]);
             assert!(
-                cur.0 <= prev.0,
+                cur.0.total_cmp(&prev.0).is_le(),
                 "{label}: row {qi} not sorted at slots {} and {slot}",
                 slot - 1,
             );

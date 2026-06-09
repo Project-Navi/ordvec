@@ -11,7 +11,9 @@
 //! reranking agrees with a full RankQuant search.
 //!
 //! Contract: no panic, abort, or out-of-bounds access on any in-range candidate
-//! input, and full-corpus candidate reranking must match full RankQuant search.
+//! input, subset reranking must preserve score-descending/doc-ID-ascending
+//! ordering, and full-corpus candidate reranking must match full RankQuant
+//! search.
 #![no_main]
 
 use libfuzzer_sys::{
@@ -36,8 +38,9 @@ fn assert_rankquant_order(label: &str, scores: &[f32], ids: &[i64]) {
     for slot in 1..scores.len() {
         let prev = (scores[slot - 1], ids[slot - 1]);
         let cur = (scores[slot], ids[slot]);
+        let score_order = cur.0.total_cmp(&prev.0);
         assert!(
-            cur.0 <= prev.0,
+            score_order.is_lt() || score_order.is_eq(),
             "{label}: violates score-desc order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
             slot - 1,
         );

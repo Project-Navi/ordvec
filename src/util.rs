@@ -368,6 +368,11 @@ pub(crate) struct TopK {
     indices: Vec<i64>,
     tie_keys: Vec<i64>,
     tie_key_by_index: Option<Vec<i64>>,
+    /// Query-constant score offset applied before insertion/eviction.
+    ///
+    /// RankQuant SIMD asymmetric kernels can drop a per-query centre term from
+    /// the hot loop. Applying it here keeps TopK's retention key identical to
+    /// the public visible score key, including f32 rounding-collapse ties.
     score_offset: f32,
     filled: usize,
     /// Slot holding the worst kept entry under `(score asc, tie_key
@@ -451,8 +456,11 @@ impl TopK {
             // order: a higher score, or an equal score with a lower row key.
             // Full-index scans use `doc_id` as the tie key. Subset scans use
             // global row IDs while still emitting local scratch-buffer indices.
-            let better =
-                score > self.worst_val || (score == self.worst_val && tie_key < self.worst_tie_key);
+            let better = match score.total_cmp(&self.worst_val) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => tie_key < self.worst_tie_key,
+                std::cmp::Ordering::Less => false,
+            };
             if better {
                 self.scores[self.worst_pos] = score;
                 self.indices[self.worst_pos] = id;
@@ -472,7 +480,12 @@ impl TopK {
         for i in 0..self.filled {
             let s = self.scores[i];
             let tie_key = self.tie_keys[i];
-            if s < wv || (s == wv && tie_key > wt) {
+            let worse = match s.total_cmp(&wv) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Equal => tie_key > wt,
+                std::cmp::Ordering::Greater => false,
+            };
+            if worse {
                 wv = s;
                 wt = tie_key;
                 wp = i;
@@ -594,18 +607,17 @@ mod tests {
 
     #[test]
     fn topk_score_offset_is_part_of_eviction_key() {
-        let mut top = TopK::new(1);
+        let mut top = TopK::new_with_tie_keys(1, &[10, 3]);
         top.set_score_offset(16_777_216.0);
-
-        top.maybe_insert(1.0, 10);
-        top.maybe_insert(0.0, 3);
+        top.maybe_insert(1.0, 0);
+        top.maybe_insert(0.0, 1);
 
         let mut scores = [f32::NEG_INFINITY; 1];
         let mut indices = [-1; 1];
         top.finalize_into(&mut scores, &mut indices);
 
         assert_eq!(scores, [16_777_216.0]);
-        assert_eq!(indices, [3]);
+        assert_eq!(indices, [1]);
     }
 
     #[test]

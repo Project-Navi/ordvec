@@ -310,8 +310,9 @@ def test_search_asymmetric_subset_returns_global_ids():
     assert ids.dtype == np.int64
     # Self-query against a candidate set containing self → top-1 is self.
     assert int(ids[0]) == 0
-    # All returned ids are from the candidate set (or sentinel -1).
-    candidate_set = set(candidates.tolist()) | {-1}
+    # All returned ids are from the candidate set; k is capped instead of
+    # sentinel-padding unfilled slots.
+    candidate_set = set(candidates.tolist())
     for i in ids:
         assert int(i) in candidate_set
 

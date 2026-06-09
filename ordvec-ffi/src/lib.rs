@@ -873,6 +873,11 @@ pub unsafe extern "C" fn ordvec_index_free(index: *mut ordvec_index_t) {
 #[no_mangle]
 /// Run a synchronous single-query search.
 ///
+/// When `params.candidate_rows` is supplied, those IDs are global row ordinals
+/// and may be unsorted or duplicated. Duplicate candidates are scored as
+/// separate entries and can produce duplicate hits; callers that need unique
+/// output rows must deduplicate before calling.
+///
 /// # Safety
 ///
 /// `index` must be a live handle returned by `ordvec_index_load`. All non-null

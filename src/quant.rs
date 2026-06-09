@@ -524,7 +524,6 @@ impl RankQuant {
     /// to global IDs before returning). Results are ordered by score
     /// descending, then global row ID ascending, matching the full-index
     /// search tie policy even when `candidates` is unsorted.
-    ///
     /// `candidates` may contain duplicate global row IDs. Each candidate entry
     /// is scored independently, so duplicate IDs may produce duplicate returned
     /// global IDs. Callers that require unique hits should deduplicate the

@@ -9,8 +9,8 @@
 //! huge value. Invalid dimensions, non-finite floats, and ragged vector lengths
 //! are caller contract violations, so this target avoids them and treats any
 //! panic as a compute-path bug. Assertions stay structural: shape, finite
-//! scores, valid doc IDs, score-descending rows, and repeat determinism in one
-//! process.
+//! scores, valid doc IDs, score-descending/doc-ID-ascending rows, and repeat
+//! determinism in one process.
 #![no_main]
 
 use libfuzzer_sys::{
@@ -105,20 +105,20 @@ fn assert_results(label: &str, res: &SearchResults, nq: usize, k_eff: usize, n: 
                 "{label}: doc id {id} out of range for n={n} at query {qi} slot {slot}",
             );
         }
-        for slot in 1..k_eff {
-            let prev = (scores[slot - 1], ids[slot - 1]);
-            let cur = (scores[slot], ids[slot]);
-            assert!(
-                cur.0 <= prev.0,
-                "{label}: row {qi} violates score-desc order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
-                slot - 1,
-            );
-            assert!(
-                cur.0 != prev.0 || cur.1 > prev.1,
-                "{label}: row {qi} violates id-asc tie order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
-                slot - 1,
-            );
-        }
+        assert_score_then_id_order(label, qi, scores, ids);
+    }
+}
+
+fn assert_score_then_id_order(label: &str, qi: usize, scores: &[f32], ids: &[i64]) {
+    for slot in 1..scores.len() {
+        let prev = (scores[slot - 1], ids[slot - 1]);
+        let cur = (scores[slot], ids[slot]);
+        let score_order = cur.0.total_cmp(&prev.0);
+        assert!(
+            score_order.is_lt() || (score_order.is_eq() && cur.1 > prev.1),
+            "{label}: row {qi} violates score-desc/doc-id-asc order at slots {} and {slot}",
+            slot - 1,
+        );
     }
 }
 
