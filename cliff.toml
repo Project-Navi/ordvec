@@ -61,9 +61,8 @@ commit_parsers = [
 ]
 protect_breaking_commits = true
 filter_commits = false
-# Only exact SemVer release tags count — the `^...$` anchors reject the repo's
-# archive/* and backup/* tags AND pre-releases (e.g. v0.3.0-rc.1), matching the
-# changelog workflow's stable-only trigger.
-tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+# Only exact SemVer release tags count: each segment is either `0` or a
+# non-zero-prefixed integer, matching `release.yml`'s strict guard.
+tag_pattern = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 topo_order = false
 sort_commits = "newest"
