@@ -50,6 +50,26 @@ lock mutable storage. Callers should load from the returned paths immediately on
 storage they control, or re-verify if the backing files can change between
 verification and load.
 
+Controlled-storage load pattern:
+
+```rust
+let plan = ordvec_manifest::verify_for_load(&manifest_path, options)?;
+let index = ordvec::RankQuant::load(plan.artifact_path())?;
+```
+
+Racy load pattern:
+
+```rust
+let plan = ordvec_manifest::verify_for_load(&manifest_path, options)?;
+queue_for_later(plan);
+// Another process may rewrite the artifact before the queued load runs.
+```
+
+If a manifest or artifact lives on shared, writable, or otherwise mutable
+storage, re-run `verify_for_load` immediately before loading, load from
+immutable storage, or use a caller-owned loading path that pins bytes.
+`VerifiedLoadPlan` is not a byte pin.
+
 Verification uses bounded parser/report defaults on both CLI and library paths.
 Stable limit codes are part of the contract:
 

@@ -192,6 +192,15 @@ pub fn verify_index_manifest(
     Ok(verify_manifest(&document, options))
 }
 
+/// Verifies a manifest file and returns a typed plan for caller-side loading.
+///
+/// The returned [`VerifiedLoadPlan`] is a verification snapshot: it contains
+/// canonical paths, probed metadata, row identity, auxiliary artifact states,
+/// and the full report for the bytes observed during this call. It is not a
+/// lease, file lock, mmap, open descriptor, or durable byte pin. If backing
+/// files can change between verification and load, re-verify immediately before
+/// loading, load from immutable storage, or use a caller-owned loading path that
+/// pins bytes.
 pub fn verify_for_load(
     manifest_path: impl AsRef<Path>,
     options: VerifyOptions,
@@ -200,6 +209,11 @@ pub fn verify_for_load(
     verify_document_for_load(&document, options)
 }
 
+/// Verifies an already-loaded manifest document and returns a typed load plan.
+///
+/// This has the same snapshot boundary as [`verify_for_load`]: it resolves and
+/// verifies paths at call time, but it does not pin the verified bytes against
+/// later mutation.
 pub fn verify_document_for_load(
     document: &ManifestDocument,
     options: VerifyOptions,
@@ -2733,6 +2747,12 @@ impl ManifestIndexParams {
     }
 }
 
+/// Successful verification data for a caller that will load an ordvec index.
+///
+/// A plan intentionally contains paths and report data, not file descriptors or
+/// byte buffers. Treat it as proof of the verification just performed, then load
+/// from controlled storage immediately or re-verify if another actor may have
+/// changed the files.
 #[derive(Clone, Debug)]
 pub struct VerifiedLoadPlan {
     manifest_path: Option<PathBuf>,
@@ -2799,6 +2819,11 @@ impl VerifiedLoadPlan {
         self.manifest_path.as_deref()
     }
 
+    /// Canonical path of the primary index artifact observed during verification.
+    ///
+    /// This path is not a byte pin. Loading later from mutable/shared storage can
+    /// still observe different bytes, so callers that cannot control mutation
+    /// must re-verify immediately before loading.
     pub fn artifact_path(&self) -> &Path {
         &self.artifact_path
     }
