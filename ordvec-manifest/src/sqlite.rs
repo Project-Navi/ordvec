@@ -701,21 +701,18 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         "encoder_distortion_profile_sha256",
         "report_json",
     ];
-    if current_required
-        .iter()
-        .all(|required| columns.iter().any(|column| column == required))
-    {
+    if has_required_columns(&columns, &current_required) {
         return Ok(false);
     }
 
-    let legacy_schema = [
+    let legacy_required = [
         "manifest_id",
         "manifest_path",
         "checked_at",
         "ok",
         "report_json",
     ];
-    if columns.iter().map(String::as_str).eq(legacy_schema) {
+    if has_required_columns(&columns, &legacy_required) {
         return Ok(true);
     }
 
@@ -723,6 +720,12 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         "unsupported verification_reports schema {:?}; refusing destructive migration",
         columns
     )))
+}
+
+fn has_required_columns(columns: &[String], required: &[&str]) -> bool {
+    required
+        .iter()
+        .all(|required| columns.iter().any(|column| column == required))
 }
 
 fn sqlite_err(err: rusqlite::Error) -> ManifestError {

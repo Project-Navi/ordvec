@@ -2425,6 +2425,43 @@ fn jsonl_row_identity_rejects_non_uuid_ids() {
 }
 
 #[test]
+fn jsonl_row_identity_uuid_error_message_is_v1_scoped() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_rankquant_index(temp.path(), 1);
+    let rows = temp.path().join("rows.jsonl");
+    write_row_map(&rows, &[("doc-a", None)]);
+    let row_hash = sha256_file(&rows).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: row_hash.sha256,
+        row_count: 1,
+        id_kind: "u64".to_string(),
+        db: None,
+    };
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    let codes = error_codes(&report);
+    assert!(codes.contains(&"row_identity_id_kind_unsupported"));
+    let issue = report
+        .errors
+        .iter()
+        .find(|issue| issue.code == "row_identity_db_id_invalid_uuid")
+        .expect("non-UUID db_id should still report v1 UUID validation");
+    assert!(issue.message.contains("must be a UUID in v1"));
+    assert!(!issue
+        .message
+        .contains("because row_identity.id_kind is uuid"));
+}
+
+#[test]
 fn jsonl_row_identity_rejects_reserved_db_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_rankquant_index(temp.path(), 1);
@@ -3071,6 +3108,66 @@ fn sqlite_refuses_to_migrate_unknown_verification_reports_table() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(columns, vec!["id"]);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_migrates_legacy_verification_reports_by_required_column_names() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("legacy.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "CREATE TABLE verification_reports(
+            report_json TEXT,
+            checked_at TEXT,
+            extra TEXT,
+            ok INTEGER,
+            manifest_path TEXT,
+            manifest_id TEXT
+        )",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(verification_reports)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.contains(&"report_id".to_string()));
+    assert!(columns.contains(&"manifest_sha256".to_string()));
+    assert!(!columns.contains(&"extra".to_string()));
 }
 
 #[cfg(feature = "sqlite")]

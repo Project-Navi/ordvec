@@ -6,14 +6,15 @@
 //!
 //! The fuzzer builds both indexes over one generated finite corpus, derives a
 //! bounded structured shape for `(dim, bits, n_vectors, m, k)`, and feeds
-//! duplicate candidate IDs into the subset path. When sign candidate generation
-//! returns the full corpus (`m >= n`), the target also checks that subset
-//! reranking agrees with a full RankQuant search.
+//! duplicate candidate IDs into the subset path while preserving the public
+//! subset API's corpus-sized candidate-budget contract. When sign candidate
+//! generation returns the full corpus (`m >= n`), the target also checks that
+//! subset reranking agrees with a full RankQuant search.
 //!
-//! Contract: no panic, abort, or out-of-bounds access on any in-range candidate
-//! input, subset reranking must preserve score-descending/doc-ID-ascending
-//! ordering, and full-corpus candidate reranking must match full RankQuant
-//! search.
+//! Contract: no panic, abort, or out-of-bounds access on any bounded in-range
+//! candidate input, subset reranking must preserve score-descending/doc-ID-
+//! ascending ordering, and full-corpus candidate reranking must match full
+//! RankQuant search.
 #![no_main]
 
 use libfuzzer_sys::{
@@ -116,12 +117,15 @@ fuzz_target!(|input: TwoStageInput| {
             0 => subset_candidates.clear(),
             1 => {
                 let id = subset_candidates.first().copied().unwrap_or(0);
-                subset_candidates.push(id);
+                if subset_candidates.len() < input.n_vectors {
+                    subset_candidates.push(id);
+                }
             }
             2 if subset_candidates.is_empty() => subset_candidates.push(0),
             _ => {}
         }
     }
+    assert!(subset_candidates.len() <= input.n_vectors);
 
     let (scores, ids) =
         rankquant.search_asymmetric_subset(query, &subset_candidates, input.k);

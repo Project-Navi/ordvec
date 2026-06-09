@@ -3823,7 +3823,7 @@ fn validate_row_id_string(
             errors,
             limits,
             format!("row_identity_{field}_invalid_uuid"),
-            format!("line {line_idx} {field} must be a UUID because row_identity.id_kind is uuid"),
+            format!("line {line_idx} {field} must be a UUID in v1"),
         );
     }
 }
