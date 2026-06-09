@@ -145,6 +145,9 @@ type Stats struct {
 }
 
 type SearchOptions struct {
+	// Candidates is an optional subset of global row IDs. Entries may be
+	// unsorted and may contain duplicates; duplicate entries are scored
+	// independently and can produce duplicate hits.
 	Candidates []uint32
 	UserTag    uint64
 }

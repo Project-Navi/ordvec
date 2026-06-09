@@ -338,10 +338,11 @@ impl RankQuant {
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
 
-        // For the AVX2 path we drop the per-lane centre subtract from
-        // the hot loop and add it back as a per-query constant offset
-        // to the top-k scores at finalize time. Ranking is invariant
-        // to this constant; absolute scores stay exact.
+        // The SIMD paths drop the per-lane centre subtract from the hot
+        // loop. The query-constant offset is applied inside TopK before
+        // eviction, so boundary ties use the same exposed score tuple that
+        // callers receive.
+        #[cfg(target_arch = "x86_64")]
         let centre = ((1u32 << bits) as f32 - 1.0) / 2.0;
 
         queries
@@ -351,27 +352,30 @@ impl RankQuant {
             .for_each(|((q, out_scores), out_indices)| {
                 let q_unit = l2_normalise(q);
                 let mut top = TopK::new(k_eff);
-                #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
-                let mut centre_drop_used = false;
+                #[cfg(target_arch = "x86_64")]
+                let centre_offset = {
+                    let q_sum: f32 = q_unit.iter().sum();
+                    -centre * q_sum * inv_norm
+                };
 
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
                     match (simd_tier, bits) {
                         (SimdTier::Avx512, 2) => {
+                            top.set_score_offset(centre_offset);
                             scan_b2_asym_avx512(&self.packed, n, dim, &q_unit, inv_norm, &mut top);
-                            centre_drop_used = true;
                         }
                         (SimdTier::Avx512, 4) => {
+                            top.set_score_offset(centre_offset);
                             scan_b4_asym_avx512(&self.packed, n, dim, &q_unit, inv_norm, &mut top);
-                            centre_drop_used = true;
                         }
                         (SimdTier::Avx2, 2) => {
+                            top.set_score_offset(centre_offset);
                             scan_b2_asym_avx2(&self.packed, n, dim, &q_unit, inv_norm, &mut top);
-                            centre_drop_used = true;
                         }
                         (SimdTier::Avx2, 4) => {
+                            top.set_score_offset(centre_offset);
                             scan_b4_asym_avx2(&self.packed, n, dim, &q_unit, inv_norm, &mut top);
-                            centre_drop_used = true;
                         }
                         _ => scan_via_lut_scalar(
                             &self.packed,
@@ -398,25 +402,6 @@ impl RankQuant {
                 );
 
                 top.finalize_into(out_scores, out_indices);
-
-                if centre_drop_used {
-                    // The asym kernels drop the per-lane `- centre` term from
-                    // the hot loop; it is a query-constant shift, re-applied
-                    // here. Guarded by `is_finite` so it lands only on filled
-                    // slots: when fewer than `k` docs were scored the trailing
-                    // top-k positions stay at the `f32::NEG_INFINITY` sentinel,
-                    // and `NEG_INFINITY + offset` would wrongly turn a sentinel
-                    // into a finite score. (Real scores are always finite — the
-                    // finite-input policy guarantees it — so the guard only ever
-                    // skips sentinels, never a genuine result.)
-                    let q_sum: f32 = q_unit.iter().sum();
-                    let offset = -centre * q_sum * inv_norm;
-                    for s in out_scores.iter_mut() {
-                        if s.is_finite() {
-                            *s += offset;
-                        }
-                    }
-                }
 
                 let _ = bytes_per_vec; // shape clarity
             });
@@ -540,6 +525,11 @@ impl RankQuant {
     /// descending, then global row ID ascending, matching the full-index
     /// search tie policy even when `candidates` is unsorted.
     ///
+    /// `candidates` may contain duplicate global row IDs. Each candidate entry
+    /// is scored independently, so duplicate IDs may produce duplicate returned
+    /// global IDs. Callers that require unique hits should deduplicate the
+    /// candidate list before calling this method.
+    ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just
     /// iterates over the provided candidate list instead of all `n`
@@ -585,12 +575,16 @@ impl RankQuant {
 
         let norm = rankquant_norm(dim, bits);
         let inv_norm = 1.0_f32 / norm;
+        #[cfg(target_arch = "x86_64")]
         let centre = ((1u32 << bits) as f32 - 1.0) / 2.0;
 
-        // L2-normalise the query and gather centre-correction.
+        // L2-normalise the query.
         let q_unit = l2_normalise(query);
-        let q_sum: f32 = q_unit.iter().sum();
-        let centre_offset = -centre * q_sum * inv_norm;
+        #[cfg(target_arch = "x86_64")]
+        let centre_offset = {
+            let q_sum: f32 = q_unit.iter().sum();
+            -centre * q_sum * inv_norm
+        };
 
         // Pack the candidate docs' bytes into a contiguous buffer so
         // the SIMD kernels can scan them as if they were a small dense
@@ -609,26 +603,24 @@ impl RankQuant {
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
         let mut top = TopK::new_with_tie_keys(k_eff, candidates);
-        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
-        let mut centre_drop_used = false;
         #[cfg(target_arch = "x86_64")]
         unsafe {
             match (simd_tier, bits) {
                 (SimdTier::Avx512, 2) => {
+                    top.set_score_offset(centre_offset);
                     scan_b2_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                    centre_drop_used = true;
                 }
                 (SimdTier::Avx512, 4) => {
+                    top.set_score_offset(centre_offset);
                     scan_b4_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                    centre_drop_used = true;
                 }
                 (SimdTier::Avx2, 2) => {
+                    top.set_score_offset(centre_offset);
                     scan_b2_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                    centre_drop_used = true;
                 }
                 (SimdTier::Avx2, 4) => {
+                    top.set_score_offset(centre_offset);
                     scan_b4_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                    centre_drop_used = true;
                 }
                 _ => scan_via_lut_scalar(
                     &sub_packed,
@@ -657,17 +649,6 @@ impl RankQuant {
         let mut scores = vec![f32::NEG_INFINITY; k_eff];
         let mut local_indices = vec![-1i64; k_eff];
         top.finalize_into(&mut scores, &mut local_indices);
-        if centre_drop_used {
-            // Re-apply the per-query centre shift dropped from the kernel hot
-            // loop; the `is_finite` guard skips unfilled top-k slots (still at
-            // the `f32::NEG_INFINITY` sentinel) so a sentinel never becomes a
-            // finite score. See the matching note in `search_asymmetric`.
-            for s in scores.iter_mut() {
-                if s.is_finite() {
-                    *s += centre_offset;
-                }
-            }
-        }
         // Map local → global doc IDs.
         let global_indices: Vec<i64> = local_indices
             .iter()

@@ -22,6 +22,10 @@ except ModuleNotFoundError:
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 CI_WORKFLOW_PATH = os.environ.get("CI_WORKFLOW_PATH", ".github/workflows/ci.yml")
+COVERAGE_WORKFLOW_PATH = os.environ.get("COVERAGE_WORKFLOW_PATH", ".github/workflows/coverage.yml")
+SDE_ACTION_PATH = os.environ.get(
+    "SDE_ACTION_PATH", ".github/actions/setup-intel-sde/action.yml"
+)
 
 
 def fail(message: str) -> None:
@@ -113,6 +117,16 @@ def has_need(job: dict[str, Any], needed: str) -> bool:
 
 def contains_text(value: Any, needle: str) -> bool:
     return isinstance(value, str) and needle in value
+
+
+def contains_nested_text(value: Any, needle: str) -> bool:
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(contains_nested_text(inner, needle) for inner in value.values())
+    if isinstance(value, list):
+        return any(contains_nested_text(inner, needle) for inner in value)
+    return False
 
 
 def read_text(path: str) -> str:
@@ -330,23 +344,6 @@ def shell_vars(name: str) -> set[str]:
     return {f"${name}", f"${{{name}}}"}
 
 
-def shell_curl_commands(script: str) -> list[list[str]]:
-    commands: list[list[str]] = []
-    for line in shell_logical_lines(script):
-        if "curl" not in line:
-            continue
-        if line.startswith("if "):
-            line = line[3:].strip()
-        line = line.split("; then", 1)[0].strip().rstrip(";")
-        try:
-            words = shlex.split(line)
-        except ValueError:
-            continue
-        if words and words[0] == "curl":
-            commands.append(words)
-    return commands
-
-
 def shell_logical_lines(script: str) -> list[str]:
     lines: list[str] = []
     current = ""
@@ -364,6 +361,25 @@ def shell_logical_lines(script: str) -> list[str]:
     if current:
         lines.append(current)
     return lines
+
+
+def shell_curl_commands(script: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for line in shell_logical_lines(script):
+        if "curl" not in line:
+            continue
+        if line.startswith("if "):
+            line = line[3:].strip()
+        if line.startswith("! "):
+            line = line[2:].strip()
+        line = line.split("; then", 1)[0].strip().rstrip(";")
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            continue
+        if words and words[0] == "curl":
+            commands.append(words)
+    return commands
 
 
 def has_cargo_package_arg(words: list[str], package: str) -> bool:
@@ -743,15 +759,152 @@ def check_ci_manifest_package_defer(workflow: dict[str, Any], path: str) -> None
             fail(f"{path}: deferred ordvec-manifest package check must include {fragment!r}")
 
 
+def check_sde_setup_action(path: str) -> None:
+    action = load_workflow(path)
+    runs = mapping(action.get("runs"), f"{path}: runs")
+    steps = sequence(runs.get("steps"), f"{path}: runs.steps")
+    run_scripts = []
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: runs.steps[{index}]")
+        run = step.get("run")
+        if isinstance(run, str):
+            run_scripts.append(run)
+    curl_commands = [words for run in run_scripts for words in shell_curl_commands(run)]
+    download_curl_commands = [
+        words for words in curl_commands if any(word in shell_vars("download_url") for word in words)
+    ]
+    if len(download_curl_commands) != 1:
+        fail(f"{path}: Intel SDE setup action must have exactly one curl command for $download_url")
+    download_curl = download_curl_commands[0]
+    for option in ("--connect-timeout", "--max-time", "--retry-max-time"):
+        if option not in download_curl:
+            fail(f"{path}: Intel SDE download curl must set {option} on the download command")
+    action_text = read_text(path)
+    if 'rm -f "${archive}" "${cached_archive}" || true' not in action_text:
+        fail(f"{path}: unreadable or invalid cached Intel SDE archives must be purged")
+    if "continuing without updating cache" not in action_text:
+        fail(f"{path}: Intel SDE cache population failures must be best-effort warnings")
+    required_outage_fragments = (
+        "allow-unavailable",
+        "sde-available=false",
+        "downloadmirror-challenge",
+        "x-amzn-waf-action",
+        "sha256sum -c -",
+    )
+    for fragment in required_outage_fragments:
+        if fragment not in action_text:
+            fail(f"{path}: Intel SDE outage softening must include {fragment!r}")
+
+
+def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+    job_env = mapping(job.get("env"), f"{path}: jobs.{job_name}.env")
+    if not job_env.get("SDE_VERSION"):
+        fail(f"{path}: jobs.{job_name} must define SDE_VERSION")
+    if not job_env.get("SDE_SHA256"):
+        fail(f"{path}: jobs.{job_name} must define SDE_SHA256")
+
+    steps = sequence(job.get("steps"), f"{path}: jobs.{job_name}.steps")
+    cache_steps: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    setup_steps: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        action = action_name(step)
+        if action == "actions/cache":
+            with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
+            if norm_path(with_map.get("path")) == "~/.cache/ordvec-intel-sde":
+                cache_steps.append((index, step, with_map))
+        elif action == "./.github/actions/setup-intel-sde":
+            with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
+            setup_steps.append((index, step, with_map))
+
+    if len(cache_steps) != 1:
+        fail(f"{path}: jobs.{job_name} must restore exactly one Intel SDE archive cache")
+    _, _, cache_with = cache_steps[0]
+    key = cache_with.get("key")
+    expected_key = (
+        "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
+        "${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}"
+    )
+    if key != expected_key:
+        fail(
+            f"{path}: jobs.{job_name} Intel SDE cache key must be version+sha pinned, "
+            "not action-file-hash based"
+        )
+    restore_keys = str(cache_with.get("restore-keys") or "")
+    expected_restore_key = "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
+    if expected_restore_key not in {line.strip() for line in restore_keys.splitlines()}:
+        fail(
+            f"{path}: jobs.{job_name} Intel SDE cache restore-keys must include "
+            "the runner OS/arch prefix"
+        )
+    if contains_text(key, "hashFiles") or contains_text(key, "setup-intel-sde/action.yml"):
+        fail(f"{path}: jobs.{job_name} Intel SDE cache key must not hash the action file")
+
+    if len(setup_steps) != 1:
+        fail(f"{path}: jobs.{job_name} must use exactly one setup-intel-sde action")
+    _, _, setup_with = setup_steps[0]
+    if setup_with.get("version") != "${{ env.SDE_VERSION }}":
+        fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_VERSION")
+    if setup_with.get("sha256") != "${{ env.SDE_SHA256 }}":
+        fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_SHA256")
+    if not boolish_true(setup_with.get("allow-unavailable")):
+        fail(f"{path}: jobs.{job_name} must explicitly opt into the temporary SDE outage valve")
+
+    available_if = "steps.sde.outputs.sde-available == 'true'"
+    unavailable_if = "steps.sde.outputs.sde-available != 'true'"
+    outage_notice_steps = []
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        if step.get("if") == unavailable_if and contains_text(
+            step.get("run"), "Intel SDE archive unavailable"
+        ):
+            outage_notice_steps.append(step)
+    if len(outage_notice_steps) != 1:
+        fail(f"{path}: jobs.{job_name} must emit exactly one notice when Intel SDE is unavailable")
+
+    sde_guarded_names = {
+        "Install cargo-llvm-cov (pinned)",
+        "Sanity-check AVX-512 detection under SDE",
+        "sanity-check AVX-512 detection under SDE",
+        "Generate coverage (lcov) + enforce floor",
+        "Upload coverage to Codecov",
+        "cargo test under SDE (AVX-512 kernels)",
+    }
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        name = step.get("name")
+        if (
+            name in sde_guarded_names
+            or contains_nested_text(step.get("env"), "steps.sde.outputs.sde-path")
+            or contains_text(step.get("run"), "SDE_PATH")
+        ):
+            if step.get("if") != available_if:
+                fail(
+                    f"{path}: {step_label(index, step)} must be guarded by "
+                    "steps.sde.outputs.sde-available"
+                )
+
+
+def check_sde_cache_invariants() -> None:
+    check_sde_setup_action(SDE_ACTION_PATH)
+    check_sde_cache_job(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH, "avx512")
+    check_sde_cache_job(load_workflow(COVERAGE_WORKFLOW_PATH), COVERAGE_WORKFLOW_PATH, "coverage")
+
+
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
     check_release_version_sync()
-    check_hash_requirement_temp_paths([WORKFLOW_PATH, PYTHON_WORKFLOW_PATH])
+    check_hash_requirement_temp_paths(
+        [WORKFLOW_PATH, PYTHON_WORKFLOW_PATH, CI_WORKFLOW_PATH, COVERAGE_WORKFLOW_PATH]
+    )
     check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
     check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
     check_publish_crates(workflow, WORKFLOW_PATH)
     check_ci_manifest_package_defer(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)
+    check_sde_cache_invariants()
 
 
 if __name__ == "__main__":

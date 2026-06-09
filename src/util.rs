@@ -368,6 +368,7 @@ pub(crate) struct TopK {
     indices: Vec<i64>,
     tie_keys: Vec<i64>,
     tie_key_by_index: Option<Vec<i64>>,
+    score_offset: f32,
     filled: usize,
     /// Slot holding the worst kept entry under `(score asc, tie_key
     /// desc)` — the next to be evicted.
@@ -387,6 +388,7 @@ impl TopK {
             indices: vec![-1; k],
             tie_keys: vec![i64::MAX; k],
             tie_key_by_index: None,
+            score_offset: 0.0,
             filled: 0,
             worst_pos: 0,
             worst_val: f32::INFINITY,
@@ -406,8 +408,20 @@ impl TopK {
         top
     }
 
+    /// Apply a query-constant score offset before every insertion.
+    ///
+    /// SIMD RankQuant asymmetric kernels drop the bucket-center term in the hot
+    /// loop. Applying the offset here makes eviction and final ordering use the
+    /// same exposed score tuple returned to callers.
+    #[inline]
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    pub(crate) fn set_score_offset(&mut self, score_offset: f32) {
+        self.score_offset = score_offset;
+    }
+
     #[inline]
     pub(crate) fn maybe_insert(&mut self, score: f32, idx: usize) {
+        let score = score + self.score_offset;
         // Convert the doc_id to its i64 storage form once, up front. doc_ids
         // are `< n_vectors ≤ MAX_VECTORS` (2^26) by the `add` cap, so this
         // never fails in practice; the checked conversion makes the "a doc_id
@@ -576,6 +590,22 @@ mod tests {
 
         assert_eq!(scores, [0.0, 0.0]);
         assert_eq!(indices, [0, 1]);
+    }
+
+    #[test]
+    fn topk_score_offset_is_part_of_eviction_key() {
+        let mut top = TopK::new(1);
+        top.set_score_offset(16_777_216.0);
+
+        top.maybe_insert(1.0, 10);
+        top.maybe_insert(0.0, 3);
+
+        let mut scores = [f32::NEG_INFINITY; 1];
+        let mut indices = [-1; 1];
+        top.finalize_into(&mut scores, &mut indices);
+
+        assert_eq!(scores, [16_777_216.0]);
+        assert_eq!(indices, [3]);
     }
 
     #[test]

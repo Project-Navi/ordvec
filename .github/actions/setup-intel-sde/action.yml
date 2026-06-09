@@ -14,8 +14,17 @@ inputs:
   install-dir:
     description: Absolute path, or a path relative to GITHUB_WORKSPACE, for extraction.
     default: intel-sde
+  allow-unavailable:
+    description: Return sde-available=false instead of failing for an Intel mirror challenge/outage.
+    default: "false"
 
 outputs:
+  sde-available:
+    description: "true when a SHA-verified Intel SDE archive was installed; false when allow-unavailable handled a mirror outage."
+    value: ${{ steps.install.outputs.sde-available }}
+  unavailable-reason:
+    description: Short reason emitted when sde-available is false.
+    value: ${{ steps.install.outputs.unavailable-reason }}
   install-dir:
     description: Directory containing the extracted Intel SDE files.
     value: ${{ steps.install.outputs.install-dir }}
@@ -41,14 +50,86 @@ runs:
         url_base="${{ inputs.url-base }}"
         sha256="${{ inputs.sha256 }}"
         install_dir="${{ inputs.install-dir }}"
+        allow_unavailable="${{ inputs.allow-unavailable }}"
         case "${install_dir}" in
           /*) ;;
           *) install_dir="${GITHUB_WORKSPACE}/${install_dir}" ;;
         esac
 
         archive="${RUNNER_TEMP}/${version}.tar.xz"
-        curl -fsSL "${url_base}/${version}.tar.xz" -o "${archive}"
-        echo "${sha256}  ${archive}" | sha256sum -c -
+        headers="${RUNNER_TEMP}/${version}.headers"
+        archive_cache_dir="${HOME}/.cache/ordvec-intel-sde"
+        cached_archive="${archive_cache_dir}/${version}-${sha256}.tar.xz"
+        download_url="${url_base}/${version}.tar.xz"
+        curl_user_agent="ordvec-ci-intel-sde/${version} (https://github.com/Fieldnote-Echo/ordvec)"
+        archive_ready=false
+
+        mark_unavailable() {
+          reason="$1"
+          if [ "${allow_unavailable}" != "true" ]; then
+            echo "::error::Intel SDE archive unavailable (${reason})"
+            exit 1
+          fi
+          echo "::warning::Intel SDE archive unavailable (${reason}); skipping SDE-dependent job steps."
+          rm -f "${archive}" "${headers}" || true
+          echo "sde-available=false" >> "${GITHUB_OUTPUT}"
+          echo "unavailable-reason=${reason}" >> "${GITHUB_OUTPUT}"
+          exit 0
+        }
+
+        if [ -f "${cached_archive}" ]; then
+          echo "Using cached Intel SDE archive at ${cached_archive}"
+          if cp "${cached_archive}" "${archive}"; then
+            if echo "${sha256}  ${archive}" | sha256sum -c -; then
+              archive_ready=true
+            else
+              echo "::warning::Cached Intel SDE archive failed SHA256 verification; discarding it and retrying download."
+              rm -f "${archive}" "${cached_archive}" || true
+            fi
+          else
+            echo "::warning::Cached Intel SDE archive could not be read; retrying download."
+            rm -f "${archive}" "${cached_archive}" || true
+          fi
+        fi
+
+        if [ "${archive_ready}" = false ]; then
+          if ! curl \
+            --fail \
+            --location \
+            --show-error \
+            --silent \
+            --dump-header "${headers}" \
+            --connect-timeout 20 \
+            --max-time 600 \
+            --retry 6 \
+            --retry-all-errors \
+            --retry-connrefused \
+            --retry-delay 10 \
+            --retry-max-time 900 \
+            --user-agent "${curl_user_agent}" \
+            "${download_url}" \
+            -o "${archive}"; then
+            if grep -qiE "x-amzn-waf-action|^HTTP/[0-9.]+ (403|429|5[0-9][0-9])" "${headers}" 2>/dev/null; then
+              mark_unavailable "downloadmirror-challenge"
+            fi
+            exit 1
+          fi
+          if ! echo "${sha256}  ${archive}" | sha256sum -c -; then
+            if grep -qiE "x-amzn-waf-action|content-type:[[:space:]]*text/html" "${headers}" 2>/dev/null; then
+              mark_unavailable "downloadmirror-challenge"
+            fi
+            exit 1
+          fi
+          if mkdir -p "${archive_cache_dir}"; then
+            if ! cp "${archive}" "${cached_archive}"; then
+              echo "::warning::Intel SDE archive verified, but cache write failed; continuing without updating cache."
+              rm -f "${cached_archive}" || true
+            fi
+          else
+            echo "::warning::Intel SDE archive verified, but cache directory could not be created; continuing without updating cache."
+          fi
+        fi
+        rm -f "${headers}" || true
 
         mkdir -p "${install_dir}"
         tar xf "${archive}" --strip-components=1 -C "${install_dir}"
@@ -61,5 +142,6 @@ runs:
         fi
         "${sde_path}" --version
 
+        echo "sde-available=true" >> "${GITHUB_OUTPUT}"
         echo "install-dir=${install_dir}" >> "${GITHUB_OUTPUT}"
         echo "sde-path=${sde_path}" >> "${GITHUB_OUTPUT}"

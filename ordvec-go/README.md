@@ -19,3 +19,8 @@ Search with `nil` options or `nil` `SearchOptions.Candidates` performs a full
 search. An empty, non-nil `Candidates` slice is treated as an explicit empty
 subset and returns a typed `StatusBadArgument`, matching the C ABI v1
 pointer/count contract.
+
+Subset candidates are global row IDs. They may be unsorted and may contain
+duplicates; duplicate entries are scored independently and can produce duplicate
+hits. Deduplicate `SearchOptions.Candidates` before calling `Search` when unique
+hits are required.
