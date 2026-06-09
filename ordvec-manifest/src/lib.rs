@@ -2851,9 +2851,10 @@ impl VerifiedLoadPlan {
     }
 
     pub fn auxiliary_by_name(&self, name: &str) -> Option<&VerifiedAuxiliaryArtifactPlan> {
+        let name = name.trim();
         self.auxiliary_artifacts
             .iter()
-            .find(|artifact| artifact.name() == name)
+            .find(|artifact| artifact.name().trim() == name)
     }
 
     pub fn require_auxiliary(&self, name: &str) -> Result<&Path, RequireAuxiliaryError> {

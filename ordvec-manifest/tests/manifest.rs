@@ -378,6 +378,10 @@ fn create_manifest_declares_auxiliary_artifacts_for_load_plan_lookup() {
         fs::canonicalize(&ids).unwrap().as_path()
     );
     assert_eq!(
+        plan.require_auxiliary(" ordinaldb.ids ").unwrap(),
+        fs::canonicalize(&ids).unwrap().as_path()
+    );
+    assert_eq!(
         plan.auxiliary_by_name("optional.stats").unwrap().state(),
         AuxiliaryArtifactState::OptionalAbsent
     );
