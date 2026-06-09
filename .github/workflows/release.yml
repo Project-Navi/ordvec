@@ -1085,40 +1085,71 @@ jobs:
           ATTESTED="${RUNNER_TEMP}/attested/ordvec-${VERSION}.crate"
           [ -f "$ATTESTED" ] || { echo "::error::attested .crate missing at $ATTESTED"; exit 1; }
           A_SHA=$(sha256sum "$ATTESTED" | cut -d' ' -f1)
+          METADATA_URL="https://crates.io/api/v1/crates/ordvec/${VERSION}"
           API_URL="https://crates.io/api/v1/crates/ordvec/${VERSION}/download"
           STATIC_URL="https://static.crates.io/crates/ordvec/ordvec-${VERSION}.crate"
           CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
           EXISTING="${RUNNER_TEMP}/existing-ordvec.crate"
+          METADATA="${RUNNER_TEMP}/existing-ordvec-metadata.json"
+          METADATA_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-metadata-status.txt"
           API_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-api-status.txt"
           STATIC_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-static-status.txt"
-          already_present=false
+          version_present=false
 
-          rm -f "$EXISTING" "$API_STATUS_FILE" "$STATIC_STATUS_FILE"
-          API_CURL_EXIT=0
+          rm -f "$EXISTING" "$METADATA" "$METADATA_STATUS_FILE" "$API_STATUS_FILE" "$STATIC_STATUS_FILE"
+          METADATA_CURL_EXIT=0
           curl -sSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
             --user-agent "$CRATES_IO_USER_AGENT" \
+            --header "Accept: application/json" \
             --write-out "%{http_code}" \
-            --output "$EXISTING" \
-            "$API_URL" > "$API_STATUS_FILE" || API_CURL_EXIT=$?
-          API_STATUS="$(cat "$API_STATUS_FILE")"
-          if [ "$API_CURL_EXIT" -ne 0 ]; then
-            echo "::error::could not determine crates.io status while checking ordvec ${VERSION} at $API_URL (curl exit ${API_CURL_EXIT}). Refusing recovery."
+            --output "$METADATA" \
+            "$METADATA_URL" > "$METADATA_STATUS_FILE" || METADATA_CURL_EXIT=$?
+          METADATA_STATUS="$(cat "$METADATA_STATUS_FILE")"
+          if [ "$METADATA_CURL_EXIT" -ne 0 ]; then
+            echo "::error::could not determine crates.io metadata while checking ordvec ${VERSION} at $METADATA_URL (curl exit ${METADATA_CURL_EXIT}). Refusing recovery."
             exit 1
           fi
-          case "$API_STATUS" in
+          case "$METADATA_STATUS" in
             200)
-              already_present=true
+              version_present=true
               ;;
             404)
-              rm -f "$EXISTING"
+              rm -f "$METADATA"
               ;;
             *)
-              echo "::error::unexpected crates.io status ${API_STATUS} while checking ordvec ${VERSION} at $API_URL. Refusing recovery."
+              echo "::error::unexpected crates.io metadata status ${METADATA_STATUS} while checking ordvec ${VERSION} at $METADATA_URL. Refusing recovery."
               exit 1
               ;;
           esac
 
-          if [ "$already_present" != true ]; then
+          if [ "$version_present" != true ]; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            echo "crates.io metadata does not list ordvec ${VERSION}; proceeding with publish."
+          else
+            downloaded=false
+            rm -f "$EXISTING"
+            API_CURL_EXIT=0
+            curl -sSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              --user-agent "$CRATES_IO_USER_AGENT" \
+              --write-out "%{http_code}" \
+              --output "$EXISTING" \
+              "$API_URL" > "$API_STATUS_FILE" || API_CURL_EXIT=$?
+            API_STATUS="$(cat "$API_STATUS_FILE")"
+            if [ "$API_CURL_EXIT" -ne 0 ]; then
+              echo "::error::could not download crates.io .crate while checking ordvec ${VERSION} at $API_URL (curl exit ${API_CURL_EXIT}). Refusing recovery."
+              exit 1
+            fi
+            case "$API_STATUS" in
+              200)
+                downloaded=true
+                ;;
+              *)
+                rm -f "$EXISTING"
+                ;;
+            esac
+          fi
+
+          if [ "${downloaded:-false}" != true ] && [ "$version_present" = true ]; then
             STATIC_CURL_EXIT=0
             curl -sSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
               --user-agent "$CRATES_IO_USER_AGENT" \
@@ -1132,19 +1163,16 @@ jobs:
             fi
             case "$STATIC_STATUS" in
               200)
-                already_present=true
-                ;;
-              404)
-                rm -f "$EXISTING"
+                downloaded=true
                 ;;
               *)
-                echo "::error::unexpected crates.io status ${STATIC_STATUS} while checking ordvec ${VERSION} at $STATIC_URL. Refusing recovery."
+                echo "::error::crates.io metadata lists ordvec ${VERSION}, but recovery endpoints did not serve the .crate (API status ${API_STATUS:-unset}, static status ${STATIC_STATUS}). Refusing recovery."
                 exit 1
                 ;;
             esac
           fi
 
-          if [ "$already_present" = true ]; then
+          if [ "${downloaded:-false}" = true ]; then
             E_SHA=$(sha256sum "$EXISTING" | cut -d' ' -f1)
             echo "attested:         $A_SHA"
             echo "crates.io-served: $E_SHA"
@@ -1154,9 +1182,6 @@ jobs:
             fi
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "::notice::crates.io already serves byte-identical ordvec ${VERSION}; skipping upload and verifying served bytes."
-          else
-            echo "already_published=false" >> "$GITHUB_OUTPUT"
-            echo "Both crates.io recovery endpoints returned 404 for ordvec ${VERSION}; proceeding with publish."
           fi
       # Mint the short-lived crates.io credential immediately before publish so
       # the ephemeral token's exposure window is minimal. No stored secret.
@@ -1436,40 +1461,71 @@ jobs:
           ATTESTED="${RUNNER_TEMP}/attested/ordvec-manifest-${VERSION}.crate"
           [ -f "$ATTESTED" ] || { echo "::error::attested .crate missing at $ATTESTED"; exit 1; }
           A_SHA=$(sha256sum "$ATTESTED" | cut -d' ' -f1)
+          METADATA_URL="https://crates.io/api/v1/crates/ordvec-manifest/${VERSION}"
           API_URL="https://crates.io/api/v1/crates/ordvec-manifest/${VERSION}/download"
           STATIC_URL="https://static.crates.io/crates/ordvec-manifest/ordvec-manifest-${VERSION}.crate"
           CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
           EXISTING="${RUNNER_TEMP}/existing-ordvec-manifest.crate"
+          METADATA="${RUNNER_TEMP}/existing-ordvec-manifest-metadata.json"
+          METADATA_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-manifest-metadata-status.txt"
           API_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-manifest-api-status.txt"
           STATIC_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-manifest-static-status.txt"
-          already_present=false
+          version_present=false
 
-          rm -f "$EXISTING" "$API_STATUS_FILE" "$STATIC_STATUS_FILE"
-          API_CURL_EXIT=0
+          rm -f "$EXISTING" "$METADATA" "$METADATA_STATUS_FILE" "$API_STATUS_FILE" "$STATIC_STATUS_FILE"
+          METADATA_CURL_EXIT=0
           curl -sSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
             --user-agent "$CRATES_IO_USER_AGENT" \
+            --header "Accept: application/json" \
             --write-out "%{http_code}" \
-            --output "$EXISTING" \
-            "$API_URL" > "$API_STATUS_FILE" || API_CURL_EXIT=$?
-          API_STATUS="$(cat "$API_STATUS_FILE")"
-          if [ "$API_CURL_EXIT" -ne 0 ]; then
-            echo "::error::could not determine crates.io status while checking ordvec-manifest ${VERSION} at $API_URL (curl exit ${API_CURL_EXIT}). Refusing recovery."
+            --output "$METADATA" \
+            "$METADATA_URL" > "$METADATA_STATUS_FILE" || METADATA_CURL_EXIT=$?
+          METADATA_STATUS="$(cat "$METADATA_STATUS_FILE")"
+          if [ "$METADATA_CURL_EXIT" -ne 0 ]; then
+            echo "::error::could not determine crates.io metadata while checking ordvec-manifest ${VERSION} at $METADATA_URL (curl exit ${METADATA_CURL_EXIT}). Refusing recovery."
             exit 1
           fi
-          case "$API_STATUS" in
+          case "$METADATA_STATUS" in
             200)
-              already_present=true
+              version_present=true
               ;;
             404)
-              rm -f "$EXISTING"
+              rm -f "$METADATA"
               ;;
             *)
-              echo "::error::unexpected crates.io status ${API_STATUS} while checking ordvec-manifest ${VERSION} at $API_URL. Refusing recovery."
+              echo "::error::unexpected crates.io metadata status ${METADATA_STATUS} while checking ordvec-manifest ${VERSION} at $METADATA_URL. Refusing recovery."
               exit 1
               ;;
           esac
 
-          if [ "$already_present" != true ]; then
+          if [ "$version_present" != true ]; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            echo "crates.io metadata does not list ordvec-manifest ${VERSION}; proceeding with publish."
+          else
+            downloaded=false
+            rm -f "$EXISTING"
+            API_CURL_EXIT=0
+            curl -sSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              --user-agent "$CRATES_IO_USER_AGENT" \
+              --write-out "%{http_code}" \
+              --output "$EXISTING" \
+              "$API_URL" > "$API_STATUS_FILE" || API_CURL_EXIT=$?
+            API_STATUS="$(cat "$API_STATUS_FILE")"
+            if [ "$API_CURL_EXIT" -ne 0 ]; then
+              echo "::error::could not download crates.io .crate while checking ordvec-manifest ${VERSION} at $API_URL (curl exit ${API_CURL_EXIT}). Refusing recovery."
+              exit 1
+            fi
+            case "$API_STATUS" in
+              200)
+                downloaded=true
+                ;;
+              *)
+                rm -f "$EXISTING"
+                ;;
+            esac
+          fi
+
+          if [ "${downloaded:-false}" != true ] && [ "$version_present" = true ]; then
             STATIC_CURL_EXIT=0
             curl -sSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
               --user-agent "$CRATES_IO_USER_AGENT" \
@@ -1483,19 +1539,16 @@ jobs:
             fi
             case "$STATIC_STATUS" in
               200)
-                already_present=true
-                ;;
-              404)
-                rm -f "$EXISTING"
+                downloaded=true
                 ;;
               *)
-                echo "::error::unexpected crates.io status ${STATIC_STATUS} while checking ordvec-manifest ${VERSION} at $STATIC_URL. Refusing recovery."
+                echo "::error::crates.io metadata lists ordvec-manifest ${VERSION}, but recovery endpoints did not serve the .crate (API status ${API_STATUS:-unset}, static status ${STATIC_STATUS}). Refusing recovery."
                 exit 1
                 ;;
             esac
           fi
 
-          if [ "$already_present" = true ]; then
+          if [ "${downloaded:-false}" = true ]; then
             E_SHA=$(sha256sum "$EXISTING" | cut -d' ' -f1)
             echo "attested:         $A_SHA"
             echo "crates.io-served: $E_SHA"
@@ -1505,9 +1558,6 @@ jobs:
             fi
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "::notice::crates.io already serves byte-identical ordvec-manifest ${VERSION}; skipping upload and verifying served bytes."
-          else
-            echo "already_published=false" >> "$GITHUB_OUTPUT"
-            echo "Both crates.io recovery endpoints returned 404 for ordvec-manifest ${VERSION}; proceeding with publish."
           fi
       - name: Validate manifest publish dry-run
         if: steps.manifest_crate_recovery.outputs.already_published != 'true'

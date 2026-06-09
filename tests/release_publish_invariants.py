@@ -907,25 +907,51 @@ def recovery_curl_uses(words: list[str], url_var: str) -> bool:
     )
 
 
+def metadata_curl_uses(words: list[str]) -> bool:
+    return (
+        has_shell_arg(words, shell_vars("METADATA_URL"))
+        and has_shell_option_value(words, {"--user-agent", "-A"}, shell_vars("CRATES_IO_USER_AGENT"))
+        and has_shell_option_value(words, {"--header", "-H"}, {"Accept: application/json"})
+        and has_shell_option_value(words, {"--output", "-o"}, shell_vars("METADATA"))
+        and has_shell_option_value(words, {"--write-out", "-w"}, {"%{http_code}"})
+        and "--retry" in words
+        and "--retry-all-errors" in words
+    )
+
+
 def check_crate_recovery_status_handling(
     recovery_run: str, path: str, job_name: str, package: str
 ) -> None:
     required_fragments = (
+        "METADATA_CURL_EXIT=0",
+        'if [ "$METADATA_CURL_EXIT" -ne 0 ]; then',
+        'case "$METADATA_STATUS" in',
+        f"crates.io metadata does not list {package}",
+        f"crates.io metadata lists {package}",
+        "could not determine crates.io metadata",
+        "unexpected crates.io metadata status",
         "API_CURL_EXIT=0",
         'if [ "$API_CURL_EXIT" -ne 0 ]; then',
         "STATIC_CURL_EXIT=0",
         'if [ "$STATIC_CURL_EXIT" -ne 0 ]; then',
-        'case "$API_STATUS" in',
-        'case "$STATIC_STATUS" in',
+        "could not download crates.io .crate",
+        "recovery endpoints did not serve the .crate",
         "200)",
         "404)",
-        "could not determine crates.io status",
-        "unexpected crates.io status",
-        f"Both crates.io recovery endpoints returned 404 for {package}",
     )
     for fragment in required_fragments:
         if fragment not in recovery_run:
             fail(f"{path}: {job_name} recovery step must contain {fragment!r}")
+    if "Both crates.io recovery endpoints returned 404" in recovery_run:
+        fail(
+            f"{path}: {job_name} recovery step must use crates.io metadata, "
+            "not download-endpoint 404s, to decide first-publish absence"
+        )
+    if "VERSION_PRESENT_FILE" in recovery_run or "python3 -" in recovery_run:
+        fail(
+            f"{path}: {job_name} recovery step must use the per-version metadata endpoint, "
+            "not inline JSON parsing"
+        )
 
 
 def check_hash_requirement_temp_paths(paths: list[str]) -> None:
@@ -1328,6 +1354,16 @@ def check_publish_crate_job(
         if required not in recovery_run:
             fail(f"{path}: {job_name} recovery step must contain {required!r}")
     check_crate_recovery_status_handling(recovery_run, path, job_name, package)
+    version = r"\$(?:\{VERSION\}|VERSION)"
+    if not has_assignment(
+        recovery_run, "METADATA_URL", rf"https://crates\.io/api/v1/crates/{package}/{version}"
+    ):
+        fail(f"{path}: {job_name} recovery step must define the per-version crates.io metadata URL")
+    if not any(metadata_curl_uses(words) for words in shell_curl_commands(recovery_run)):
+        fail(
+            f"{path}: {job_name} recovery step must query $METADATA_URL "
+            "with CRATES_IO_USER_AGENT and Accept: application/json into $METADATA"
+        )
     for url_var in ("API_URL", "STATIC_URL"):
         if not any(
             recovery_curl_uses(words, url_var) for words in shell_curl_commands(recovery_run)
@@ -1426,58 +1462,7 @@ def check_publish_crates(workflow: dict[str, Any], path: str) -> None:
     manifest_job = mapping(jobs.get("publish-manifest-crate"), f"{path}: jobs.publish-manifest-crate")
     if not has_need(manifest_job, "publish-crate"):
         fail(f"{path}: publish-manifest-crate must need publish-crate so ordvec publishes first")
-    manifest_steps = sequence(
-        manifest_job.get("steps"), f"{path}: jobs.publish-manifest-crate.steps"
-    )
-    manifest_recovery_steps: list[tuple[int, dict[str, Any]]] = []
-    for index, raw_step in enumerate(manifest_steps):
-        step = mapping(raw_step, f"{path}: jobs.publish-manifest-crate.steps[{index}]")
-        if step.get("name") == "Check for existing ordvec-manifest .crate recovery":
-            manifest_recovery_steps.append((index, step))
-    if len(manifest_recovery_steps) != 1:
-        fail(
-            f"{path}: publish-manifest-crate must have exactly one first-publish recovery check"
-        )
-    recovery_index, recovery_step = manifest_recovery_steps[0]
-    if recovery_step.get("id") != "manifest_crate_recovery":
-        fail(f"{path}: manifest crate recovery step must have id manifest_crate_recovery")
-    recovery_run = recovery_step.get("run")
-    if not isinstance(recovery_run, str):
-        fail(f"{path}: manifest crate recovery step must be a run step")
-    for required in (
-        "already_published=true",
-        "already_published=false",
-        "Refusing recovery",
-        "crates.io already serves byte-identical ordvec-manifest",
-    ):
-        if required not in recovery_run:
-            fail(f"{path}: manifest crate recovery step must contain {required!r}")
-    check_crate_recovery_status_handling(
-        recovery_run, path, "publish-manifest-crate", "ordvec-manifest"
-    )
-    for url_var in ("API_URL", "STATIC_URL"):
-        if not any(
-            recovery_curl_uses(words, url_var) for words in shell_curl_commands(recovery_run)
-        ):
-            fail(
-                f"{path}: manifest crate recovery step must curl ${url_var} "
-                "with CRATES_IO_USER_AGENT into $EXISTING, capture HTTP status, and retry"
-            )
-    for index, raw_step in enumerate(manifest_steps):
-        step = mapping(raw_step, f"{path}: jobs.publish-manifest-crate.steps[{index}]")
-        name = step.get("name")
-        if name in {
-            "Validate manifest publish dry-run",
-            "Mint a short-lived crates.io credential (OIDC)",
-            "cargo publish",
-        }:
-            if index < recovery_index:
-                fail(f"{path}: {name} must run after the manifest crate recovery check")
-            if step.get("if") != "steps.manifest_crate_recovery.outputs.already_published != 'true'":
-                fail(
-                    f"{path}: {name} must be skipped when manifest crate recovery found "
-                    "byte-identical existing bytes"
-                )
+
     build_manifest_job = mapping(jobs.get("build-manifest-crate"), f"{path}: jobs.build-manifest-crate")
     if not has_need(build_manifest_job, "publish-crate"):
         fail(f"{path}: build-manifest-crate must need publish-crate so lockstep ordvec exists")
