@@ -65,6 +65,29 @@ def dist_files(directory: Path) -> dict[str, Path]:
     return files
 
 
+def validate_expected_dist(
+    files: dict[str, Any],
+    *,
+    expected_wheels: int | None = None,
+    expected_sdists: int | None = None,
+    required_wheel_tags: tuple[str, ...] = (),
+) -> None:
+    wheels = sorted(name for name in files if name.endswith(".whl"))
+    sdists = sorted(name for name in files if name.endswith(".tar.gz"))
+    if expected_wheels is not None and len(wheels) != expected_wheels:
+        fail(f"expected {expected_wheels} wheel files, found {len(wheels)}: {wheels!r}")
+    if expected_sdists is not None and len(sdists) != expected_sdists:
+        fail(f"expected {expected_sdists} sdist files, found {len(sdists)}: {sdists!r}")
+    missing_tags = [
+        tag for tag in required_wheel_tags if not any(tag in wheel for wheel in wheels)
+    ]
+    if missing_tags:
+        fail(
+            "wheel dist is missing required platform tag substrings: "
+            f"missing={missing_tags!r} wheels={wheels!r}"
+        )
+
+
 def fetch_pypi_payload(project: str, version: str) -> dict[str, Any] | None:
     url = f"https://pypi.org/pypi/{project}/{version}/json"
     try:
@@ -130,8 +153,23 @@ def ensure_same_filenames(local: dict[str, Path], remote: dict[str, dict[str, st
         )
 
 
-def canonicalize(project: str, version: str, built_dir: Path, out_dir: Path) -> None:
+def canonicalize(
+    project: str,
+    version: str,
+    built_dir: Path,
+    out_dir: Path,
+    *,
+    expected_wheels: int | None = None,
+    expected_sdists: int | None = None,
+    required_wheel_tags: tuple[str, ...] = (),
+) -> None:
     built = dist_files(built_dir)
+    validate_expected_dist(
+        built,
+        expected_wheels=expected_wheels,
+        expected_sdists=expected_sdists,
+        required_wheel_tags=required_wheel_tags,
+    )
     prepare_empty_dir(out_dir)
     try:
         payload = fetch_pypi_payload(project, version)
@@ -151,6 +189,12 @@ def canonicalize(project: str, version: str, built_dir: Path, out_dir: Path) -> 
     except PyPIReadError as exc:
         fail(str(exc))
     ensure_same_filenames(built, remote)
+    validate_expected_dist(
+        remote,
+        expected_wheels=expected_wheels,
+        expected_sdists=expected_sdists,
+        required_wheel_tags=required_wheel_tags,
+    )
 
     mismatched: list[str] = []
     for filename, path in built.items():
@@ -180,12 +224,40 @@ def remote_hashes(project: str, version: str) -> dict[str, str] | None:
     return {name: item["sha256"] for name, item in pypi_dist_map(payload).items()}
 
 
-def local_hashes(dist_dir: Path) -> dict[str, str]:
-    return {name: sha256_file(path) for name, path in dist_files(dist_dir).items()}
+def local_hashes(
+    dist_dir: Path,
+    *,
+    expected_wheels: int | None = None,
+    expected_sdists: int | None = None,
+    required_wheel_tags: tuple[str, ...] = (),
+) -> dict[str, str]:
+    files = dist_files(dist_dir)
+    validate_expected_dist(
+        files,
+        expected_wheels=expected_wheels,
+        expected_sdists=expected_sdists,
+        required_wheel_tags=required_wheel_tags,
+    )
+    return {name: sha256_file(path) for name, path in files.items()}
 
 
-def verify(project: str, version: str, dist_dir: Path, attempts: int, sleep_seconds: float) -> None:
-    local = local_hashes(dist_dir)
+def verify(
+    project: str,
+    version: str,
+    dist_dir: Path,
+    attempts: int,
+    sleep_seconds: float,
+    *,
+    expected_wheels: int | None = None,
+    expected_sdists: int | None = None,
+    required_wheel_tags: tuple[str, ...] = (),
+) -> None:
+    local = local_hashes(
+        dist_dir,
+        expected_wheels=expected_wheels,
+        expected_sdists=expected_sdists,
+        required_wheel_tags=required_wheel_tags,
+    )
     url = f"https://pypi.org/pypi/{project}/{version}/json"
     last_error = "not checked"
     for attempt in range(1, attempts + 1):
@@ -212,6 +284,14 @@ def parse_args() -> argparse.Namespace:
     canonical.add_argument("--version", required=True)
     canonical.add_argument("--built-dir", required=True, type=Path)
     canonical.add_argument("--out-dir", required=True, type=Path)
+    canonical.add_argument("--expected-wheels", type=int)
+    canonical.add_argument("--expected-sdists", type=int)
+    canonical.add_argument(
+        "--required-wheel-tag",
+        action="append",
+        default=[],
+        help="Require at least one wheel filename containing this substring; may be repeated.",
+    )
 
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--project", default=DEFAULT_PROJECT)
@@ -219,6 +299,14 @@ def parse_args() -> argparse.Namespace:
     verify_parser.add_argument("--dist-dir", required=True, type=Path)
     verify_parser.add_argument("--attempts", default=24, type=int)
     verify_parser.add_argument("--sleep-seconds", default=5.0, type=float)
+    verify_parser.add_argument("--expected-wheels", type=int)
+    verify_parser.add_argument("--expected-sdists", type=int)
+    verify_parser.add_argument(
+        "--required-wheel-tag",
+        action="append",
+        default=[],
+        help="Require at least one wheel filename containing this substring; may be repeated.",
+    )
 
     return parser.parse_args()
 
@@ -226,10 +314,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.command == "canonicalize":
-        canonicalize(args.project, args.version, args.built_dir, args.out_dir)
+        canonicalize(
+            args.project,
+            args.version,
+            args.built_dir,
+            args.out_dir,
+            expected_wheels=args.expected_wheels,
+            expected_sdists=args.expected_sdists,
+            required_wheel_tags=tuple(args.required_wheel_tag),
+        )
         return
     if args.command == "verify":
-        verify(args.project, args.version, args.dist_dir, args.attempts, args.sleep_seconds)
+        verify(
+            args.project,
+            args.version,
+            args.dist_dir,
+            args.attempts,
+            args.sleep_seconds,
+            expected_wheels=args.expected_wheels,
+            expected_sdists=args.expected_sdists,
+            required_wheel_tags=tuple(args.required_wheel_tag),
+        )
         return
     raise AssertionError(f"unknown command: {args.command}")
 

@@ -704,7 +704,13 @@ jobs:
           python3 tests/release_pypi_canonical_dist.py canonicalize \
             --version "$VERSION" \
             --built-dir built-dist \
-            --out-dir canonical-dist
+            --out-dir canonical-dist \
+            --expected-wheels 4 \
+            --expected-sdists 1 \
+            --required-wheel-tag x86_64 \
+            --required-wheel-tag aarch64 \
+            --required-wheel-tag macosx \
+            --required-wheel-tag win_amd64
       - name: Upload the canonical Python dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -751,7 +757,13 @@ jobs:
             --project ordvec-manifest \
             --version "$VERSION" \
             --built-dir built-dist \
-            --out-dir canonical-dist
+            --out-dir canonical-dist \
+            --expected-wheels 4 \
+            --expected-sdists 1 \
+            --required-wheel-tag x86_64 \
+            --required-wheel-tag aarch64 \
+            --required-wheel-tag macosx \
+            --required-wheel-tag win_amd64
       - name: Upload the canonical ordvec-manifest Python dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1473,7 +1485,13 @@ jobs:
           python3 tests/release_pypi_canonical_dist.py verify \
             --project ordvec-manifest \
             --version "$VERSION" \
-            --dist-dir dist
+            --dist-dir dist \
+            --expected-wheels 4 \
+            --expected-sdists 1 \
+            --required-wheel-tag x86_64 \
+            --required-wheel-tag aarch64 \
+            --required-wheel-tag macosx \
+            --required-wheel-tag win_amd64
 
   publish-pypi:
     name: publish to PyPI
@@ -1515,7 +1533,13 @@ jobs:
           set -euo pipefail
           python3 tests/release_pypi_canonical_dist.py verify \
             --version "$VERSION" \
-            --dist-dir dist
+            --dist-dir dist \
+            --expected-wheels 4 \
+            --expected-sdists 1 \
+            --required-wheel-tag x86_64 \
+            --required-wheel-tag aarch64 \
+            --required-wheel-tag macosx \
+            --required-wheel-tag win_amd64
 
   publish-github-release:
     name: un-draft the GitHub Release (only after all registry publishes succeed)

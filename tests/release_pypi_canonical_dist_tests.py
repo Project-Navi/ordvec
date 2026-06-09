@@ -24,6 +24,17 @@ def write(path: Path, data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def write_complete_release_dist(directory: Path, project: str = "ordvec") -> dict[str, str]:
+    files = {
+        f"{project}-0.3.0.tar.gz": b"sdist",
+        f"{project}-0.3.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl": b"linux x86_64",
+        f"{project}-0.3.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl": b"linux aarch64",
+        f"{project}-0.3.0-cp310-abi3-macosx_11_0_arm64.whl": b"macos arm64",
+        f"{project}-0.3.0-cp310-abi3-win_amd64.whl": b"windows amd64",
+    }
+    return {name: write(directory / name, data) for name, data in files.items()}
+
+
 class CanonicalPyPIDistTests(unittest.TestCase):
     def test_missing_pypi_release_uses_current_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -44,6 +55,86 @@ class CanonicalPyPIDistTests(unittest.TestCase):
 
             self.assertEqual((out / "ordvec-0.3.0.tar.gz").read_bytes(), b"fresh sdist")
             self.assertEqual((out / "ordvec-0.3.0-cp310-abi3-win_amd64.whl").read_bytes(), b"fresh wheel")
+
+    def test_missing_pypi_release_accepts_complete_expected_release_dist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            built = root / "built"
+            out = root / "out"
+            built.mkdir()
+            write_complete_release_dist(built)
+
+            old_fetch = canonical.fetch_pypi_payload
+            canonical.fetch_pypi_payload = lambda project, version: None
+            try:
+                with redirect_stdout(io.StringIO()):
+                    canonical.canonicalize(
+                        "ordvec",
+                        "0.3.0",
+                        built,
+                        out,
+                        expected_wheels=4,
+                        expected_sdists=1,
+                        required_wheel_tags=("x86_64", "aarch64", "macosx", "win_amd64"),
+                    )
+            finally:
+                canonical.fetch_pypi_payload = old_fetch
+
+            self.assertEqual(len(list(out.glob("*.whl"))), 4)
+            self.assertEqual(len(list(out.glob("*.tar.gz"))), 1)
+
+    def test_canonicalize_rejects_incomplete_expected_wheel_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            built = root / "built"
+            out = root / "out"
+            built.mkdir()
+            write(built / "ordvec-0.3.0.tar.gz", b"fresh sdist")
+            write(built / "ordvec-0.3.0-cp310-abi3-win_amd64.whl", b"fresh wheel")
+
+            old_fetch = canonical.fetch_pypi_payload
+            canonical.fetch_pypi_payload = lambda project, version: self.fail("unexpected PyPI fetch")
+            try:
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    canonical.canonicalize(
+                        "ordvec",
+                        "0.3.0",
+                        built,
+                        out,
+                        expected_wheels=4,
+                        expected_sdists=1,
+                        required_wheel_tags=("x86_64", "aarch64", "macosx", "win_amd64"),
+                    )
+            finally:
+                canonical.fetch_pypi_payload = old_fetch
+
+    def test_canonicalize_rejects_missing_required_platform_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            built = root / "built"
+            out = root / "out"
+            built.mkdir()
+            write(built / "ordvec-0.3.0.tar.gz", b"fresh sdist")
+            write(built / "ordvec-0.3.0-cp310-abi3-manylinux_2_17_x86_64.whl", b"linux x86_64")
+            write(built / "ordvec-0.3.0-cp310-abi3-manylinux_2_17_aarch64.whl", b"linux aarch64")
+            write(built / "ordvec-0.3.0-cp310-abi3-macosx_11_0_arm64.whl", b"macos arm64")
+            write(built / "ordvec-0.3.0-cp310-abi3-macosx_12_0_universal2.whl", b"extra macos")
+
+            old_fetch = canonical.fetch_pypi_payload
+            canonical.fetch_pypi_payload = lambda project, version: self.fail("unexpected PyPI fetch")
+            try:
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    canonical.canonicalize(
+                        "ordvec",
+                        "0.3.0",
+                        built,
+                        out,
+                        expected_wheels=4,
+                        expected_sdists=1,
+                        required_wheel_tags=("x86_64", "aarch64", "macosx", "win_amd64"),
+                    )
+            finally:
+                canonical.fetch_pypi_payload = old_fetch
 
     def test_existing_pypi_release_uses_verified_remote_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,6 +265,29 @@ class CanonicalPyPIDistTests(unittest.TestCase):
                 canonical.time.sleep = old_sleep
 
             self.assertEqual(sleeps, [0.5])
+
+    def test_verify_rejects_incomplete_local_dist_before_remote_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            write(dist / "ordvec-0.3.0.tar.gz", b"canonical sdist")
+            write(dist / "ordvec-0.3.0-cp310-abi3-win_amd64.whl", b"canonical wheel")
+
+            old_fetch = canonical.fetch_pypi_payload
+            canonical.fetch_pypi_payload = lambda project, version: self.fail("unexpected PyPI fetch")
+            try:
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    canonical.verify(
+                        "ordvec",
+                        "0.3.0",
+                        dist,
+                        attempts=1,
+                        sleep_seconds=0.0,
+                        expected_wheels=4,
+                        expected_sdists=1,
+                        required_wheel_tags=("x86_64", "aarch64", "macosx", "win_amd64"),
+                    )
+            finally:
+                canonical.fetch_pypi_payload = old_fetch
 
     def test_canonicalize_reports_pypi_read_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

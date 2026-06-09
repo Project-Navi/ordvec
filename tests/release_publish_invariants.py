@@ -28,6 +28,14 @@ COVERAGE_WORKFLOW_PATH = os.environ.get("COVERAGE_WORKFLOW_PATH", ".github/workf
 SDE_ACTION_PATH = os.environ.get(
     "SDE_ACTION_PATH", ".github/actions/setup-intel-sde/action.yml"
 )
+PYPI_CANONICAL_EXPECTED_ARGS = (
+    "--expected-wheels 4",
+    "--expected-sdists 1",
+    "--required-wheel-tag x86_64",
+    "--required-wheel-tag aarch64",
+    "--required-wheel-tag macosx",
+    "--required-wheel-tag win_amd64",
+)
 
 
 def fail(message: str) -> None:
@@ -1089,6 +1097,9 @@ def check_pypi_canonical_dist(
                 fail(f"{path}: {job_name} canonicalize step must read built-dist and write canonical-dist")
             if project is not None and f"--project {project}" not in run:
                 fail(f"{path}: {job_name} canonicalize step must pass --project {project}")
+            for required_arg in PYPI_CANONICAL_EXPECTED_ARGS:
+                if required_arg not in run:
+                    fail(f"{path}: {job_name} canonicalize step must pass {required_arg}")
 
     if len(wheels_downloads) != 1:
         fail(f"{path}: {job_name} must download exactly one {wheel_artifact_pattern} artifact set")
@@ -1151,6 +1162,9 @@ def check_publish_pypi(
                 fail(f"{path}: {job_name} PyPI verify step must verify dist")
             if project is not None and f"--project {project}" not in run:
                 fail(f"{path}: {job_name} PyPI verify step must pass --project {project}")
+            for required_arg in PYPI_CANONICAL_EXPECTED_ARGS:
+                if required_arg not in run:
+                    fail(f"{path}: {job_name} PyPI verify step must pass {required_arg}")
 
     if len(publish_steps) != 1:
         fail(f"{path}: {job_name} must have exactly one pypa/gh-action-pypi-publish step")
