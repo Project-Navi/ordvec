@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["vector-search", "manifest", "provenance", "verification", "quantization"]
 categories = ["algorithms", "command-line-utilities", "data-structures"]
 
+[package.metadata.docs.rs]
+all-features = false
+
 [lib]
 name = "ordvec_manifest"
 path = "src/lib.rs"

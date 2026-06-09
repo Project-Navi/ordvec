@@ -740,6 +740,11 @@ impl RankQuant {
     /// hits; callers that require unique row IDs should deduplicate before
     /// calling.
     ///
+    /// ``candidates`` may be unsorted and may contain duplicate global doc IDs.
+    /// Each candidate entry is scored independently, so duplicate IDs may
+    /// produce duplicate returned global IDs. Deduplicate the array before
+    /// calling this method when unique hits are required.
+    ///
     /// If the shortlist came from [`Bitmap`], this is the exact RankQuant
     /// rerank stage over that survivor set; it does not itself apply or
     /// calibrate a bitmap overlap threshold.

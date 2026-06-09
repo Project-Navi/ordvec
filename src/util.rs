@@ -413,6 +413,12 @@ impl TopK {
         top
     }
 
+    /// Apply a query-constant score offset before every insertion.
+    ///
+    /// SIMD RankQuant asymmetric kernels drop the bucket-center term in the hot
+    /// loop. Applying the offset here makes eviction and final ordering use the
+    /// same exposed score tuple returned to callers.
+    #[inline]
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub(crate) fn set_score_offset(&mut self, score_offset: f32) {
         self.score_offset = score_offset;
