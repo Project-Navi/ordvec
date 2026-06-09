@@ -338,9 +338,10 @@ impl RankQuant {
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
 
-        // SIMD asymmetric kernels drop the per-lane centre subtract from the
-        // hot loop. Apply the query-constant offset before TopK insertion so
-        // retention and final ordering use the same public visible score key.
+        // The SIMD paths drop the per-lane centre subtract from the hot
+        // loop. The query-constant offset is applied inside TopK before
+        // eviction, so boundary ties use the same exposed score tuple that
+        // callers receive.
         #[cfg(target_arch = "x86_64")]
         let centre = ((1u32 << bits) as f32 - 1.0) / 2.0;
 
@@ -352,7 +353,10 @@ impl RankQuant {
                 let q_unit = l2_normalise(q);
                 let mut top = TopK::new(k_eff);
                 #[cfg(target_arch = "x86_64")]
-                let centre_offset = -centre * q_unit.iter().sum::<f32>() * inv_norm;
+                let centre_offset = {
+                    let q_sum: f32 = q_unit.iter().sum();
+                    -centre * q_sum * inv_norm
+                };
 
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
@@ -520,9 +524,10 @@ impl RankQuant {
     /// to global IDs before returning). Results are ordered by score
     /// descending, then global row ID ascending, matching the full-index
     /// search tie policy even when `candidates` is unsorted.
-    /// Duplicate candidate IDs are scored as separate entries and can
-    /// produce duplicate hits; callers that require unique row IDs should
-    /// deduplicate before calling.
+    /// `candidates` may contain duplicate global row IDs. Each candidate entry
+    /// is scored independently, so duplicate IDs may produce duplicate returned
+    /// global IDs. Callers that require unique hits should deduplicate the
+    /// candidate list before calling this method.
     ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as
     /// [`Self::search_asymmetric`] and the same centre-drop math, just
@@ -572,10 +577,13 @@ impl RankQuant {
         #[cfg(target_arch = "x86_64")]
         let centre = ((1u32 << bits) as f32 - 1.0) / 2.0;
 
-        // L2-normalise the query and gather centre-correction.
+        // L2-normalise the query.
         let q_unit = l2_normalise(query);
         #[cfg(target_arch = "x86_64")]
-        let centre_offset = -centre * q_unit.iter().sum::<f32>() * inv_norm;
+        let centre_offset = {
+            let q_sum: f32 = q_unit.iter().sum();
+            -centre * q_sum * inv_norm
+        };
 
         // Pack the candidate docs' bytes into a contiguous buffer so
         // the SIMD kernels can scan them as if they were a small dense

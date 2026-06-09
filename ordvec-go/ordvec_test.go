@@ -171,6 +171,28 @@ func TestRankQuantSubsetSearchOrdersByRowID(t *testing.T) {
 	}
 }
 
+func TestRankQuantSubsetSearchAllowsDuplicateHits(t *testing.T) {
+	idx, err := Load(writeRankQuantFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+
+	hits, stats, err := idx.Search(query16(), 3, &SearchOptions{
+		Candidates: []uint32{3, 1, 1, 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []uint64{hits[0].RowID, hits[1].RowID, hits[2].RowID}
+	if got[0] != 1 || got[1] != 1 || got[2] != 2 {
+		t.Fatalf("unexpected row order: %v", got)
+	}
+	if stats.Kind != KindRankQuant || stats.CandidateCount != 4 || stats.VectorsScored != 4 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
 func TestBitmapSubsetSearchAllowsDuplicateHits(t *testing.T) {
 	idx, err := Load(writeBitmapFixture(t))
 	if err != nil {

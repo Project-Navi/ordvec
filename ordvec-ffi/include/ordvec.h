@@ -53,8 +53,8 @@ typedef struct {
   uint64_t dim;
   uint64_t k;
   /**
-   * Optional subset row IDs. These are entry lists, not sets: duplicate
-   * candidates are scored independently and can produce duplicate hits.
+   * Optional subset rows. Rows are global row IDs, may be unsorted, and may
+   * contain duplicates; duplicate entries are scored independently.
    */
   const uint32_t *candidate_rows;
   uint64_t candidate_count;

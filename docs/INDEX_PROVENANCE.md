@@ -63,6 +63,10 @@ manifest file. The plan helpers do not call an ordvec loader, pin file
 descriptors, or make mutable shared storage immutable; callers still own the
 final policy decision and should load from the returned paths only while the
 verified files remain under their control.
+`ordvec-manifest/README.md` shows the intended verify-then-immediate-load
+pattern. If another process can mutate the manifest, index, row map, or sidecar
+between verification and load, re-run `verify_for_load` at the load boundary or
+load from immutable storage or a caller-owned loading path that pins bytes.
 
 The manifest verifier checks:
 

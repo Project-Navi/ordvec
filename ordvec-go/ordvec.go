@@ -145,10 +145,9 @@ type Stats struct {
 }
 
 type SearchOptions struct {
-	// Candidates restricts the search to these global row ordinals. It is an
-	// entry list, not a set: duplicate candidates are scored independently and
-	// can produce duplicate hits. Deduplicate before calling if unique rows are
-	// required.
+	// Candidates is an optional subset of global row IDs. Entries may be
+	// unsorted and may contain duplicates; duplicate entries are scored
+	// independently and can produce duplicate hits.
 	Candidates []uint32
 	UserTag    uint64
 }

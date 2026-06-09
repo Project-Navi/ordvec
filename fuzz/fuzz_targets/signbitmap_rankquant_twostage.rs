@@ -33,14 +33,20 @@ struct TwoStageInput {
     payload: Vec<u8>,
 }
 
-fn assert_score_then_id_order(scores: &[f32], ids: &[i64]) {
+fn assert_rankquant_order(label: &str, scores: &[f32], ids: &[i64]) {
+    assert_eq!(scores.len(), ids.len(), "{label}: score/id length mismatch");
     for slot in 1..scores.len() {
         let prev = (scores[slot - 1], ids[slot - 1]);
         let cur = (scores[slot], ids[slot]);
         let score_order = cur.0.total_cmp(&prev.0);
         assert!(
-            score_order.is_lt() || (score_order.is_eq() && cur.1 >= prev.1),
-            "subset rerank violates score-desc/doc-id-asc order at slots {} and {slot}",
+            score_order.is_lt() || score_order.is_eq(),
+            "{label}: violates score-desc order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
+            slot - 1,
+        );
+        assert!(
+            cur.0 != prev.0 || cur.1 >= prev.1,
+            "{label}: violates id-asc tie order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
             slot - 1,
         );
     }
@@ -123,7 +129,7 @@ fuzz_target!(|input: TwoStageInput| {
     assert_eq!(scores.len(), k_eff);
     assert_eq!(ids.len(), k_eff);
     assert!(scores.iter().all(|score| score.is_finite()));
-    assert_score_then_id_order(&scores, &ids);
+    assert_rankquant_order("subset rerank", &scores, &ids);
     for &id in &ids {
         assert!(id >= 0);
         assert!(subset_candidates.contains(&(id as u32)));
