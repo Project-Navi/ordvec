@@ -110,7 +110,12 @@ fn assert_results(label: &str, res: &SearchResults, nq: usize, k_eff: usize, n: 
             let cur = (scores[slot], ids[slot]);
             assert!(
                 cur.0 <= prev.0,
-                "{label}: row {qi} not sorted at slots {} and {slot}",
+                "{label}: row {qi} violates score-desc order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
+                slot - 1,
+            );
+            assert!(
+                cur.0 != prev.0 || cur.1 > prev.1,
+                "{label}: row {qi} violates id-asc tie order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
                 slot - 1,
             );
         }
