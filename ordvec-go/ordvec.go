@@ -88,6 +88,18 @@ func (s Status) String() string {
 	return C.GoString(C.ordvec_status_name(C.ordvec_status_t(s)))
 }
 
+func ABIVersion() uint32 {
+	return uint32(C.ordvec_abi_version())
+}
+
+func Version() string {
+	ptr := C.ordvec_version_string()
+	if ptr == nil {
+		return ""
+	}
+	return C.GoString(ptr)
+}
+
 type Info struct {
 	Kind                Kind
 	FormatVersion       uint32

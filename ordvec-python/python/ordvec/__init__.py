@@ -11,9 +11,11 @@ Public API: the four index classes ``Rank``, ``RankQuant``, ``Bitmap``,
 ``rankquant_eval_search``, the byte-LUT scoring helper
 ``search_asymmetric_byte_lut``, and the loader limit constants (``MAX_DIM``,
 ``MAX_SIGN_BITMAP_DIM``, ``MAX_VECTORS``). Together with the four classes'
-methods this mirrors the Rust crate's public API; the low-level ``rank_io``
-read/write functions are reached through the classes' ``write()`` / ``load()``
-methods rather than exposed as standalone free functions.
+methods this mirrors the headline Rust retrieval API. Rust-only metadata
+probing and manifest-verification helpers remain available through the Rust
+crates and the ``ordvec-manifest`` CLI; the low-level ``rank_io`` read/write
+functions are reached through the classes' ``write()`` / ``load()`` methods
+rather than exposed as standalone free functions.
 
 ``Bitmap`` exposes the constant-weight top-bucket overlap statistic formalized
 in the companion ``ordvec-formalization`` Lean repo: under explicit finite
@@ -103,4 +105,4 @@ __all__ = [
     "SignBitmapIndex",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

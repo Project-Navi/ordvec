@@ -13,6 +13,11 @@ import subprocess
 import sys
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None  # type: ignore[assignment]
+
 
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
@@ -132,6 +137,209 @@ def read_text(path: str) -> str:
         fail(f"{path}: could not read workflow: {exc}")
 
 
+def strip_toml_comment(line: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if char in {'"', "'"}:
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            continue
+        if char == "#" and quote is None:
+            return line[:index]
+    return line
+
+
+def split_inline_table(value: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    bracket_depth = 0
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if char in {'"', "'"}:
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            continue
+        if char == "[" and quote is None:
+            bracket_depth += 1
+            continue
+        if char == "]" and quote is None and bracket_depth > 0:
+            bracket_depth -= 1
+            continue
+        if char == "," and quote is None and bracket_depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
+
+
+def parse_toml_value(value: str) -> Any:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    if value in {"true", "false"}:
+        return value == "true"
+    if re.fullmatch(r"[+-]?\d+", value):
+        return int(value)
+    if re.fullmatch(r"[+-]?\d+\.\d+", value):
+        return float(value)
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        return [] if not inner else [parse_toml_value(part) for part in split_inline_table(inner)]
+    if value.startswith("{") and value.endswith("}"):
+        parsed: dict[str, Any] = {}
+        for part in split_inline_table(value[1:-1]):
+            key, separator, inner = part.partition("=")
+            if not separator:
+                raise ValueError(f"unsupported inline table entry {part!r}")
+            parsed[key.strip()] = parse_toml_value(inner)
+        return parsed
+    raise ValueError(f"unsupported TOML value {value!r}")
+
+
+def minimal_load_toml(path: str) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    current: dict[str, Any] = data
+    in_multiline_array = False
+    for lineno, raw_line in enumerate(read_text(path).splitlines(), start=1):
+        line = strip_toml_comment(raw_line).strip()
+        if not line:
+            continue
+        if in_multiline_array:
+            if line == "]" or line.endswith("]"):
+                in_multiline_array = False
+            continue
+        if line.startswith("[[") and line.endswith("]]"):
+            current = {}
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = data
+            for part in line[1:-1].split("."):
+                current = current.setdefault(part.strip(), {})
+                if not isinstance(current, dict):
+                    raise ValueError(f"{path}:{lineno}: section conflicts with scalar value")
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            raise ValueError(f"{path}:{lineno}: unsupported TOML line {line!r}")
+        if value.strip() == "[":
+            current[key.strip()] = []
+            in_multiline_array = True
+            continue
+        current[key.strip()] = parse_toml_value(value)
+    if in_multiline_array:
+        raise ValueError(f"{path}: unterminated multiline array")
+    return data
+
+
+def load_toml(path: str) -> dict[str, Any]:
+    try:
+        if tomllib is None:
+            data = minimal_load_toml(path)
+        else:
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+    except OSError as exc:
+        fail(f"{path}: could not read TOML: {exc}")
+    except (tomllib.TOMLDecodeError if tomllib is not None else ValueError) as exc:
+        fail(f"{path}: could not parse TOML: {exc}")
+    if not isinstance(data, dict):
+        fail(f"{path}: TOML root must be a mapping")
+    return data
+
+
+def package_version(path: str) -> str:
+    data = load_toml(path)
+    package = mapping(data.get("package"), f"{path}: package")
+    version = package.get("version")
+    if not isinstance(version, str) or not version:
+        fail(f"{path}: package.version must be a non-empty string")
+    return version
+
+
+def project_version(path: str) -> str:
+    data = load_toml(path)
+    project = mapping(data.get("project"), f"{path}: project")
+    version = project.get("version")
+    if not isinstance(version, str) or not version:
+        fail(f"{path}: project.version must be a non-empty string")
+    return version
+
+
+def python_init_version(path: str) -> str:
+    text = read_text(path)
+    matches = re.findall(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]\s*$", text, re.MULTILINE)
+    if len(matches) != 1:
+        fail(f"{path}: must contain exactly one literal __version__ assignment")
+    return matches[0]
+
+
+def check_release_version_sync() -> None:
+    core_version = package_version("Cargo.toml")
+    expected = {
+        "ordvec-python/Cargo.toml package.version": package_version("ordvec-python/Cargo.toml"),
+        "ordvec-python/pyproject.toml project.version": project_version(
+            "ordvec-python/pyproject.toml"
+        ),
+        "ordvec-python/python/ordvec/__init__.py __version__": python_init_version(
+            "ordvec-python/python/ordvec/__init__.py"
+        ),
+        "ordvec-manifest/Cargo.toml package.version": package_version("ordvec-manifest/Cargo.toml"),
+        "ordvec-ffi/Cargo.toml package.version": package_version("ordvec-ffi/Cargo.toml"),
+    }
+    for label, version in expected.items():
+        if version != core_version:
+            fail(f"{label} is {version}, expected lockstep version {core_version}")
+
+    manifest = load_toml("ordvec-manifest/Cargo.toml")
+    dependencies = mapping(manifest.get("dependencies"), "ordvec-manifest/Cargo.toml: dependencies")
+    ordvec_dep = mapping(
+        dependencies.get("ordvec"), "ordvec-manifest/Cargo.toml: dependencies.ordvec"
+    )
+    dep_version = ordvec_dep.get("version")
+    if dep_version != core_version:
+        fail(
+            "ordvec-manifest/Cargo.toml: dependencies.ordvec.version "
+            f"is {dep_version!r}, expected {core_version!r}"
+        )
+
+    changelog = read_text("CHANGELOG.md")
+    if not re.search(rf"^## \[?{re.escape(core_version)}\]? - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+        fail(f"CHANGELOG.md must contain a dated section for {core_version}")
+
+    threat_model = read_text("THREAT_MODEL.md")
+    if not re.search(
+        rf"^\>\s+\*\*Status:\*\*\s+v{re.escape(core_version)}\s+\(pre-1\.0\),",
+        threat_model,
+        re.MULTILINE,
+    ):
+        fail(f"THREAT_MODEL.md status must mention v{core_version}")
+
+    fuzz_lock = read_text("fuzz/Cargo.lock")
+    if not re.search(
+        rf'(?ms)^\[\[package\]\]\nname = "ordvec"\nversion = "{re.escape(core_version)}"\n',
+        fuzz_lock,
+    ):
+        fail(f"fuzz/Cargo.lock must lock the path dependency ordvec at {core_version}")
+
+
 def shell_vars(name: str) -> set[str]:
     return {f"${name}", f"${{{name}}}"}
 
@@ -188,6 +396,9 @@ def has_cargo_package_arg(words: list[str], package: str) -> bool:
 
 def has_cargo_command(run: str, subcommand: str, package: str) -> bool:
     for line in shell_logical_lines(run):
+        if line.startswith("if "):
+            line = line[3:].strip()
+        line = line.split("; then", 1)[0].strip().rstrip(";")
         try:
             words = shlex.split(line)
         except ValueError:
@@ -490,6 +701,27 @@ def check_publish_crates(workflow: dict[str, Any], path: str) -> None:
     manifest_job = mapping(jobs.get("publish-manifest-crate"), f"{path}: jobs.publish-manifest-crate")
     if not has_need(manifest_job, "publish-crate"):
         fail(f"{path}: publish-manifest-crate must need publish-crate so ordvec publishes first")
+    build_manifest_job = mapping(jobs.get("build-manifest-crate"), f"{path}: jobs.build-manifest-crate")
+    if not has_need(build_manifest_job, "publish-crate"):
+        fail(f"{path}: build-manifest-crate must need publish-crate so lockstep ordvec exists")
+    build_env = mapping(build_manifest_job.get("env"), f"{path}: jobs.build-manifest-crate.env")
+    if build_env.get("VERSION") != "${{ needs.guard.outputs.version }}":
+        fail(f"{path}: build-manifest-crate must expose the release VERSION to retry diagnostics")
+    build_steps = sequence(
+        build_manifest_job.get("steps"), f"{path}: jobs.build-manifest-crate.steps"
+    )
+    build_manifest_packages = []
+    for index, raw_step in enumerate(build_steps):
+        step = mapping(raw_step, f"{path}: jobs.build-manifest-crate.steps[{index}]")
+        run = step.get("run")
+        if isinstance(run, str) and has_cargo_command(run, "package", "ordvec-manifest"):
+            build_manifest_packages.append(run)
+    if len(build_manifest_packages) != 1:
+        fail(f"{path}: build-manifest-crate must package ordvec-manifest after publish-crate")
+    build_run = build_manifest_packages[0]
+    for fragment in ("for i in {1..12}", "sleep 10", "ordvec ${VERSION}"):
+        if fragment not in build_run:
+            fail(f"{path}: build-manifest-crate package step must retry crates.io propagation")
     check_publish_crate_job(workflow, path, "publish-crate", "ordvec", "dist-crate")
     check_publish_crate_job(
         workflow,
@@ -498,6 +730,33 @@ def check_publish_crates(workflow: dict[str, Any], path: str) -> None:
         "ordvec-manifest",
         "dist-manifest-crate",
     )
+
+
+def check_ci_manifest_package_defer(workflow: dict[str, Any], path: str) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    deps_job = mapping(jobs.get("deps"), f"{path}: jobs.deps")
+    steps = sequence(deps_job.get("steps"), f"{path}: jobs.deps.steps")
+    manifest_package_runs = []
+    for index, raw_step in enumerate(steps):
+        step = mapping(raw_step, f"{path}: jobs.deps.steps[{index}]")
+        run = step.get("run")
+        if isinstance(run, str) and has_cargo_command(run, "package", "ordvec-manifest"):
+            manifest_package_runs.append(run)
+    if len(manifest_package_runs) != 1:
+        fail(f"{path}: deps job must run exactly one deferred ordvec-manifest package check")
+    run = manifest_package_runs[0]
+    if "grep" in run or "failed to select a version for the requirement" in run:
+        fail(f"{path}: deferred ordvec-manifest package check must not grep cargo errors")
+    required_fragments = (
+        "cargo metadata --no-deps --format-version 1",
+        "https://crates.io/api/v1/crates/ordvec/${core_version}",
+        '--write-out "%{http_code}"',
+        '[ "${status}" = "404" ]',
+        "not deferring a real packaging failure",
+    )
+    for fragment in required_fragments:
+        if fragment not in run:
+            fail(f"{path}: deferred ordvec-manifest package check must include {fragment!r}")
 
 
 def check_sde_setup_action(path: str) -> None:
@@ -636,12 +895,14 @@ def check_sde_cache_invariants() -> None:
 
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
+    check_release_version_sync()
     check_hash_requirement_temp_paths(
         [WORKFLOW_PATH, PYTHON_WORKFLOW_PATH, CI_WORKFLOW_PATH, COVERAGE_WORKFLOW_PATH]
     )
     check_aarch64_smoke_selector(workflow, WORKFLOW_PATH)
     check_pypi_canonical_dist(workflow, WORKFLOW_PATH)
     check_publish_crates(workflow, WORKFLOW_PATH)
+    check_ci_manifest_package_defer(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH)
     check_publish_pypi(workflow, WORKFLOW_PATH)
     check_sde_cache_invariants()
 

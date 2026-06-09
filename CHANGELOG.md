@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.4.0 - 2026-06-04
+
 ### Added
 
 - Added a `signbitmap_rankquant_twostage` fuzz target and deterministic tests
   for the SignBitmap candidate generation plus RankQuant subset rerank
   pipeline used by downstream retrieval systems.
+- Added lockstep `ordvec-manifest` crate publishing to the unified release
+  pipeline, including OIDC trusted publishing, pre/post-publish byte-identity
+  checks, and release invariants covering both `.crate` artifacts.
 - Added a verifier-only `VerifiedLoadPlan` helper to `ordvec-manifest` so Rust
   callers can verify a manifest, retain the typed report, and load from the
   resolved artifact and sidecar paths without re-resolving manifest strings.
@@ -21,10 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Documented the `VerifiedLoadPlan` verify-then-load boundary, including the
+  fact that returned paths are not immutable file handles and must not be
+  treated as TOCTOU protection on mutable storage.
+- Documented duplicate-candidate behavior for `RankQuant` subset reranking and
+  the repo-local C ABI / Go wrapper.
 - Added a pre-1.0 compatibility policy covering stable and experimental Rust
   APIs, Python bindings, the lockstep Manifest crate, repo-local C/Go sidecars,
   primitive persisted formats, examples/docs, MSRV/feature changes, and
   release-note review expectations.
+
+### Fixed
+
+- Hardened Intel SDE setup caching and release-gate handling so transient Intel
+  CDN failures no longer leave AVX-512 checks dependent on one live download.
 
 ### Security
 
@@ -186,5 +201,6 @@ system dependencies** — no BLAS, no `ndarray`, no `faer`.
   AVX-512 intrinsics this crate relies on were stabilized.
 - Dual-licensed under **MIT OR Apache-2.0**.
 
+[0.4.0]: https://github.com/Fieldnote-Echo/ordvec/compare/v0.3.0...v0.4.0
 [0.2.0]: https://github.com/Fieldnote-Echo/ordvec/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Fieldnote-Echo/ordvec/releases/tag/v0.1.0

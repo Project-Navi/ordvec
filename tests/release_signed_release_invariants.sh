@@ -17,11 +17,15 @@
 #         |                   Rust-crates-only when PyPI files already exist)
 #         |
 #         v
-#     release-assets-draft   (uploads .crate/canonical .whl/.tar.gz/.sigstore.json/.intoto.jsonl to DRAFT release)
+#     release-assets-draft   (uploads core .crate/canonical .whl/.tar.gz/.sigstore.json/.intoto.jsonl to DRAFT release)
 #         |
-#         +--> publish-crate          (byte-identity check vs attested .crate, then cargo publish)
-#         +--> publish-manifest-crate (after publish-crate; same byte-identity proof)
-#         +--> publish-pypi           (Trusted Publishing, or existing-file verification)
+#         +--> publish-crate (byte-identity check vs attested .crate, then cargo publish)
+#         +--> publish-pypi  (Trusted Publishing, or existing-file verification)
+#         |
+#         +-> build/attest/provenance/release-manifest-assets-draft
+#         |      (after publish-crate; uploads manifest .crate/.sigstore.json/.intoto.jsonl)
+#         |
+#         +--> publish-manifest-crate (same byte-identity proof after manifest assets stage)
 #               |
 #               v
 #         publish-github-release (un-draft, ONLY after all registry publishes succeed)
@@ -54,9 +58,10 @@ job_body() {
 # Accept both `needs: [a, b, c]` (inline) and `needs:\n  - a\n  - b` (block) forms.
 job_needs() {
   local jobname="$1" needed="$2"
-  local body
+  local body escaped
   body="$(job_body "$jobname")"
-  printf '%s\n' "$body" | grep -qE "(^[[:space:]]+needs:.*\\b${needed}\\b|^[[:space:]]+-[[:space:]]+${needed}[[:space:]]*$)"
+  escaped="$(printf '%s' "$needed" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
+  printf '%s\n' "$body" | grep -qE "(^[[:space:]]+needs:[[:space:]]*\\[[^]]*(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|$)|^[[:space:]]+-[[:space:]]+${escaped}[[:space:]]*$)"
 }
 
 job_line() {
@@ -111,10 +116,28 @@ printf '%s\n' "$body_draft" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
   || fail "release-assets-draft must upload canonical Python dist, not raw rebuilt wheel/sdist artifacts"
 job_downloads_artifact_to_path release-assets-draft dist-crate dist \
   || fail "release-assets-draft must download the core dist-crate artifact into dist"
-job_downloads_artifact_to_path release-assets-draft dist-manifest-crate dist \
-  || fail "release-assets-draft must download the manifest dist-manifest-crate artifact into dist"
 printf '%s\n' "$body_draft" | grep -qE "$github_repo_env_re" \
   || fail "release-assets-draft must set \`GH_REPO: \${{ github.repository }}\` (no checkout, so gh release upload needs explicit repo context)"
+
+body_manifest_draft="$(job_body release-manifest-assets-draft)"
+job_needs release-manifest-assets-draft build-manifest-crate \
+  || fail "release-manifest-assets-draft must \`needs: build-manifest-crate\`"
+job_needs release-manifest-assets-draft attest-manifest \
+  || fail "release-manifest-assets-draft must \`needs: attest-manifest\`"
+job_needs release-manifest-assets-draft manifest-provenance \
+  || fail "release-manifest-assets-draft must \`needs: manifest-provenance\`"
+job_downloads_artifact_to_path release-manifest-assets-draft dist-manifest-crate dist \
+  || fail "release-manifest-assets-draft must download the manifest dist-manifest-crate artifact into dist"
+job_downloads_artifact_to_path release-manifest-assets-draft sigstore-bundle-manifest dist \
+  || fail "release-manifest-assets-draft must download the manifest Sigstore bundle into dist"
+printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.crate([^a-zA-Z]|$)' \
+  || fail "release-manifest-assets-draft must upload dist/*.crate"
+printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.sigstore\.json([^a-zA-Z]|$)' \
+  || fail "release-manifest-assets-draft must upload dist/*.sigstore.json"
+printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.intoto\.jsonl([^a-zA-Z]|$)' \
+  || fail "release-manifest-assets-draft must upload dist/*.intoto.jsonl"
+printf '%s\n' "$body_manifest_draft" | grep -qE "$github_repo_env_re" \
+  || fail "release-manifest-assets-draft must set \`GH_REPO: \${{ github.repository }}\`"
 
 # ----------------------------------------------------------------------
 # (3) release-assets-draft must NOT un-draft (the dedicated un-draft job owns
@@ -124,6 +147,9 @@ printf '%s\n' "$body_draft" | grep -qE "$github_repo_env_re" \
 if printf '%s\n' "$body_draft" | grep -qE 'gh release edit.*--draft=false'; then
   fail "release-assets-draft must NOT un-draft the Release (un-drafting belongs in publish-github-release, after all registry publishes succeed)"
 fi
+if printf '%s\n' "$body_manifest_draft" | grep -qE 'gh release edit.*--draft=false'; then
+  fail "release-manifest-assets-draft must NOT un-draft the Release (un-drafting belongs in publish-github-release, after all registry publishes succeed)"
+fi
 
 # ----------------------------------------------------------------------
 # (4) provenance uses slsa-github-generator pinned to a SEMANTIC VERSION TAG
@@ -132,13 +158,18 @@ fi
 prov="$(job_body provenance)"
 printf '%s\n' "$prov" | grep -qE 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
   || fail "provenance must \`uses: slsa-framework/slsa-github-generator/.../generator_generic_slsa3.yml@vX.Y.Z\` (tag-pinned per SLSA trust model)"
+manifest_prov="$(job_body manifest-provenance)"
+printf '%s\n' "$manifest_prov" | grep -qE 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
+  || fail "manifest-provenance must \`uses: slsa-framework/slsa-github-generator/.../generator_generic_slsa3.yml@vX.Y.Z\` (tag-pinned per SLSA trust model)"
 
 # ----------------------------------------------------------------------
-# (5) provenance must have `upload-assets: false` — release-assets-draft is
-#     the sole Release-asset writer; two concurrent writers would race.
+# (5) provenance must have `upload-assets: false` — asset-staging jobs, not
+#     SLSA generator workflows, own Release uploads.
 # ----------------------------------------------------------------------
 printf '%s\n' "$prov" | grep -qE '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
-  || fail "provenance must set \`upload-assets: false\` (single Release-asset writer is release-assets-draft; the .intoto.jsonl flows through the workflow-artifact path)"
+  || fail "provenance must set \`upload-assets: false\` (release-assets-draft uploads the collected .intoto.jsonl from the workflow-artifact path)"
+printf '%s\n' "$manifest_prov" | grep -qE '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
+  || fail "manifest-provenance must set \`upload-assets: false\` (release-manifest-assets-draft uploads the collected .intoto.jsonl from the workflow-artifact path)"
 
 # ----------------------------------------------------------------------
 # (6) provenance-name MUST end in `.intoto.jsonl` — Scorecard's provenance
@@ -146,6 +177,8 @@ printf '%s\n' "$prov" | grep -qE '^[[:space:]]+upload-assets:[[:space:]]*false[[
 # ----------------------------------------------------------------------
 printf '%s\n' "$prov" | grep -qE '^[[:space:]]+provenance-name:.*\.intoto\.jsonl[[:space:]]*$' \
   || fail "provenance must set \`provenance-name: <name>.intoto.jsonl\` (Scorecard Signed-Releases provenance probe matches this suffix only)"
+printf '%s\n' "$manifest_prov" | grep -qE '^[[:space:]]+provenance-name:.*ordvec-manifest-.*\.intoto\.jsonl[[:space:]]*$' \
+  || fail "manifest-provenance must set \`provenance-name: ordvec-manifest-<version>.intoto.jsonl\`"
 
 # ----------------------------------------------------------------------
 # (7) attest job grants id-token: write + attestations: write
@@ -155,31 +188,49 @@ printf '%s\n' "$att" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
   || fail "attest job must grant \`id-token: write\` (Sigstore OIDC signing cert)"
 printf '%s\n' "$att" | grep -qE '^[[:space:]]+attestations:[[:space:]]*write' \
   || fail "attest job must grant \`attestations: write\` (persist to the GitHub attestation store)"
-job_needs attest build-manifest-crate \
-  || fail "attest must \`needs: build-manifest-crate\` so the manifest .crate is an attestation subject"
-job_downloads_artifact_to_path attest dist-manifest-crate dist \
-  || fail "attest must download the dist-manifest-crate artifact into dist"
+att_manifest="$(job_body attest-manifest)"
+printf '%s\n' "$att_manifest" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+  || fail "attest-manifest job must grant \`id-token: write\` (Sigstore OIDC signing cert)"
+printf '%s\n' "$att_manifest" | grep -qE '^[[:space:]]+attestations:[[:space:]]*write' \
+  || fail "attest-manifest job must grant \`attestations: write\` (persist to the GitHub attestation store)"
+job_needs attest-manifest build-manifest-crate \
+  || fail "attest-manifest must \`needs: build-manifest-crate\`"
+job_downloads_artifact_to_path attest-manifest dist-manifest-crate dist \
+  || fail "attest-manifest must download the dist-manifest-crate artifact into dist"
 
 comb="$(job_body combine-hashes)"
-job_needs combine-hashes build-manifest-crate \
-  || fail "combine-hashes must \`needs: build-manifest-crate\` so the manifest .crate is a SLSA subject"
-job_downloads_artifact_to_path combine-hashes dist-manifest-crate dist \
-  || fail "combine-hashes must download the dist-manifest-crate artifact into dist"
+comb_manifest="$(job_body combine-manifest-hash)"
+job_needs combine-manifest-hash build-manifest-crate \
+  || fail "combine-manifest-hash must \`needs: build-manifest-crate\` so the manifest .crate is a SLSA subject"
+job_downloads_artifact_to_path combine-manifest-hash dist-manifest-crate dist \
+  || fail "combine-manifest-hash must download the dist-manifest-crate artifact into dist"
 
 build_manifest="$(job_body build-manifest-crate)"
-printf '%s\n' "$build_manifest" | grep -qE 'cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+ordvec-manifest[[:space:]]+--locked[[:space:]]+--no-verify' \
-  || fail "build-manifest-crate must package with --no-verify before the lockstep core crate exists on crates.io"
+job_needs build-manifest-crate publish-crate \
+  || fail "build-manifest-crate must \`needs: publish-crate\` so lockstep ordvec exists on crates.io"
+printf '%s\n' "$build_manifest" | grep -qE 'cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+ordvec-manifest[[:space:]]+--locked([^[:alnum:]_-]|$)' \
+  || fail "build-manifest-crate must package ordvec-manifest with Cargo registry verification"
+if printf '%s\n' "$build_manifest" | grep -q -- '--no-verify'; then
+  fail "build-manifest-crate must not use --no-verify after publish-crate"
+fi
 
 # ----------------------------------------------------------------------
 # (8) Registry publish jobs grant id-token: write AND need release-assets-draft.
 # ----------------------------------------------------------------------
-for pub in publish-crate publish-manifest-crate publish-pypi; do
+for pub in publish-crate publish-pypi; do
   body="$(job_body "$pub")"
   printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
     || fail "$pub must grant \`id-token: write\` (Trusted Publishing OIDC)"
   job_needs "$pub" release-assets-draft \
     || fail "$pub must \`needs: release-assets-draft\` (gated by attest + provenance via the draft-assets edge)"
 done
+body="$(job_body publish-manifest-crate)"
+printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+  || fail "publish-manifest-crate must grant \`id-token: write\` (Trusted Publishing OIDC)"
+job_needs publish-manifest-crate release-manifest-assets-draft \
+  || fail "publish-manifest-crate must \`needs: release-manifest-assets-draft\`"
+job_needs publish-manifest-crate publish-crate \
+  || fail "publish-manifest-crate must \`needs: publish-crate\`"
 
 # ----------------------------------------------------------------------
 # (9) Rust crate publish jobs prove byte-identity vs the attested .crate on BOTH

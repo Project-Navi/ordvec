@@ -10,10 +10,9 @@ ordvec index. It does not sign artifacts, manage keys, call networks, mutate
 index files, decide deployment trust policy, estimate encoder geometry, compute
 calibration statistics, or change the C ABI.
 
-`ordvec-manifest` is versioned in lockstep with the core `ordvec` crate. Before
-the first crates.io release that includes this package, use it from the GitHub
-workspace checkout; after that release, install it with `cargo install
-ordvec-manifest`.
+`ordvec-manifest` is versioned in lockstep with the core `ordvec` crate. From a
+workspace checkout, use it with `cargo run -p ordvec-manifest --`; from a
+published release, install it with `cargo install ordvec-manifest`.
 
 ```sh
 ordvec-manifest create \
@@ -25,7 +24,7 @@ ordvec-manifest create \
 ordvec-manifest verify --manifest path/to/index.manifest.json
 ```
 
-From a pre-release workspace checkout, prefix the same commands with
+From a workspace checkout, prefix the same commands with
 `cargo run -p ordvec-manifest --`.
 
 The schema version is `ordvec.index_manifest.v1`. Relative paths resolve from

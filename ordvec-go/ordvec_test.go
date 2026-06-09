@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -67,6 +68,23 @@ func query64() []float32 {
 		q[i] = 10 + float32(i)
 	}
 	return q
+}
+
+func TestVersionAccessors(t *testing.T) {
+	if ABIVersion() != 1 {
+		t.Fatalf("unexpected ABI version: %d", ABIVersion())
+	}
+	manifest, err := os.ReadFile(filepath.Join("..", "ordvec-ffi", "Cargo.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`(?m)^version = "([^"]+)"$`).FindSubmatch(manifest)
+	if match == nil {
+		t.Fatal("ordvec-ffi/Cargo.toml missing package version")
+	}
+	if got, want := Version(), string(match[1]); got != want {
+		t.Fatalf("unexpected library version: got %q want %q", got, want)
+	}
 }
 
 func TestLoadInfoSearchRankQuant(t *testing.T) {

@@ -601,7 +601,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "ordvec"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rand",
  "rand_chacha",
@@ -610,14 +610,14 @@ dependencies = [
 
 [[package]]
 name = "ordvec-ffi"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "ordvec",
 ]
 
 [[package]]
 name = "ordvec-manifest"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "clap",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "ordvec-python"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "numpy",
  "ordvec",

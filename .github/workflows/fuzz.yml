@@ -67,6 +67,8 @@ jobs:
           toolchain: ${{ env.FUZZ_NIGHTLY }}
       - name: Install cargo-fuzz (version-pinned)
         run: cargo "+${CARGO_FUZZ_INSTALL_TOOLCHAIN}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+      - name: Check fuzz lockfile is current
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
       - name: Smoke
         env:
           TARGET: ${{ matrix.target }}
@@ -105,6 +107,8 @@ jobs:
           toolchain: ${{ env.FUZZ_NIGHTLY }}
       - name: Install cargo-fuzz (version-pinned)
         run: cargo "+${CARGO_FUZZ_INSTALL_TOOLCHAIN}" install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
+      - name: Check fuzz lockfile is current
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
       - name: Fuzz
         env:
           TARGET: ${{ matrix.target }}

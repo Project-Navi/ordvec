@@ -32,17 +32,18 @@ The unified `release.yml`:
   files, verifies their SHA-256 digests from PyPI JSON, and uses those bytes as
   the GitHub Release assets;
 - emits **GitHub SLSA build provenance** (`actions/attest-build-provenance`)
-  and a **SLSA-generator `*.intoto.jsonl`** attached to the GitHub Release
-  **before** the gated publishes — a failed attestation fails the release
+  and **SLSA-generator `*.intoto.jsonl`** assets attached to the GitHub Release
+  **before** each gated publish — a failed attestation fails the release
   closed, so nothing ships without provenance recorded. In recovery mode where
-  PyPI files already exist, the GitHub/SLSA subjects are deliberately limited
-  to the Rust crates built by the current run; the Python files are verified
-  immutable PyPI bytes from the earlier Trusted Publishing upload, not falsely
-  claimed as rebuilt by the recovery run;
-- stages the **`.crate` files, canonical wheels, canonical sdist,
+  PyPI files already exist, the initial GitHub/SLSA subjects are deliberately
+  limited to the Rust crate built by the current run; the Python files are
+  verified immutable PyPI bytes from the earlier Trusted Publishing upload, not
+  falsely claimed as rebuilt by the recovery run;
+- stages the core **`.crate` file, canonical wheels, canonical sdist,
   `*.sigstore.json` bundle, and `*.intoto.jsonl` provenance** on the GitHub Release while it is still **a
-  DRAFT** (`release-assets-draft` is the sole Release-asset writer — no manual
-  attach, which is what v0.2.0's manual step missed);
+  DRAFT** (`release-assets-draft` owns the core/Python Release uploads, and
+  `release-manifest-assets-draft` later owns the manifest crate uploads; no
+  manual attach, which is what v0.2.0's manual step missed);
 - proves **byte-identity** in `publish-crate` and `publish-manifest-crate` on
   both sides of `cargo publish`:
     1. **pre-publish gate** — downloads the SLSA-attested `.crate` artifact,
@@ -59,13 +60,13 @@ The unified `release.yml`:
        `publish-github-release` never un-drafts the Release (the version is
        then yank-only on crates.io, but the failure is loudly observable);
 - publishes `ordvec-manifest` only after the lockstep `ordvec` crate has
-  published and passed its crates.io-served byte-identity readback. The
-  pre-publish manifest `.crate` artifact is created with `cargo package
-  --no-verify` because Cargo cannot verify a lockstep dependency version before
-  `ordvec` exists on crates.io; `publish-manifest-crate` then runs the normal
-  verified `cargo package -p ordvec-manifest --locked` after `ordvec` is
-  published and byte-compares that output to the attested artifact before
-  minting its own OIDC token;
+  published and passed its crates.io-served byte-identity readback. Cargo cannot
+  package a fresh lockstep manifest version until the matching core crate exists
+  on crates.io, so the workflow builds, attests, generates SLSA provenance for,
+  and stages the manifest `.crate` on the draft GitHub Release after
+  `publish-crate` succeeds; `publish-manifest-crate` then re-runs
+  `cargo package -p ordvec-manifest --locked` and byte-compares that output to
+  the attested artifact before minting its own OIDC token;
 - **un-drafts the GitHub Release ONLY after `publish-crate`,
   `publish-manifest-crate`, AND `publish-pypi` succeed**
   (`publish-github-release` is the sole un-draft point). If any publish fails
@@ -141,10 +142,12 @@ filename. Until a record is updated, the corresponding gated publish fails
      useful for this release;
    - distinguish `ordvec` primitive API/file compatibility from downstream
      application database behavior.
-3. Bump the version (crate `Cargo.toml`, `ordvec-manifest/Cargo.toml`, and
-   `ordvec-python` if the wheel changed) and update `CHANGELOG.md` with
-   migration notes for every intentional compatibility break. Commit on
-   `main`.
+3. Bump the lockstep version (`Cargo.toml`,
+   `ordvec-manifest/Cargo.toml` including its `ordvec` dependency,
+   `ordvec-python/Cargo.toml`, `ordvec-python/pyproject.toml`,
+   `ordvec-python/python/ordvec/__init__.py`, and `ordvec-ffi/Cargo.toml`) and
+   update `CHANGELOG.md` with migration notes for every intentional
+   compatibility break. Commit on `main`.
 4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`, and
@@ -193,13 +196,15 @@ filename. Until a record is updated, the corresponding gated publish fails
    git push origin vX.Y.Z
    ```
 
-   `release.yml` triggers automatically. It builds the two `.crate` files,
-   wheels, and sdist; selects the canonical Python dist (current build for a
-   new PyPI version, verified PyPI bytes for an existing immutable version);
-   attests the files this run can honestly attest (GitHub attestation store +
-   `*.sigstore.json`); generates the SLSA `*.intoto.jsonl`; and stages every
-   artifact, the attestation bundle, and the provenance on the GitHub Release
-   — **as a DRAFT**. It then pauses at the registry environment gates.
+   `release.yml` triggers automatically. It builds the core `.crate`, wheels,
+   and sdist; selects the canonical Python dist (current build for a new PyPI
+   version, verified PyPI bytes for an existing immutable version); attests the
+   files this run can honestly attest (GitHub attestation store +
+   `*.sigstore.json`); generates SLSA `*.intoto.jsonl`; and stages the core and
+   Python assets on the GitHub Release — **as a DRAFT**. After `publish-crate`
+   succeeds, it builds, attests, generates SLSA provenance for, and stages the
+   lockstep `ordvec-manifest` `.crate`, then pauses at the manifest registry
+   environment gate.
 8. **Approve each publish environment pause** in the Actions UI. There are
    three registry publish jobs: `publish-crate`, `publish-manifest-crate`, and
    `publish-pypi`. The two crates.io jobs use the same `crates-io` environment

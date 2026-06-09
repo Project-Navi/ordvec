@@ -219,10 +219,11 @@ jobs:
   # ----------------------------------------------------------------------
   # No-system-deps guarantee + packaging check. Fails if any forbidden
   # numerical/BLAS crate has crept into the dependency tree, then checks the
-  # publishable crate artifacts before a real release. The lockstep
-  # ordvec-manifest crate cannot run a registry-backed dry-run for a bumped
-  # version until ordvec itself is published, so CI verifies the pre-publish
-  # package artifact that release.yml later byte-compares after the core publish.
+  # publishable crate artifacts before a real release. A fresh lockstep
+  # ordvec-manifest version cannot be packaged until the matching ordvec core
+  # version exists on crates.io, so CI records that exact dependency-resolution
+  # case as deferred; release.yml performs the real manifest package check
+  # after publish-crate succeeds.
   # ----------------------------------------------------------------------
   deps:
     name: deps (no-system-deps + publish dry-run)
@@ -261,8 +262,32 @@ jobs:
         # from the current directory. The Python binding remains publish = false
         # and ships to PyPI via maturin.
         run: cargo publish -p ordvec --dry-run --locked
-      - name: cargo package --no-verify -p ordvec-manifest
-        run: cargo package -p ordvec-manifest --locked --no-verify
+      - name: cargo package -p ordvec-manifest when lockstep core exists
+        run: |
+          set -euo pipefail
+          core_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(pkg["version"] for pkg in json.load(sys.stdin)["packages"] if pkg["name"] == "ordvec"))')"
+          log="${RUNNER_TEMP}/ordvec-manifest-package.log"
+          if cargo package -p ordvec-manifest --locked 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          status="$(curl \
+            --silent \
+            --show-error \
+            --location \
+            --connect-timeout 10 \
+            --max-time 60 \
+            --retry 3 \
+            --retry-all-errors \
+            --user-agent "ordvec-ci/${core_version} (https://github.com/Fieldnote-Echo/ordvec)" \
+            --output /dev/null \
+            --write-out "%{http_code}" \
+            "https://crates.io/api/v1/crates/ordvec/${core_version}" || true)"
+          if [ "${status}" = "404" ]; then
+            echo "::notice::ordvec-manifest package check is deferred: the lockstep ordvec version is not published yet. release.yml packages ordvec-manifest after publish-crate succeeds."
+            exit 0
+          fi
+          echo "::error::ordvec-manifest package failed and ordvec ${core_version} registry status was ${status}; not deferring a real packaging failure."
+          exit 1
 
   # ----------------------------------------------------------------------
   # Pin the release-publish invariants. release.yml is tag-triggered (with the
@@ -274,9 +299,9 @@ jobs:
   #   * release_signed_release_invariants.sh — the signed-release / provenance
   #     graph stays intact: release-assets-draft stays draft, the SLSA
   #     generator emits a .intoto.jsonl, registry publishes need the draft
-  #     assets, both Rust crates prove byte-identity vs their attested .crate
-  #     files, and publish-github-release un-drafts ONLY after all registry
-  #     publishes succeed.
+  #     assets, Rust crates prove byte-identity vs their attested .crate files,
+  #     and publish-github-release un-drafts ONLY after all registry publishes
+  #     succeed.
   # ----------------------------------------------------------------------
   release-guard:
     name: release-publish invariants
