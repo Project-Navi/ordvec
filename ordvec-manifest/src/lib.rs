@@ -2747,12 +2747,15 @@ impl ManifestIndexParams {
     }
 }
 
-/// Successful verification data for a caller that will load an ordvec index.
+/// Verified paths and metadata for a caller-managed load.
 ///
-/// A plan intentionally contains paths and report data, not file descriptors or
-/// byte buffers. Treat it as proof of the verification just performed, then load
-/// from controlled storage immediately or re-verify if another actor may have
-/// changed the files.
+/// A `VerifiedLoadPlan` means the manifest, primary artifact, row-identity
+/// file, and declared auxiliary artifacts verified at the time verification
+/// ran. It is not a durable capability over mutable storage: the plan does not
+/// pin file descriptors, hold locks, buffer bytes, or guarantee that bytes at
+/// the returned paths remain unchanged after verification. Treat it as proof of
+/// the verification just performed, then load from controlled storage
+/// immediately or re-verify if another actor may have changed the files.
 #[derive(Clone, Debug)]
 pub struct VerifiedLoadPlan {
     manifest_path: Option<PathBuf>,

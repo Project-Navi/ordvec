@@ -8,6 +8,7 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn verify_with_registry(
@@ -110,6 +111,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
                 manifest_path TEXT NOT NULL,
                 checked_at TEXT NOT NULL,
                 ok INTEGER NOT NULL,
+                manifest_location_sha256 TEXT,
                 manifest_sha256 TEXT,
                 options_sha256 TEXT,
                 artifact_sha256 TEXT,
@@ -135,6 +137,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
             manifest_path TEXT NOT NULL,
             checked_at TEXT NOT NULL,
             ok INTEGER NOT NULL,
+            manifest_location_sha256 TEXT,
             manifest_sha256 TEXT,
             options_sha256 TEXT,
             artifact_sha256 TEXT,
@@ -147,6 +150,7 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
         CREATE INDEX IF NOT EXISTS verification_reports_cache_idx
           ON verification_reports(
             manifest_id,
+            manifest_location_sha256,
             manifest_sha256,
             options_sha256,
             artifact_sha256,
@@ -194,6 +198,7 @@ fn store_report(
             manifest_path,
             checked_at,
             ok,
+            manifest_location_sha256,
             manifest_sha256,
             options_sha256,
             artifact_sha256,
@@ -202,12 +207,13 @@ fn store_report(
             auxiliary_artifacts_sha256,
             encoder_distortion_profile_sha256,
             report_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             document.manifest.manifest_id,
             manifest_path.display().to_string(),
             report.checked_at,
             i64::from(report.ok),
+            cache_key.map(|key| key.manifest_location_sha256.as_str()),
             cache_key.map(|key| key.manifest_sha256.as_str()),
             cache_key.map(|key| key.options_sha256.as_str()),
             cache_key.map(|key| key.artifact_sha256.as_str()),
@@ -234,29 +240,31 @@ fn load_cached_report(
             "SELECT report_id, length(CAST(report_json AS BLOB))
              FROM verification_reports
              WHERE manifest_id = ?1
-               AND manifest_sha256 = ?2
-               AND options_sha256 = ?3
-               AND artifact_sha256 = ?4
+               AND manifest_location_sha256 = ?2
+               AND manifest_sha256 = ?3
+               AND options_sha256 = ?4
+               AND artifact_sha256 = ?5
                AND (
-                 (row_identity_sha256 IS NULL AND ?5 IS NULL)
-                 OR row_identity_sha256 = ?5
+                 (row_identity_sha256 IS NULL AND ?6 IS NULL)
+                 OR row_identity_sha256 = ?6
                )
                AND (
-                 (calibration_profile_sha256 IS NULL AND ?6 IS NULL)
-                 OR calibration_profile_sha256 = ?6
+                 (calibration_profile_sha256 IS NULL AND ?7 IS NULL)
+                 OR calibration_profile_sha256 = ?7
                )
                AND (
-                 (auxiliary_artifacts_sha256 IS NULL AND ?7 IS NULL)
-                 OR auxiliary_artifacts_sha256 = ?7
+                 (auxiliary_artifacts_sha256 IS NULL AND ?8 IS NULL)
+                 OR auxiliary_artifacts_sha256 = ?8
                )
                AND (
-                 (encoder_distortion_profile_sha256 IS NULL AND ?8 IS NULL)
-                 OR encoder_distortion_profile_sha256 = ?8
+                 (encoder_distortion_profile_sha256 IS NULL AND ?9 IS NULL)
+                 OR encoder_distortion_profile_sha256 = ?9
                )
              ORDER BY report_id DESC
              LIMIT 1",
             params![
                 manifest_id,
+                cache_key.manifest_location_sha256.as_str(),
                 cache_key.manifest_sha256.as_str(),
                 cache_key.options_sha256.as_str(),
                 cache_key.artifact_sha256.as_str(),
@@ -296,6 +304,7 @@ fn load_cached_report(
 
 #[derive(Clone, Debug)]
 struct CacheKey {
+    manifest_location_sha256: String,
     manifest_sha256: String,
     options_sha256: String,
     artifact_sha256: String,
@@ -314,6 +323,12 @@ struct CacheableVerifyOptions {
     limits: ResourceLimits,
 }
 
+#[derive(Serialize)]
+struct CacheableManifestLocation {
+    manifest_path: String,
+    base_dir: String,
+}
+
 impl CacheableVerifyOptions {
     fn from_options(options: &VerifyOptions) -> Self {
         Self {
@@ -329,6 +344,26 @@ impl CacheableVerifyOptions {
     }
 }
 
+fn manifest_location_sha256(
+    manifest_path: &Path,
+    document: &ManifestDocument,
+) -> Result<Option<String>, ManifestError> {
+    let manifest_path = match fs::canonicalize(manifest_path) {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let base_dir = match fs::canonicalize(&document.base_dir) {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let material = CacheableManifestLocation {
+        manifest_path: hex::encode(manifest_path.as_os_str().as_encoded_bytes()),
+        base_dir: hex::encode(base_dir.as_os_str().as_encoded_bytes()),
+    };
+    let json = serde_json::to_vec(&material)?;
+    Ok(Some(sha256_bytes(&json)))
+}
+
 fn current_cache_key(
     document: &ManifestDocument,
     manifest_path: &Path,
@@ -342,6 +377,9 @@ fn current_cache_key(
     ) {
         Ok(hash) => hash.sha256,
         Err(_) => return Ok(None),
+    };
+    let Some(manifest_location_sha256) = manifest_location_sha256(manifest_path, document)? else {
+        return Ok(None);
     };
     let options_json = serde_json::to_vec(&CacheableVerifyOptions::from_options(options))?;
     let options_sha256 = sha256_bytes(&options_json);
@@ -407,6 +445,7 @@ fn current_cache_key(
         current_encoder_distortion_profile_sha256(document, options)?;
 
     Ok(Some(CacheKey {
+        manifest_location_sha256,
         manifest_sha256,
         options_sha256,
         artifact_sha256,
@@ -431,6 +470,9 @@ fn cache_key_from_report(
     ) {
         Ok(hash) => hash.sha256,
         Err(_) => return Ok(None),
+    };
+    let Some(manifest_location_sha256) = manifest_location_sha256(manifest_path, document)? else {
+        return Ok(None);
     };
     let options_json = serde_json::to_vec(&CacheableVerifyOptions::from_options(options))?;
     let options_sha256 = sha256_bytes(&options_json);
@@ -476,6 +518,7 @@ fn cache_key_from_report(
         None
     };
     Ok(Some(CacheKey {
+        manifest_location_sha256,
         manifest_sha256,
         options_sha256,
         artifact_sha256,
@@ -644,6 +687,9 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         .map_err(sqlite_err)?;
     Ok(!columns.iter().any(|column| column == "report_id")
         || !columns.iter().any(|column| column == "manifest_sha256")
+        || !columns
+            .iter()
+            .any(|column| column == "manifest_location_sha256")
         || !columns
             .iter()
             .any(|column| column == "calibration_profile_sha256")
