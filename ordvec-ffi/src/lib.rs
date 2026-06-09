@@ -73,8 +73,8 @@ pub struct ordvec_search_params_t {
     pub query: *const f32,
     pub dim: u64,
     pub k: u64,
-    /// Optional subset row IDs. These are entry lists, not sets: duplicate
-    /// candidates are scored independently and can produce duplicate hits.
+    /// Optional subset rows. Rows are global row IDs, may be unsorted, and may
+    /// contain duplicates; duplicate entries are scored independently.
     pub candidate_rows: *const u32,
     pub candidate_count: u64,
     pub flags: u64,
@@ -1141,6 +1141,36 @@ mod tests {
             );
             assert_eq!(returned, 2);
             assert_eq!([hits[0].row_id, hits[1].row_id], [1, 2]);
+
+            let duplicate_candidates = [3u32, 1, 1, 2];
+            params.k = 3;
+            params.candidate_rows = duplicate_candidates.as_ptr();
+            params.candidate_count = duplicate_candidates.len() as u64;
+            let mut hits = vec![
+                ordvec_hit_t {
+                    row_id: 0,
+                    id: 0,
+                    score: 0.0,
+                    reserved: 0
+                };
+                3
+            ];
+            let mut stats = default_stats();
+            assert_eq!(
+                ordvec_index_search(
+                    handle,
+                    &params,
+                    hits.as_mut_ptr(),
+                    3,
+                    &mut returned,
+                    &mut stats
+                ),
+                ORDVEC_STATUS_OK
+            );
+            assert_eq!(returned, 3);
+            assert_eq!([hits[0].row_id, hits[1].row_id, hits[2].row_id], [1, 1, 2]);
+            assert_eq!(stats.candidate_count, 4);
+            assert_eq!(stats.vectors_scored, 4);
             ordvec_index_free(handle);
         }
         std::fs::remove_file(path).ok();

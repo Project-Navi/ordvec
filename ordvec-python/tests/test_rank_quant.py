@@ -348,7 +348,7 @@ def test_search_asymmetric_subset_ties_use_global_row_ids():
     np.testing.assert_array_equal(scores, np.array([0.0, 0.0], dtype=np.float32))
 
 
-def test_search_asymmetric_subset_duplicates_remain_duplicate_entries():
+def test_search_asymmetric_subset_duplicate_candidates_remain_duplicates():
     vectors = np.ones((12, 64), dtype=np.float32)
     idx = RankQuant(dim=64, bits=2)
     idx.add(vectors)

@@ -355,12 +355,16 @@ jobs:
   #
   # Pattern adapted from microsoft/DiskANN's CI (also a vector-search crate).
   # The local setup-intel-sde action owns the fixed Intel downloadmirror build,
-  # SHA256 verification, and x86_64 runner guard. If Intel ever moves the URL
-  # or the bytes change, this job fails loudly (the gate stays honest) rather
-  # than silently skipping AVX-512 coverage.
+  # SHA256 verification, and x86_64 runner guard. The SHA gate still fails
+  # closed for any archive we extract. While Intel's CloudFront/WAF challenge
+  # blocks GitHub-hosted runners, this PR temporarily lets the job report an
+  # explicit unavailable state and skip SDE-dependent steps.
   avx512:
     name: avx512 (Intel SDE / Sapphire Rapids)
     runs-on: ubuntu-24.04
+    env:
+      SDE_VERSION: sde-external-10.8.0-2026-03-15-lin
+      SDE_SHA256: 50b320cd226acef7a491f5b321fc1be3c3c7984f9e27a456e64894b5b0979dd3
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -372,10 +376,27 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Restore Intel SDE archive cache
+        # The setup action still verifies SHA-256 before extraction. The cache
+        # only reduces release-gate exposure to Intel downloadmirror outages.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ordvec-intel-sde
+          key: intel-sde-${{ runner.os }}-${{ runner.arch }}-${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}
+          restore-keys: |
+            intel-sde-${{ runner.os }}-${{ runner.arch }}-
       - name: install Intel SDE
         id: sde
         uses: ./.github/actions/setup-intel-sde
+        with:
+          version: ${{ env.SDE_VERSION }}
+          sha256: ${{ env.SDE_SHA256 }}
+          allow-unavailable: true
+      - name: note Intel SDE unavailable
+        if: steps.sde.outputs.sde-available != 'true'
+        run: echo "::notice::Intel SDE archive unavailable; temporarily skipping AVX-512 SDE coverage."
       - name: sanity-check AVX-512 detection under SDE
+        if: steps.sde.outputs.sde-available == 'true'
         env:
           SDE_PATH: ${{ steps.sde.outputs.sde-path }}
         run: |
@@ -409,6 +430,7 @@ jobs:
           "${SDE_PATH}" -spr -- \
             "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
       - name: cargo test under SDE (AVX-512 kernels)
+        if: steps.sde.outputs.sde-available == 'true'
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ steps.sde.outputs.sde-path }} -spr --
         run: |

@@ -153,6 +153,15 @@ filename. Until a record is updated, the corresponding gated publish fails
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`,
    `codeql.yml`, `actionlint.yml`, and `zizmor.yml`.
+   - The `ci.yml` AVX-512 job is release-blocking and installs Intel SDE. A
+     downloadmirror `403` / outage is external infrastructure, but it still means
+     the SHA is **not releasable** until that same SHA has a successful `ci.yml`
+     run on `main`. The setup action restores a SHA-verified archive cache when
+     available; if the cache misses and Intel's download path is unavailable,
+     wait, rerun, or land a reviewed SDE pin/cache update before tagging.
+   - Before the final tag, spot-check `.github/actions/setup-intel-sde/action.yml`
+     against Intel's SDE download page: version, Linux archive name, and SHA-256
+     must match the currently accepted pin.
    - **Do not merge another PR between the release commit and the tag push.**
      `ci.yml` / `python.yml` use `cancel-in-progress`, so merging again moves
      `main` HEAD and cancels the previous commit's in-flight CI. The
