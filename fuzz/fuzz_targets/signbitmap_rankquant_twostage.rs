@@ -31,6 +31,24 @@ struct TwoStageInput {
     payload: Vec<u8>,
 }
 
+fn assert_rankquant_order(label: &str, scores: &[f32], ids: &[i64]) {
+    assert_eq!(scores.len(), ids.len(), "{label}: score/id length mismatch");
+    for slot in 1..scores.len() {
+        let prev = (scores[slot - 1], ids[slot - 1]);
+        let cur = (scores[slot], ids[slot]);
+        assert!(
+            cur.0 <= prev.0,
+            "{label}: violates score-desc order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
+            slot - 1,
+        );
+        assert!(
+            cur.0 != prev.0 || cur.1 >= prev.1,
+            "{label}: violates id-asc tie order at slots {} and {slot}: prev={prev:?} cur={cur:?}",
+            slot - 1,
+        );
+    }
+}
+
 impl<'a> Arbitrary<'a> for TwoStageInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
         let dim = *u.choose(&[64usize, 128, 256, 512])?;
@@ -108,7 +126,7 @@ fuzz_target!(|input: TwoStageInput| {
     assert_eq!(scores.len(), k_eff);
     assert_eq!(ids.len(), k_eff);
     assert!(scores.iter().all(|score| score.is_finite()));
-    assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]));
+    assert_rankquant_order("subset rerank", &scores, &ids);
     for &id in &ids {
         assert!(id >= 0);
         assert!(subset_candidates.contains(&(id as u32)));

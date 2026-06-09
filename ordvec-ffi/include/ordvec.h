@@ -52,6 +52,10 @@ typedef struct {
   const float *query;
   uint64_t dim;
   uint64_t k;
+  /**
+   * Optional subset rows. Rows are global row IDs, may be unsorted, and may
+   * contain duplicates; duplicate entries are scored independently.
+   */
   const uint32_t *candidate_rows;
   uint64_t candidate_count;
   uint64_t flags;

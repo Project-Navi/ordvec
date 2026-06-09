@@ -2032,6 +2032,51 @@ fn verify_for_load_fails_closed_with_report_for_corrupted_artifact() {
 }
 
 #[test]
+fn verify_for_load_plan_is_not_a_byte_pin() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let plan = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap();
+    assert_eq!(
+        plan.artifact_path(),
+        fs::canonicalize(&index).unwrap().as_path()
+    );
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&index)
+        .unwrap()
+        .write_all(b"\0")
+        .unwrap();
+
+    assert!(plan.report().ok);
+    assert!(
+        RankQuant::load(plan.artifact_path()).is_err(),
+        "a previously returned plan still resolves to the current mutable path"
+    );
+
+    let err = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap_err();
+    let VerifiedLoadPlanError::VerificationFailed(report) = err else {
+        panic!("expected verification failure");
+    };
+    assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
+    assert!(error_codes(&report).contains(&"artifact_file_size_mismatch"));
+}
+
+#[test]
 fn jsonl_row_identity_is_strict_and_duplicate_ids_need_opt_in() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_index(temp.path());
@@ -2786,6 +2831,303 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
         .warnings
         .iter()
         .any(|issue| issue.code == "sqlite_activation_forced"));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_combined_verified_load_matrix_respects_limits_paths_and_cache() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let assets = temp.path().join("assets");
+    let manifests = temp.path().join("manifests");
+    fs::create_dir_all(&assets).unwrap();
+    fs::create_dir_all(&manifests).unwrap();
+
+    let index = write_index_kind(&assets, FixtureKind::RankQuant);
+    let row_map_path = assets.join("rows.jsonl");
+    write_row_map(&row_map_path, &[("doc-a", None), ("doc-b", Some("doc-a"))]);
+    let required_path = assets.join("required-sidecar.json");
+    fs::write(&required_path, b"{\"required\":true}\n").unwrap();
+    let required_hash = sha256_file(&required_path).unwrap();
+    let optional_path = assets.join("optional-sidecar.json");
+    fs::write(&optional_path, b"{\"optional\":true}\n").unwrap();
+    let optional_hash = sha256_file(&optional_path).unwrap();
+    fs::remove_file(&optional_path).unwrap();
+
+    let manifest_path = manifests.join("manifest.json");
+    let mut manifest = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::Jsonl(row_map_path.clone()),
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            allow_path_escape: true,
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap();
+    let profile_path = assets.join("calibration.f64");
+    let profile_hash = write_profile(
+        &profile_path,
+        manifest.artifact.dim * 4 * std::mem::size_of::<f64>(),
+    );
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "../assets/calibration.f64",
+        profile_hash,
+        CalibrationOrdinalization::Bucket {
+            dim: manifest.artifact.dim,
+            bits: 2,
+        },
+        ProfileParameterization::BucketFrequency,
+        vec![manifest.artifact.dim, 4],
+    ));
+    let distortion_path = assets.join("distortion.json");
+    let distortion_hash = write_profile(&distortion_path, 128);
+    let mut distortion = distortion_profile(
+        &manifest,
+        Some("../assets/distortion.json".to_string()),
+        Some(distortion_hash.clone()),
+        DistortionEvidenceKind::EmpiricalSample,
+    );
+    distortion.calibration_profile_id = manifest
+        .calibration
+        .as_ref()
+        .map(|calibration| calibration.profile_id.clone());
+    manifest.encoder_distortion = Some(distortion);
+    manifest.auxiliary_artifacts = vec![
+        auxiliary_artifact(
+            "optional",
+            "../assets/optional-sidecar.json",
+            optional_hash.clone(),
+            false,
+        ),
+        auxiliary_artifact(
+            "required",
+            "../assets/required-sidecar.json",
+            required_hash.clone(),
+            true,
+        ),
+    ];
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap_err();
+    let VerifiedLoadPlanError::VerificationFailed(report) = err else {
+        panic!("expected path-policy verification failure");
+    };
+    let codes = error_codes(&report);
+    for code in [
+        "artifact_path_escape_rejected",
+        "row_identity_path_escape_rejected",
+        "calibration_profile_path_escape_rejected",
+        "encoder_distortion_profile_path_escape_rejected",
+        "auxiliary_artifact_path_escape_rejected",
+    ] {
+        assert!(codes.contains(&code), "missing {code}: {:?}", report.errors);
+    }
+
+    let options = VerifyOptions {
+        allow_path_escape: true,
+        limits: ResourceLimits {
+            max_row_identity_rows: 2,
+            max_row_identity_jsonl_line_bytes: 512,
+            max_auxiliary_artifacts: 2,
+            max_auxiliary_artifact_bytes: required_hash.size_bytes.max(optional_hash.size_bytes),
+            max_encoder_distortion_profile_bytes: distortion_hash.size_bytes,
+            max_report_issues: 64,
+            ..ResourceLimits::default()
+        },
+        ..VerifyOptions::default()
+    };
+    let plan = verify_for_load(&manifest_path, options.clone()).unwrap();
+    assert_eq!(
+        plan.artifact_path(),
+        fs::canonicalize(&index).unwrap().as_path()
+    );
+    assert_eq!(
+        plan.row_identity().path(),
+        Some(fs::canonicalize(&row_map_path).unwrap().as_path())
+    );
+    assert_eq!(plan.row_identity().validated_rows(), Some(2));
+    assert_eq!(plan.auxiliary_artifacts().len(), 2);
+    assert_eq!(plan.auxiliary_artifacts()[0].name(), "optional");
+    assert_eq!(
+        plan.auxiliary_artifacts()[0].state(),
+        AuxiliaryArtifactState::OptionalAbsent
+    );
+    assert_eq!(plan.auxiliary_artifacts()[1].name(), "required");
+    assert_eq!(
+        plan.auxiliary_artifacts()[1].state(),
+        AuxiliaryArtifactState::Verified
+    );
+    let required_canonical = fs::canonicalize(&required_path).unwrap();
+    let required_canonical_display = required_canonical.display().to_string();
+    assert_eq!(
+        plan.auxiliary_artifacts()[1].path(),
+        Some(required_canonical.as_path())
+    );
+    assert!(!plan.auxiliary_artifacts()[0].required());
+    assert_eq!(
+        plan.auxiliary_artifacts()[0].reason_code(),
+        Some("auxiliary_artifact_optional_absent")
+    );
+    assert_eq!(plan.auxiliary_artifacts()[0].sha256(), None);
+    assert_eq!(plan.auxiliary_artifacts()[0].size_bytes(), None);
+    assert!(plan.auxiliary_artifacts()[1].required());
+    assert_eq!(plan.auxiliary_artifacts()[1].reason_code(), None);
+    assert_eq!(
+        plan.auxiliary_artifacts()[1].sha256(),
+        Some(required_hash.sha256.as_str())
+    );
+    assert_eq!(
+        plan.auxiliary_artifacts()[1].size_bytes(),
+        Some(required_hash.size_bytes)
+    );
+    let auxiliary_report = &plan.report().auxiliary_artifacts;
+    assert_eq!(auxiliary_report.len(), 2);
+    assert_eq!(
+        auxiliary_report[0].manifest_path,
+        "../assets/optional-sidecar.json"
+    );
+    assert_eq!(
+        auxiliary_report[0].expected_sha256.as_deref(),
+        Some(optional_hash.sha256.as_str())
+    );
+    assert_eq!(
+        auxiliary_report[0].expected_size_bytes,
+        Some(optional_hash.size_bytes)
+    );
+    assert_eq!(auxiliary_report[0].canonical_path, None);
+    assert_eq!(auxiliary_report[0].sha256, None);
+    assert_eq!(auxiliary_report[0].size_bytes, None);
+    assert_eq!(
+        auxiliary_report[0].reason_code.as_deref(),
+        Some("auxiliary_artifact_optional_absent")
+    );
+    assert_eq!(
+        auxiliary_report[1].manifest_path,
+        "../assets/required-sidecar.json"
+    );
+    assert_eq!(
+        auxiliary_report[1].expected_sha256.as_deref(),
+        Some(required_hash.sha256.as_str())
+    );
+    assert_eq!(
+        auxiliary_report[1].expected_size_bytes,
+        Some(required_hash.size_bytes)
+    );
+    assert_eq!(
+        auxiliary_report[1].canonical_path.as_deref(),
+        Some(required_canonical_display.as_str())
+    );
+    assert_eq!(
+        auxiliary_report[1].sha256.as_deref(),
+        Some(required_hash.sha256.as_str())
+    );
+    assert_eq!(
+        auxiliary_report[1].size_bytes,
+        Some(required_hash.size_bytes)
+    );
+    assert_eq!(auxiliary_report[1].reason_code, None);
+    assert!(plan.report().calibration.present);
+    assert!(plan.report().calibration.profile_sha256.is_some());
+    assert!(plan.report().calibration.profile_canonical_path.is_some());
+    assert!(plan.report().encoder_distortion.present);
+    assert!(plan.report().encoder_distortion.profile_sha256.is_some());
+    assert!(plan
+        .report()
+        .encoder_distortion
+        .profile_canonical_path
+        .is_some());
+
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let document_plan = verify_document_for_load(&document, options.clone()).unwrap();
+    assert_eq!(document_plan.artifact_path(), plan.artifact_path());
+
+    let db = temp.path().join("registry.sqlite");
+    let first = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        options.clone(),
+        true,
+    )
+    .unwrap();
+    assert!(first.ok, "{:?}", first.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    let (
+        row_identity_sha256,
+        calibration_profile_sha256,
+        auxiliary_artifacts_sha256,
+        encoder_distortion_profile_sha256,
+    ): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT row_identity_sha256,
+                    calibration_profile_sha256,
+                    auxiliary_artifacts_sha256,
+                    encoder_distortion_profile_sha256
+             FROM verification_reports
+             ORDER BY report_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert!(row_identity_sha256.is_some());
+    assert!(calibration_profile_sha256.is_some());
+    assert!(auxiliary_artifacts_sha256.is_some());
+    assert!(encoder_distortion_profile_sha256.is_some());
+
+    let second = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        options.clone(),
+        true,
+    )
+    .unwrap();
+    assert!(second.ok, "{:?}", second.errors);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1, "unchanged verification should reuse the cache");
+
+    fs::write(&distortion_path, vec![1u8; 128]).unwrap();
+    let drift = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        options,
+        true,
+    )
+    .unwrap();
+    assert!(!drift.ok, "distortion drift must force fresh verification");
+    assert!(error_codes(&drift).contains(&"encoder_distortion_profile_sha256_mismatch"));
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM verification_reports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 2);
 }
 
 #[cfg(feature = "sqlite")]
