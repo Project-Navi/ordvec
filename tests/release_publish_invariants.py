@@ -1209,6 +1209,60 @@ def check_publish_crates(workflow: dict[str, Any], path: str) -> None:
     manifest_job = mapping(jobs.get("publish-manifest-crate"), f"{path}: jobs.publish-manifest-crate")
     if not has_need(manifest_job, "publish-crate"):
         fail(f"{path}: publish-manifest-crate must need publish-crate so ordvec publishes first")
+    manifest_steps = sequence(
+        manifest_job.get("steps"), f"{path}: jobs.publish-manifest-crate.steps"
+    )
+    manifest_recovery_steps: list[tuple[int, dict[str, Any]]] = []
+    for index, raw_step in enumerate(manifest_steps):
+        step = mapping(raw_step, f"{path}: jobs.publish-manifest-crate.steps[{index}]")
+        if step.get("name") == "Check for existing ordvec-manifest .crate recovery":
+            manifest_recovery_steps.append((index, step))
+    if len(manifest_recovery_steps) != 1:
+        fail(
+            f"{path}: publish-manifest-crate must have exactly one first-publish recovery check"
+        )
+    recovery_index, recovery_step = manifest_recovery_steps[0]
+    if recovery_step.get("id") != "manifest_crate_recovery":
+        fail(f"{path}: manifest crate recovery step must have id manifest_crate_recovery")
+    recovery_run = recovery_step.get("run")
+    if not isinstance(recovery_run, str):
+        fail(f"{path}: manifest crate recovery step must be a run step")
+    for required in (
+        "already_published=true",
+        "already_published=false",
+        "Refusing recovery",
+        "crates.io already serves byte-identical ordvec-manifest",
+    ):
+        if required not in recovery_run:
+            fail(f"{path}: manifest crate recovery step must contain {required!r}")
+    for url_var in ("API_URL", "STATIC_URL"):
+        if not any(
+            has_shell_arg(words, shell_vars(url_var))
+            and has_shell_option_value(
+                words, {"--user-agent", "-A"}, shell_vars("CRATES_IO_USER_AGENT")
+            )
+            and has_shell_option_value(words, {"--output", "-o"}, shell_vars("EXISTING"))
+            for words in shell_curl_commands(recovery_run)
+        ):
+            fail(
+                f"{path}: manifest crate recovery step must curl ${url_var} "
+                "with CRATES_IO_USER_AGENT into $EXISTING"
+            )
+    for index, raw_step in enumerate(manifest_steps):
+        step = mapping(raw_step, f"{path}: jobs.publish-manifest-crate.steps[{index}]")
+        name = step.get("name")
+        if name in {
+            "Validate manifest publish dry-run",
+            "Mint a short-lived crates.io credential (OIDC)",
+            "cargo publish",
+        }:
+            if index < recovery_index:
+                fail(f"{path}: {name} must run after the manifest crate recovery check")
+            if step.get("if") != "steps.manifest_crate_recovery.outputs.already_published != 'true'":
+                fail(
+                    f"{path}: {name} must be skipped when manifest crate recovery found "
+                    "byte-identical existing bytes"
+                )
     build_manifest_job = mapping(jobs.get("build-manifest-crate"), f"{path}: jobs.build-manifest-crate")
     if not has_need(build_manifest_job, "publish-crate"):
         fail(f"{path}: build-manifest-crate must need publish-crate so lockstep ordvec exists")

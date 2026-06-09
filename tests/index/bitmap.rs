@@ -9,6 +9,17 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
 
+fn corpus_after_swap_remove(corpus: &[f32], rows: usize, remove: usize) -> Vec<f32> {
+    let mut expected = corpus[..rows * D].to_vec();
+    let last = rows - 1;
+    if remove != last {
+        let src = last * D..(last + 1) * D;
+        expected.copy_within(src, remove * D);
+    }
+    expected.truncate(last * D);
+    expected
+}
+
 #[test]
 fn rank_io_round_trip_bitmap_index() {
     let corpus = make_corpus(42);
@@ -28,6 +39,59 @@ fn rank_io_round_trip_bitmap_index() {
     let r1 = idx.search(&q, 10);
     let r2 = loaded.search(&q, 10);
     assert_eq!(r1.indices_for_query(0), r2.indices_for_query(0));
+}
+
+#[test]
+fn bitmap_swap_remove_cases_match_rebuilt_probe() {
+    let corpus = make_corpus(40_001);
+    let query = &make_corpus(40_002)[..D];
+
+    for (rows, remove) in [(1usize, 0usize), (8, 0), (8, 3), (8, 7)] {
+        let mut index = Bitmap::new(D, D / 4);
+        index.add(&corpus[..rows * D]);
+        let moved = index.swap_remove(remove);
+
+        let expected_corpus = corpus_after_swap_remove(&corpus, rows, remove);
+        let mut rebuilt = Bitmap::new(D, D / 4);
+        rebuilt.add(&expected_corpus);
+
+        assert_eq!(moved, rows - 1);
+        assert_eq!(index.len(), rows - 1);
+        assert_eq!(index.byte_size(), (rows - 1) * index.bytes_per_vec());
+        assert_eq!(
+            index.top_m_candidates(query, rows),
+            rebuilt.top_m_candidates(query, rows),
+            "remove={remove} rows={rows}"
+        );
+        assert_eq!(
+            index.search(query, rows).indices_for_query(0),
+            rebuilt.search(query, rows).indices_for_query(0),
+            "remove={remove} rows={rows}"
+        );
+    }
+}
+
+#[test]
+fn bitmap_write_then_load_after_swap_remove_preserves_probe() {
+    let corpus = make_corpus(40_003);
+    let mut index = Bitmap::new(D, D / 4);
+    index.add(&corpus);
+    index.swap_remove(17);
+
+    let tmp = std::env::temp_dir().join(format!(
+        "ordvec_bitmap_after_swap_remove_{}.tvbm",
+        std::process::id()
+    ));
+    index.write(&tmp).expect("write");
+    let loaded = Bitmap::load(&tmp).expect("load");
+    std::fs::remove_file(&tmp).ok();
+
+    let query = &make_corpus(40_004)[..D];
+    assert_eq!(loaded.len(), index.len());
+    assert_eq!(
+        loaded.top_m_candidates(query, 32),
+        index.top_m_candidates(query, 32)
+    );
 }
 
 #[test]

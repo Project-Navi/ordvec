@@ -47,17 +47,20 @@ loading. The lockstep `ordvec-manifest` crate provides a sidecar verifier for
 that pre-load step:
 
 ```sh
-cargo run -p ordvec-manifest -- verify --manifest path/to/index.manifest.json
+cargo run -p ordvec-manifest --features cli -- verify --manifest path/to/index.manifest.json
 ```
 
 The `create` command emits default-verifiable manifests by default: artifact
 and row-identity paths must resolve under the output manifest directory. If a
 deployment intentionally keeps those files outside that directory, create with
 `--allow-path-escape` and verify with the matching path-policy flag.
+`create` can also bind caller-owned sidecars with `--aux NAME=PATH` for
+required artifacts and `--optional-aux NAME=PATH` for optional artifacts.
 Rust callers can use `verify_for_load(manifest_path, VerifyOptions)` to get a
 `VerifiedLoadPlan` containing the canonical artifact path, probed metadata,
 row-identity summary, auxiliary artifact states, and the full verification
-report. Callers that already hold a `ManifestDocument` can use
+report, then call `require_auxiliary(name)` for sidecars that must be present
+before loading. Callers that already hold a `ManifestDocument` can use
 `verify_document_for_load(&document, VerifyOptions)` without re-reading the
 manifest file. The plan helpers do not call an ordvec loader, pin file
 descriptors, or make mutable shared storage immutable; callers still own the
@@ -100,6 +103,12 @@ whether declared required members were verified, whether optional members were
 present or absent, and whether any declared member failed path, size, or digest
 checks or exceeded the configured auxiliary artifact byte limit. Callers should
 load sidecars only after the relevant declaration is verified.
+
+OrdinalDB v0.1 should use `row_id_identity` for the ordvec vector row count and
+declare `ids.bin` as required auxiliary artifact name `ordinaldb.ids`. The
+OrdinalDB `u64` IDs remain caller-owned sidecar bytes. Do not model `ids.bin`
+as JSONL row identity: v1 JSONL row identity is UUID-only, and generic row-map
+ID formats are deferred until there is a separate schema contract for them.
 
 When present, `encoder_distortion` records a scoped encoder geometry profile:
 source metric, embedding metric, lower/upper distortion-style bounds when

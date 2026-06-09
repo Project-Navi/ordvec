@@ -23,8 +23,9 @@ use crate::rank::{
     bucket_centre, bucket_ranks, pack_buckets, rank_to_bucket, rank_transform,
     rankquant_bytes_per_vec, rankquant_norm,
 };
+use crate::sign_bitmap::SignBitmap;
 use crate::util::{assert_all_finite, l2_normalise, result_buffer_len, TopK};
-use crate::SearchResults;
+use crate::{validate_candidate_ids, OrdvecError, SearchResults};
 
 fn check_eval_bits(bits: u8) {
     assert!((1..=7).contains(&bits), "bits must be in 1..=7");
@@ -77,6 +78,36 @@ pub struct RankQuant {
     pub(crate) n_vectors: usize,
     /// Row-major packed bucket bytes. `n_vectors * dim * bits / 8` total.
     pub(crate) packed: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TwoStageCandidatePolicy {
+    pub min_candidates: usize,
+    pub k_multiplier: usize,
+    pub max_candidates: Option<usize>,
+}
+
+impl TwoStageCandidatePolicy {
+    pub fn candidate_count(&self, k: usize, search_space: usize) -> usize {
+        if k == 0 || search_space == 0 {
+            return 0;
+        }
+        let mut count = self.min_candidates.max(k.saturating_mul(self.k_multiplier));
+        if let Some(max_candidates) = self.max_candidates {
+            count = count.min(max_candidates);
+        }
+        count.min(search_space)
+    }
+}
+
+impl Default for TwoStageCandidatePolicy {
+    fn default() -> Self {
+        Self {
+            min_candidates: 256,
+            k_multiplier: 32,
+            max_candidates: None,
+        }
+    }
 }
 
 /// SIMD dispatch tier for the asymmetric scan kernels.
@@ -147,6 +178,44 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
 }
 
 impl RankQuant {
+    pub fn validate_params(dim: usize, bits: u8) -> Result<(), OrdvecError> {
+        if !matches!(bits, 1 | 2 | 4) {
+            return Err(OrdvecError::InvalidParameter {
+                name: "bits",
+                message: "must be 1, 2, or 4".to_string(),
+            });
+        }
+        if dim < 2 {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: "must be >= 2".to_string(),
+            });
+        }
+        if dim > u16::MAX as usize {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: "must fit in u16".to_string(),
+            });
+        }
+        let codes_per_byte = (8 / bits) as usize;
+        if !dim.is_multiple_of(codes_per_byte) {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: format!("must be a multiple of {codes_per_byte} for bits = {bits}"),
+            });
+        }
+        let n_buckets = 1usize << bits;
+        if !dim.is_multiple_of(n_buckets) {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: format!(
+                    "must be divisible by 2^bits = {n_buckets} so every bucket receives exactly dim / 2^bits rank entries"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     pub fn new(dim: usize, bits: u8) -> Self {
         assert!(matches!(bits, 1 | 2 | 4), "bits must be 1, 2, or 4");
         assert!(dim >= 2, "dim must be >= 2");
@@ -661,6 +730,73 @@ impl RankQuant {
             .collect();
         (scores, global_indices)
     }
+
+    pub fn try_search_with_sign_probe(
+        &self,
+        sign_probe: &SignBitmap,
+        query: &[f32],
+        k: usize,
+    ) -> Result<(Vec<f32>, Vec<i64>), OrdvecError> {
+        self.try_search_with_sign_probe_with_policy(
+            sign_probe,
+            query,
+            k,
+            TwoStageCandidatePolicy::default(),
+        )
+    }
+
+    pub fn try_search_with_sign_probe_with_policy(
+        &self,
+        sign_probe: &SignBitmap,
+        query: &[f32],
+        k: usize,
+        policy: TwoStageCandidatePolicy,
+    ) -> Result<(Vec<f32>, Vec<i64>), OrdvecError> {
+        if sign_probe.dim() != self.dim {
+            return Err(OrdvecError::InvalidParameter {
+                name: "sign_probe.dim",
+                message: format!("must match RankQuant dim {}", self.dim),
+            });
+        }
+        if sign_probe.len() != self.n_vectors {
+            return Err(OrdvecError::InvalidParameter {
+                name: "sign_probe.len",
+                message: format!("must match RankQuant len {}", self.n_vectors),
+            });
+        }
+        if query.len() != self.dim {
+            return Err(OrdvecError::InvalidVectorLength {
+                name: "query",
+                len: query.len(),
+                expected: self.dim,
+            });
+        }
+        validate_finite(query, "query")?;
+        let candidate_count = policy.candidate_count(k, self.n_vectors);
+        let candidates = sign_probe.top_m_candidates(query, candidate_count);
+        validate_candidate_ids(&candidates, self.n_vectors)?;
+        Ok(self.search_asymmetric_subset(query, &candidates, k))
+    }
+
+    pub fn search_with_sign_probe(
+        &self,
+        sign_probe: &SignBitmap,
+        query: &[f32],
+        k: usize,
+    ) -> (Vec<f32>, Vec<i64>) {
+        self.try_search_with_sign_probe(sign_probe, query, k)
+            .expect("search_with_sign_probe validation failed")
+    }
+}
+
+fn validate_finite(values: &[f32], name: &'static str) -> Result<(), OrdvecError> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(OrdvecError::InvalidParameter {
+            name,
+            message: "must contain only finite values".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Standalone symmetric RankQuant-style eval search for arbitrary bit widths.

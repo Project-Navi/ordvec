@@ -29,6 +29,8 @@
 
 use rayon::prelude::*;
 
+use crate::OrdvecError;
+
 /// Index storing a 1-bit sign-cosine fingerprint per document.
 ///
 /// Storage: `dim / 8` bytes per doc. Dim must be a multiple of 64
@@ -44,6 +46,31 @@ pub struct SignBitmap {
 }
 
 impl SignBitmap {
+    pub fn validate_dim(dim: usize) -> Result<(), OrdvecError> {
+        if dim == 0 {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: "must be > 0".to_string(),
+            });
+        }
+        if !dim.is_multiple_of(64) {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: "must be a multiple of 64".to_string(),
+            });
+        }
+        if dim > crate::rank_io::MAX_SIGN_BITMAP_DIM {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: format!(
+                    "must be <= MAX_SIGN_BITMAP_DIM (= {})",
+                    crate::rank_io::MAX_SIGN_BITMAP_DIM
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Build an empty index for `dim`-dimensional embeddings.
     ///
     /// `dim` must be a multiple of 64 in
@@ -301,6 +328,20 @@ impl SignBitmap {
     }
     pub fn byte_size(&self) -> usize {
         self.bitmaps.len() * std::mem::size_of::<u64>()
+    }
+
+    pub fn swap_remove(&mut self, idx: usize) -> usize {
+        assert!(idx < self.n_vectors, "index out of bounds");
+        let last = self.n_vectors - 1;
+        let qpv = self.qwords_per_vec;
+        if idx != last {
+            let src = last * qpv;
+            let dst = idx * qpv;
+            self.bitmaps.copy_within(src..src + qpv, dst);
+        }
+        self.bitmaps.truncate(last * qpv);
+        self.n_vectors -= 1;
+        last
     }
 
     /// Persist to a `.tvsb` file. Format: 13-byte header + LE u64 bitmaps.

@@ -1,9 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 use ordvec_manifest::{
     create_manifest_for_index_with_options, load_manifest_file_with_options, sha256_file,
-    verify_manifest, write_manifest_file, CreateManifestOptions, CreateRowIdentity,
-    ManifestDocument, ManifestError, NullModelSpec, ProfileParameterization, ResourceLimits,
-    VerifyOptions,
+    verify_manifest, write_manifest_file, CreateAuxiliaryArtifact, CreateManifestOptions,
+    CreateRowIdentity, ManifestDocument, ManifestError, NullModelSpec, ProfileParameterization,
+    ResourceLimits, VerifyOptions,
 };
 use serde_json::json;
 use std::fs;
@@ -57,6 +57,10 @@ enum Commands {
         row_map: Option<PathBuf>,
         #[arg(long)]
         row_id_is_identity: bool,
+        #[arg(long = "aux", value_name = "NAME=PATH", value_parser = parse_auxiliary_artifact_arg)]
+        auxiliary_artifacts: Vec<AuxiliaryArtifactArg>,
+        #[arg(long = "optional-aux", value_name = "NAME=PATH", value_parser = parse_auxiliary_artifact_arg)]
+        optional_auxiliary_artifacts: Vec<AuxiliaryArtifactArg>,
         #[arg(long)]
         embedding_model: String,
         #[arg(long)]
@@ -73,6 +77,41 @@ enum Commands {
         #[command(subcommand)]
         command: SqliteCommands,
     },
+}
+
+#[derive(Clone, Debug)]
+struct AuxiliaryArtifactArg {
+    name: String,
+    path: PathBuf,
+}
+
+fn parse_auxiliary_artifact_arg(value: &str) -> Result<AuxiliaryArtifactArg, String> {
+    let (name, path) = value
+        .split_once('=')
+        .ok_or_else(|| "expected NAME=PATH".to_string())?;
+    if name.trim().is_empty() {
+        return Err("auxiliary artifact name must be non-empty".to_string());
+    }
+    if path.trim().is_empty() {
+        return Err("auxiliary artifact path must be non-empty".to_string());
+    }
+    Ok(AuxiliaryArtifactArg {
+        name: name.trim().to_string(),
+        path: PathBuf::from(path.trim()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_auxiliary_artifact_arg;
+    use std::path::PathBuf;
+
+    #[test]
+    fn auxiliary_artifact_arg_trims_name_and_path() {
+        let parsed = parse_auxiliary_artifact_arg(" ordinaldb.ids = ids.bin ").unwrap();
+        assert_eq!(parsed.name, "ordinaldb.ids");
+        assert_eq!(parsed.path, PathBuf::from("ids.bin"));
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -259,6 +298,8 @@ fn run() -> Result<i32, ManifestError> {
             index,
             row_map,
             row_id_is_identity,
+            auxiliary_artifacts,
+            optional_auxiliary_artifacts,
             embedding_model,
             out,
             allow_absolute_paths,
@@ -282,6 +323,8 @@ fn run() -> Result<i32, ManifestError> {
             if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
                 fs::create_dir_all(parent)?;
             }
+            let auxiliary_artifacts =
+                create_auxiliary_options(auxiliary_artifacts, optional_auxiliary_artifacts);
             let manifest = create_manifest_for_index_with_options(
                 &index,
                 row_identity,
@@ -291,6 +334,7 @@ fn run() -> Result<i32, ManifestError> {
                     allow_absolute_paths,
                     allow_path_escape,
                     limits: limits.resource_limits(),
+                    auxiliary_artifacts,
                 },
             )?;
             write_manifest_file(&manifest, &out)?;
@@ -300,6 +344,29 @@ fn run() -> Result<i32, ManifestError> {
         #[cfg(feature = "sqlite")]
         Commands::Sqlite { command } => run_sqlite(command),
     }
+}
+
+fn create_auxiliary_options(
+    required: Vec<AuxiliaryArtifactArg>,
+    optional: Vec<AuxiliaryArtifactArg>,
+) -> Vec<CreateAuxiliaryArtifact> {
+    required
+        .into_iter()
+        .map(|artifact| CreateAuxiliaryArtifact {
+            name: artifact.name,
+            path: artifact.path,
+            required: true,
+        })
+        .chain(
+            optional
+                .into_iter()
+                .map(|artifact| CreateAuxiliaryArtifact {
+                    name: artifact.name,
+                    path: artifact.path,
+                    required: false,
+                }),
+        )
+        .collect()
 }
 
 #[cfg(feature = "sqlite")]

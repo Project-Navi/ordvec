@@ -510,6 +510,13 @@ fn validate_auxiliary_artifact_shape(
                 "auxiliary_artifact_name_empty",
                 "auxiliary artifact name must be non-empty",
             );
+        } else if artifact.name != name {
+            report.error(
+                "auxiliary_artifact_name_not_trimmed",
+                format!(
+                    "auxiliary artifact name {name:?} must not have leading or trailing whitespace"
+                ),
+            );
         } else if !names.insert(name.to_string()) {
             report.error(
                 "auxiliary_artifact_name_duplicate",
@@ -2843,6 +2850,27 @@ impl VerifiedLoadPlan {
         &self.auxiliary_artifacts
     }
 
+    pub fn auxiliary_by_name(&self, name: &str) -> Option<&VerifiedAuxiliaryArtifactPlan> {
+        self.auxiliary_artifacts
+            .iter()
+            .find(|artifact| artifact.name() == name)
+    }
+
+    pub fn require_auxiliary(&self, name: &str) -> Result<&Path, RequireAuxiliaryError> {
+        let artifact = self.auxiliary_by_name(name).ok_or_else(|| {
+            RequireAuxiliaryError::MissingDeclaration {
+                name: name.to_string(),
+            }
+        })?;
+        artifact
+            .path()
+            .ok_or_else(|| RequireAuxiliaryError::NotLoadable {
+                name: name.to_string(),
+                state: artifact.state(),
+                reason_code: artifact.reason_code().map(ToOwned::to_owned),
+            })
+    }
+
     pub fn report(&self) -> &VerificationReport {
         &self.report
     }
@@ -2851,6 +2879,44 @@ impl VerifiedLoadPlan {
         self.report
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequireAuxiliaryError {
+    MissingDeclaration {
+        name: String,
+    },
+    NotLoadable {
+        name: String,
+        state: AuxiliaryArtifactState,
+        reason_code: Option<String>,
+    },
+}
+
+impl fmt::Display for RequireAuxiliaryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingDeclaration { name } => {
+                write!(f, "required auxiliary artifact {name:?} is not declared")
+            }
+            Self::NotLoadable {
+                name,
+                state,
+                reason_code,
+            } => {
+                write!(
+                    f,
+                    "required auxiliary artifact {name:?} is not loadable: state={state:?}"
+                )?;
+                if let Some(reason_code) = reason_code {
+                    write!(f, ", reason_code={reason_code}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequireAuxiliaryError {}
 
 #[derive(Clone, Debug)]
 pub struct VerifiedRowIdentityPlan {
@@ -3314,11 +3380,19 @@ pub enum CreateRowIdentity {
     Jsonl(PathBuf),
 }
 
+#[derive(Clone, Debug)]
+pub struct CreateAuxiliaryArtifact {
+    pub name: String,
+    pub path: PathBuf,
+    pub required: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CreateManifestOptions {
     pub allow_absolute_paths: bool,
     pub allow_path_escape: bool,
     pub limits: ResourceLimits,
+    pub auxiliary_artifacts: Vec<CreateAuxiliaryArtifact>,
 }
 
 pub fn create_manifest_for_index(
@@ -3417,13 +3491,16 @@ pub fn create_manifest_for_index_with_options(
         }
     };
 
+    let auxiliary_artifacts =
+        create_auxiliary_artifacts(&options.auxiliary_artifacts, out_base, &options)?;
+
     let invocation_id = format!("urn:uuid:{}", Uuid::new_v4());
     Ok(IndexManifest {
         schema_version: SCHEMA_VERSION.to_string(),
         manifest_id: format!("urn:uuid:{}", Uuid::new_v4()),
         created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         artifact,
-        auxiliary_artifacts: Vec::new(),
+        auxiliary_artifacts,
         embedding: Embedding {
             model: embedding_model.into(),
             dim: metadata.dim,
@@ -3448,6 +3525,58 @@ pub fn create_manifest_for_index_with_options(
         attestations: Vec::new(),
         extensions: BTreeMap::new(),
     })
+}
+
+fn create_auxiliary_artifacts(
+    artifacts: &[CreateAuxiliaryArtifact],
+    out_base: &Path,
+    options: &CreateManifestOptions,
+) -> Result<Vec<AuxiliaryArtifact>, ManifestError> {
+    let count = artifacts.len();
+    if count > options.limits.max_auxiliary_artifacts {
+        return Err(ManifestError::limit_exceeded(
+            "auxiliary_artifact_count_limit_exceeded",
+            format!(
+                "auxiliary_artifacts has {count} entries, exceeding max_auxiliary_artifacts={}",
+                options.limits.max_auxiliary_artifacts
+            ),
+        ));
+    }
+
+    let mut names = HashSet::new();
+    let mut manifest_artifacts = Vec::with_capacity(artifacts.len());
+    for artifact in artifacts {
+        let name = artifact.name.trim();
+        if name.is_empty() {
+            return Err(ManifestError::invalid(
+                "auxiliary artifact name must be non-empty",
+            ));
+        }
+        if !names.insert(name.to_string()) {
+            return Err(ManifestError::invalid(format!(
+                "auxiliary artifact name {name:?} is duplicated"
+            )));
+        }
+        let hash = sha256_file_bounded(
+            &artifact.path,
+            options.limits.max_auxiliary_artifact_bytes,
+            "auxiliary_artifact_file_too_large",
+            "auxiliary artifact",
+        )?;
+        manifest_artifacts.push(AuxiliaryArtifact {
+            name: name.to_string(),
+            path: manifest_path_for_create(
+                &artifact.path,
+                out_base,
+                options,
+                "auxiliary artifact",
+            )?,
+            sha256: hash.sha256,
+            file_size_bytes: hash.size_bytes,
+            required: artifact.required,
+        });
+    }
+    Ok(manifest_artifacts)
 }
 
 pub fn write_manifest_file(

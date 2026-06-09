@@ -48,6 +48,8 @@
 // (THREAT_MODEL.md, THREAT-SIMD-001).
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::fmt;
+
 mod bitmap;
 mod fastscan;
 #[cfg(feature = "experimental")]
@@ -61,7 +63,7 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
-pub use quant::{rankquant_eval_search, RankQuant};
+pub use quant::{rankquant_eval_search, RankQuant, TwoStageCandidatePolicy};
 pub use rank::Rank;
 pub use rank_io::{probe_index_metadata, IndexKind, IndexMetadata, IndexParams};
 pub use sign_bitmap::SignBitmap;
@@ -108,6 +110,80 @@ pub type MultiBucketBitmapIndex = MultiBucketBitmap;
 #[doc(hidden)]
 #[deprecated(since = "0.2.0", note = "renamed to `RankQuantFastscan`")]
 pub type RankQuantFastscanIndex = RankQuantFastscan;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrdvecError {
+    InvalidParameter {
+        name: &'static str,
+        message: String,
+    },
+    InvalidLength {
+        name: &'static str,
+        len: usize,
+        dim: usize,
+    },
+    InvalidVectorLength {
+        name: &'static str,
+        len: usize,
+        expected: usize,
+    },
+    CandidateIdOutOfRange {
+        id: u32,
+        n_vectors: usize,
+    },
+}
+
+impl fmt::Display for OrdvecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidParameter { name, message } => {
+                write!(f, "invalid {name}: {message}")
+            }
+            Self::InvalidLength { name, len, dim } => {
+                write!(f, "{name} length {len} must be a multiple of dim {dim}")
+            }
+            Self::InvalidVectorLength {
+                name,
+                len,
+                expected,
+            } => {
+                write!(f, "{name} length {len} must equal dim {expected}")
+            }
+            Self::CandidateIdOutOfRange { id, n_vectors } => {
+                write!(
+                    f,
+                    "candidate id {id} out of range for n_vectors {n_vectors}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for OrdvecError {}
+
+pub fn validate_flat_vectors_len(len: usize, dim: usize) -> Result<usize, OrdvecError> {
+    if dim == 0 {
+        return Err(OrdvecError::InvalidParameter {
+            name: "dim",
+            message: "must be > 0".to_string(),
+        });
+    }
+    if !len.is_multiple_of(dim) {
+        return Err(OrdvecError::InvalidLength {
+            name: "vectors",
+            len,
+            dim,
+        });
+    }
+    Ok(len / dim)
+}
+
+pub fn validate_candidate_ids(candidates: &[u32], n_vectors: usize) -> Result<(), OrdvecError> {
+    if let Some(&id) = candidates.iter().find(|&&id| (id as usize) >= n_vectors) {
+        return Err(OrdvecError::CandidateIdOutOfRange { id, n_vectors });
+    }
+    Ok(())
+}
 
 /// Top-k search results, laid out as `nq` contiguous blocks of `k`.
 ///

@@ -22,10 +22,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "ordvec-manifest"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"], optional = true }
 hex = "0.4.3"
 ordvec = { version = "0.4.0", path = ".." }
 rusqlite = { version = "0.40.0", optional = true }
@@ -39,5 +40,6 @@ tempfile = "3.27.0"
 
 [features]
 default = []
+cli = ["dep:clap"]
 sqlite = ["dep:rusqlite"]
 sqlite-bundled = ["sqlite", "rusqlite/bundled"]

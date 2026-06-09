@@ -11,13 +11,16 @@ index files, decide deployment trust policy, estimate encoder geometry, compute
 calibration statistics, or change the C ABI.
 
 `ordvec-manifest` is versioned in lockstep with the core `ordvec` crate. From a
-workspace checkout, use it with `cargo run -p ordvec-manifest --`; from a
-published release, install it with `cargo install ordvec-manifest`.
+workspace checkout, use the optional CLI with
+`cargo run -p ordvec-manifest --features cli --`; from a published release,
+install the binary with `cargo install ordvec-manifest --features cli`. The
+library default feature set is empty and does not depend on `clap`.
 
 ```sh
 ordvec-manifest create \
   --index path/to/index.tvrq \
   --row-id-is-identity \
+  --aux ordinaldb.ids=path/to/ids.bin \
   --embedding-model bge-small-en-v1.5 \
   --out path/to/index.manifest.json
 
@@ -25,7 +28,7 @@ ordvec-manifest verify --manifest path/to/index.manifest.json
 ```
 
 From a workspace checkout, prefix the same commands with
-`cargo run -p ordvec-manifest --`.
+`cargo run -p ordvec-manifest --features cli --`.
 
 The schema version is `ordvec.index_manifest.v1`. Relative paths resolve from
 the manifest file's directory, absolute paths are rejected by default, and
@@ -53,6 +56,7 @@ Controlled-storage load pattern:
 
 ```rust
 let plan = ordvec_manifest::verify_for_load(&manifest_path, options)?;
+let _ordinaldb_ids = plan.require_auxiliary("ordinaldb.ids")?;
 let index = ordvec::RankQuant::load(plan.artifact_path())?;
 ```
 
@@ -131,6 +135,22 @@ members fail verification when missing, tampered, size-mismatched, or rejected
 by path policy. Optional members are reported as verified when present or as
 `optional_absent` with a stable reason code when absent. The verifier checks
 bytes only; application semantics remain with the caller.
+
+`create` can declare sidecars while it hashes them:
+`--aux NAME=PATH` creates a required declaration and
+`--optional-aux NAME=PATH` creates an optional declaration. Library callers use
+`CreateAuxiliaryArtifact { name, path, required }` through
+`CreateManifestOptions::auxiliary_artifacts`. `VerifiedLoadPlan` offers
+`auxiliary_by_name(name)` for inspection and `require_auxiliary(name)` for
+callers that must fail if a named sidecar is not declared and verified.
+
+For OrdinalDB v0.1, keep the ordvec row identity as
+`RowIdentity::RowIdIdentity { row_count }` and declare the OrdinalDB `ids.bin`
+file as required auxiliary artifact name `ordinaldb.ids`. That makes the vector
+row count an ordvec invariant while leaving OrdinalDB's `u64` document IDs as a
+caller-owned sidecar. Do not encode `ids.bin` as `RowIdentity::Jsonl`: v1 JSONL
+row identity is UUID-oriented (`id_kind = "uuid"`), and generic row-map ID
+formats are intentionally deferred.
 
 The unified JSON report carries per-sidecar audit fields. A successful
 auxiliary artifact verification includes the manifest path, resolved/canonical

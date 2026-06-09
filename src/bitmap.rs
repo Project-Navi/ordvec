@@ -28,7 +28,7 @@ use rayon::prelude::*;
 
 use crate::rank::rank_transform;
 use crate::util::{and_popcount, assert_all_finite, result_buffer_len, TopK};
-use crate::SearchResults;
+use crate::{OrdvecError, SearchResults};
 
 /// Top-bucket bitmap index for constant-composition coarse scoring.
 ///
@@ -47,6 +47,37 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
+    pub fn validate_params(dim: usize, n_top: usize) -> Result<(), OrdvecError> {
+        if dim == 0 {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: "must be > 0".to_string(),
+            });
+        }
+        if !dim.is_multiple_of(64) {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: "must be a multiple of 64".to_string(),
+            });
+        }
+        if dim > crate::rank_io::MAX_DIM {
+            return Err(OrdvecError::InvalidParameter {
+                name: "dim",
+                message: format!(
+                    "must be <= {} (u16 rank invariant)",
+                    crate::rank_io::MAX_DIM
+                ),
+            });
+        }
+        if !(n_top > 0 && n_top < dim) {
+            return Err(OrdvecError::InvalidParameter {
+                name: "n_top",
+                message: "must satisfy 0 < n_top < dim".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn new(dim: usize, n_top: usize) -> Self {
         assert_eq!(dim % 64, 0, "dim must be a multiple of 64");
         // Bitmap rank-transforms each document (u16 ranks) and indexes the
@@ -462,6 +493,20 @@ impl Bitmap {
     }
     pub fn byte_size(&self) -> usize {
         self.bitmaps.len() * std::mem::size_of::<u64>()
+    }
+
+    pub fn swap_remove(&mut self, idx: usize) -> usize {
+        assert!(idx < self.n_vectors, "index out of bounds");
+        let last = self.n_vectors - 1;
+        let qpv = self.qwords_per_vec;
+        if idx != last {
+            let src = last * qpv;
+            let dst = idx * qpv;
+            self.bitmaps.copy_within(src..src + qpv, dst);
+        }
+        self.bitmaps.truncate(last * qpv);
+        self.n_vectors -= 1;
+        last
     }
 
     /// Persist to a `.tvbm` file. Format: 17-byte header + u64 bitmaps LE.

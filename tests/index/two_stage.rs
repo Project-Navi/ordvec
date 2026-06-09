@@ -1,6 +1,20 @@
-use ordvec::{RankQuant, SignBitmap};
+use ordvec::{
+    validate_candidate_ids, validate_flat_vectors_len, Bitmap, OrdvecError, RankQuant, SignBitmap,
+    TwoStageCandidatePolicy,
+};
 
 use crate::{make_corpus, D, N};
+
+fn corpus_after_swap_remove(corpus: &[f32], rows: usize, remove: usize) -> Vec<f32> {
+    let mut expected = corpus[..rows * D].to_vec();
+    let last = rows - 1;
+    if remove != last {
+        let src = last * D..(last + 1) * D;
+        expected.copy_within(src, remove * D);
+    }
+    expected.truncate(last * D);
+    expected
+}
 
 fn build_two_stage(bits: u8) -> (SignBitmap, RankQuant, Vec<f32>) {
     let corpus = make_corpus(15_001);
@@ -30,6 +44,94 @@ fn assert_score_then_id_order(scores: &[f32], ids: &[i64]) {
             slot - 1,
         );
     }
+}
+
+#[test]
+fn core_validation_helpers_report_errors_without_panicking() {
+    assert!(RankQuant::validate_params(D, 2).is_ok());
+    assert!(RankQuant::validate_params(D, 3).is_err());
+    assert!(RankQuant::validate_params(1, 2).is_err());
+    assert!(RankQuant::validate_params(D + 1, 2).is_err());
+
+    assert!(Bitmap::validate_params(D, D / 4).is_ok());
+    assert!(Bitmap::validate_params(D + 1, D / 4).is_err());
+    assert!(Bitmap::validate_params(D, 0).is_err());
+    assert!(Bitmap::validate_params(D, D).is_err());
+
+    assert!(SignBitmap::validate_dim(D).is_ok());
+    assert!(SignBitmap::validate_dim(0).is_err());
+    assert!(SignBitmap::validate_dim(D + 1).is_err());
+
+    assert_eq!(validate_flat_vectors_len(D * 3, D).unwrap(), 3);
+    assert!(validate_flat_vectors_len(D * 3 + 1, D).is_err());
+    assert!(validate_candidate_ids(&[0, 7, (N - 1) as u32], N).is_ok());
+    assert!(validate_candidate_ids(&[N as u32], N).is_err());
+}
+
+#[test]
+fn two_stage_candidate_policy_is_overflow_safe_and_clamped() {
+    let default = TwoStageCandidatePolicy::default();
+    assert_eq!(default.candidate_count(0, N), 0);
+    assert_eq!(default.candidate_count(1, N), 256.min(N));
+    assert_eq!(default.candidate_count(10, N), N);
+
+    let capped = TwoStageCandidatePolicy {
+        min_candidates: 4,
+        k_multiplier: usize::MAX,
+        max_candidates: Some(37),
+    };
+    assert_eq!(capped.candidate_count(usize::MAX, N), 37.min(N));
+    assert_eq!(capped.candidate_count(10, 9), 9);
+}
+
+#[test]
+fn sign_bitmap_swap_remove_cases_match_rebuilt_probe() {
+    let corpus = make_corpus(15_010);
+    let query = &make_corpus(15_011)[..D];
+
+    for (rows, remove) in [(1usize, 0usize), (8, 0), (8, 3), (8, 7)] {
+        let mut index = SignBitmap::new(D);
+        index.add(&corpus[..rows * D]);
+        let moved = index.swap_remove(remove);
+
+        let expected_corpus = corpus_after_swap_remove(&corpus, rows, remove);
+        let mut rebuilt = SignBitmap::new(D);
+        rebuilt.add(&expected_corpus);
+
+        assert_eq!(moved, rows - 1);
+        assert_eq!(index.len(), rows - 1);
+        assert_eq!(index.byte_size(), (rows - 1) * index.bytes_per_vec());
+        assert_eq!(index.score_all(query), rebuilt.score_all(query));
+        assert_eq!(
+            index.top_m_candidates(query, rows),
+            rebuilt.top_m_candidates(query, rows),
+            "remove={remove} rows={rows}"
+        );
+    }
+}
+
+#[test]
+fn sign_bitmap_write_then_load_after_swap_remove_preserves_probe() {
+    let corpus = make_corpus(15_012);
+    let mut index = SignBitmap::new(D);
+    index.add(&corpus);
+    index.swap_remove(17);
+
+    let tmp = std::env::temp_dir().join(format!(
+        "ordvec_sign_bitmap_after_swap_remove_{}.tvsb",
+        std::process::id()
+    ));
+    index.write(&tmp).expect("write");
+    let loaded = SignBitmap::load(&tmp).expect("load");
+    std::fs::remove_file(&tmp).ok();
+
+    let query = &make_corpus(15_013)[..D];
+    assert_eq!(loaded.len(), index.len());
+    assert_eq!(loaded.score_all(query), index.score_all(query));
+    assert_eq!(
+        loaded.top_m_candidates(query, 32),
+        index.top_m_candidates(query, 32)
+    );
 }
 
 #[test]
@@ -65,6 +167,68 @@ fn sign_rankquant_pipeline_handles_edge_candidate_and_k_shapes() {
     assert_eq!(ids.len(), shortlist.len());
     assert!(ids.iter().all(|&id| shortlist.contains(&(id as u32))));
     assert_score_then_id_order(&scores, &ids);
+}
+
+#[test]
+fn rankquant_sign_probe_helper_matches_manual_candidates() {
+    let (sign, rankquant, _corpus) = build_two_stage(2);
+    let query = &make_corpus(15_004)[..D];
+    let policy = TwoStageCandidatePolicy {
+        min_candidates: 0,
+        k_multiplier: 4,
+        max_candidates: Some(37),
+    };
+    let k = 5;
+    let candidates = sign.top_m_candidates(query, policy.candidate_count(k, rankquant.len()));
+    let manual = rankquant.search_asymmetric_subset(query, &candidates, k);
+    let helper = rankquant
+        .try_search_with_sign_probe_with_policy(&sign, query, k, policy)
+        .unwrap();
+
+    assert_eq!(helper.1, manual.1);
+    assert_eq!(helper.0.len(), manual.0.len());
+    for (helper, manual) in helper.0.iter().zip(manual.0.iter()) {
+        assert!((helper - manual).abs() <= 1e-6);
+    }
+
+    let default_try = rankquant
+        .try_search_with_sign_probe(&sign, query, k)
+        .unwrap();
+    let default_panic = rankquant.search_with_sign_probe(&sign, query, k);
+    assert_eq!(default_try.1, default_panic.1);
+}
+
+#[test]
+fn rankquant_sign_probe_helper_validates_probe_and_query_shape() {
+    let (sign, rankquant, _corpus) = build_two_stage(2);
+    let query = &make_corpus(15_005)[..D];
+    let wrong_dim = SignBitmap::new(D * 2);
+    assert!(rankquant
+        .try_search_with_sign_probe(&wrong_dim, query, 5)
+        .is_err());
+
+    let mut short_probe = SignBitmap::new(D);
+    short_probe.add(&make_corpus(15_006)[..(N - 1) * D]);
+    assert!(rankquant
+        .try_search_with_sign_probe(&short_probe, query, 5)
+        .is_err());
+
+    assert!(matches!(
+        rankquant
+        .try_search_with_sign_probe(&sign, &query[..D - 1], 5)
+        .unwrap_err(),
+        OrdvecError::InvalidVectorLength {
+            name: "query",
+            len,
+            expected: D,
+        } if len == D - 1
+    ));
+
+    let mut bad_query = query.to_vec();
+    bad_query[0] = f32::NAN;
+    assert!(rankquant
+        .try_search_with_sign_probe(&sign, &bad_query, 5)
+        .is_err());
 }
 
 #[test]

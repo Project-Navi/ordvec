@@ -3,10 +3,11 @@ use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
     load_manifest_file_with_options, sha256_file, verify_document_for_load, verify_for_load,
     verify_index_manifest, verify_manifest_with_base, AuxiliaryArtifact, AuxiliaryArtifactState,
-    CalibrationOrdinalization, CalibrationProfileRef, CreateManifestOptions, CreateRowIdentity,
-    DistortionBounds, DistortionEvidence, DistortionEvidenceKind, DistortionProfileArtifactRef,
-    DistortionScope, EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind,
-    ManifestIndexParams, MetricSpec, NullModelSpec, ProfileArtifactRef, ProfileParameterization,
+    CalibrationOrdinalization, CalibrationProfileRef, CreateAuxiliaryArtifact,
+    CreateManifestOptions, CreateRowIdentity, DistortionBounds, DistortionEvidence,
+    DistortionEvidenceKind, DistortionProfileArtifactRef, DistortionScope,
+    EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind, ManifestIndexParams, MetricSpec,
+    NullModelSpec, ProfileArtifactRef, ProfileParameterization, RequireAuxiliaryError,
     ResourceLimits, RowIdentity, VerifiedLoadPlanError, VerifyOptions, CALIBRATION_SCHEMA_VERSION,
     ENCODER_DISTORTION_SCHEMA_VERSION,
 };
@@ -14,6 +15,7 @@ use serde_json::json;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "cli")]
 use std::process::Command;
 
 fn write_index(dir: &Path) -> PathBuf {
@@ -312,6 +314,207 @@ fn create_manifest_creates_output_parent_for_programmatic_callers() {
 
     assert!(manifest_path.parent().unwrap().is_dir());
     assert_eq!(manifest.row_identity.row_count(), 2);
+}
+
+#[test]
+fn create_manifest_declares_auxiliary_artifacts_for_load_plan_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let ids = temp.path().join("ids.bin");
+    let optional = temp.path().join("optional.json");
+    fs::write(&ids, 7u64.to_le_bytes()).unwrap();
+    fs::write(&optional, br#"{"optional":true}"#).unwrap();
+    let ids_hash = sha256_file(&ids).unwrap();
+    let optional_hash = sha256_file(&optional).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+
+    let manifest = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![
+                CreateAuxiliaryArtifact {
+                    name: " ordinaldb.ids ".to_string(),
+                    path: ids.clone(),
+                    required: true,
+                },
+                CreateAuxiliaryArtifact {
+                    name: "optional.stats".to_string(),
+                    path: optional.clone(),
+                    required: false,
+                },
+            ],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(manifest.auxiliary_artifacts.len(), 2);
+    assert_eq!(manifest.auxiliary_artifacts[0].name, "ordinaldb.ids");
+    assert_eq!(manifest.auxiliary_artifacts[0].path, "ids.bin");
+    assert_eq!(manifest.auxiliary_artifacts[0].sha256, ids_hash.sha256);
+    assert_eq!(
+        manifest.auxiliary_artifacts[0].file_size_bytes,
+        ids_hash.size_bytes
+    );
+    assert!(manifest.auxiliary_artifacts[0].required);
+    assert_eq!(manifest.auxiliary_artifacts[1].name, "optional.stats");
+    assert_eq!(manifest.auxiliary_artifacts[1].path, "optional.json");
+    assert_eq!(manifest.auxiliary_artifacts[1].sha256, optional_hash.sha256);
+    assert!(!manifest.auxiliary_artifacts[1].required);
+
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(&optional).unwrap();
+
+    let plan = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap();
+    assert_eq!(
+        plan.require_auxiliary("ordinaldb.ids").unwrap(),
+        fs::canonicalize(&ids).unwrap().as_path()
+    );
+    assert_eq!(
+        plan.auxiliary_by_name("optional.stats").unwrap().state(),
+        AuxiliaryArtifactState::OptionalAbsent
+    );
+    assert!(matches!(
+        plan.require_auxiliary("missing"),
+        Err(RequireAuxiliaryError::MissingDeclaration { .. })
+    ));
+}
+
+#[test]
+fn create_manifest_rejects_invalid_auxiliary_artifact_declarations() {
+    let root = tempfile::tempdir().unwrap();
+    let case = tempfile::tempdir_in(root.path()).unwrap();
+    let index = write_index(case.path());
+    let sidecar = case.path().join("ids.bin");
+    fs::write(&sidecar, b"sidecar").unwrap();
+    let manifest_path = case.path().join("manifest.json");
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: " ".to_string(),
+                path: sidecar.clone(),
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("name must be non-empty"));
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![
+                CreateAuxiliaryArtifact {
+                    name: "dup".to_string(),
+                    path: sidecar.clone(),
+                    required: true,
+                },
+                CreateAuxiliaryArtifact {
+                    name: "dup".to_string(),
+                    path: sidecar.clone(),
+                    required: false,
+                },
+            ],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("duplicated"));
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            limits: ResourceLimits {
+                max_auxiliary_artifacts: 0,
+                ..ResourceLimits::default()
+            },
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: "ids".to_string(),
+                path: sidecar.clone(),
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("auxiliary_artifact_count_limit_exceeded"));
+
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            limits: ResourceLimits {
+                max_auxiliary_artifact_bytes: 1,
+                ..ResourceLimits::default()
+            },
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: "ids".to_string(),
+                path: sidecar.clone(),
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("auxiliary_artifact_file_too_large"));
+
+    let missing = case.path().join("missing.bin");
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: "missing".to_string(),
+                path: missing,
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("No such file") || err.to_string().contains("not found"));
+
+    let outside = root.path().join("outside.bin");
+    fs::write(&outside, b"outside").unwrap();
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: "outside".to_string(),
+                path: outside,
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("outside manifest directory"));
 }
 
 #[test]
@@ -2296,10 +2499,20 @@ fn auxiliary_artifact_schema_rejects_unknown_fields_and_duplicate_names() {
 
     manifest.auxiliary_artifacts = vec![
         auxiliary_artifact("duplicate", "sidecar.bin", sidecar_hash.clone(), true),
-        auxiliary_artifact("duplicate", "sidecar.bin", sidecar_hash, false),
+        auxiliary_artifact("duplicate", "sidecar.bin", sidecar_hash.clone(), false),
     ];
     let report = verify_manifest_with_base(manifest.clone(), temp.path(), VerifyOptions::default());
     assert!(error_codes(&report).contains(&"auxiliary_artifact_name_duplicate"));
+
+    let mut padded = manifest.clone();
+    padded.auxiliary_artifacts = vec![auxiliary_artifact(
+        " duplicate ",
+        "sidecar.bin",
+        sidecar_hash,
+        true,
+    )];
+    let report = verify_manifest_with_base(padded, temp.path(), VerifyOptions::default());
+    assert!(error_codes(&report).contains(&"auxiliary_artifact_name_not_trimmed"));
 
     let mut value = serde_json::to_value(&manifest).unwrap();
     value["auxiliary_artifacts"][0]["unexpected"] = json!(true);
@@ -2435,24 +2648,33 @@ fn attestation_shape_requires_matching_subject_sha256() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn cli_create_verify_and_exit_codes() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_index(temp.path());
+    let ids = temp.path().join("ids.bin");
+    let optional = temp.path().join("optional.json");
+    fs::write(&ids, 7u64.to_le_bytes()).unwrap();
+    fs::write(&optional, br#"{"optional":true}"#).unwrap();
+    let aux_arg = format!("ordinaldb.ids={}", ids.display());
+    let optional_aux_arg = format!("optional.stats={}", optional.display());
     let manifest = temp.path().join("manifest.json");
     let bin = env!("CARGO_BIN_EXE_ordvec-manifest");
 
     let output = Command::new(bin)
-        .args([
-            "create",
-            "--index",
-            index.to_str().unwrap(),
-            "--row-id-is-identity",
-            "--embedding-model",
-            "test-embedding",
-            "--out",
-            manifest.to_str().unwrap(),
-        ])
+        .arg("create")
+        .arg("--index")
+        .arg(index.to_str().unwrap())
+        .arg("--row-id-is-identity")
+        .arg("--aux")
+        .arg(&aux_arg)
+        .arg("--optional-aux")
+        .arg(&optional_aux_arg)
+        .arg("--embedding-model")
+        .arg("test-embedding")
+        .arg("--out")
+        .arg(manifest.to_str().unwrap())
         .output()
         .unwrap();
     assert!(
@@ -2596,6 +2818,7 @@ fn cli_create_verify_and_exit_codes() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn create_outside_manifest_dir_requires_explicit_path_policy() {
     let temp = tempfile::tempdir().unwrap();
@@ -2809,28 +3032,31 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
         .iter()
         .any(|issue| issue.code == "sqlite_activation_forced"));
 
-    let bin = env!("CARGO_BIN_EXE_ordvec-manifest");
-    let output = Command::new(bin)
-        .args([
-            "sqlite",
-            "activate",
-            "--db",
-            db.to_str().unwrap(),
-            "--manifest",
-            manifest_path.to_str().unwrap(),
-            "--force",
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    let forced_report: ordvec_manifest::VerificationReport =
-        serde_json::from_slice(&output.stdout).unwrap();
-    assert!(!forced_report.ok);
-    assert!(forced_report
-        .warnings
-        .iter()
-        .any(|issue| issue.code == "sqlite_activation_forced"));
+    #[cfg(feature = "cli")]
+    {
+        let bin = env!("CARGO_BIN_EXE_ordvec-manifest");
+        let output = Command::new(bin)
+            .args([
+                "sqlite",
+                "activate",
+                "--db",
+                db.to_str().unwrap(),
+                "--manifest",
+                manifest_path.to_str().unwrap(),
+                "--force",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let forced_report: ordvec_manifest::VerificationReport =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!forced_report.ok);
+        assert!(forced_report
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "sqlite_activation_forced"));
+    }
 }
 
 #[cfg(feature = "sqlite")]
