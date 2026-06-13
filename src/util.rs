@@ -103,6 +103,23 @@ pub(crate) fn l2_normalise(v: &[f32]) -> Vec<f32> {
     }
 }
 
+/// Allocation-free counterpart of [`l2_normalise`]: writes the L2-normalised
+/// vector into `out`, reusing its capacity. Same semantics as `l2_normalise`
+/// (a near-zero-norm input yields all zeros of the same length).
+// First non-test caller arrives in Task 5 (subset-rerank row helper); this
+// `allow` keeps the intermediate commit warning-clean and is removed then.
+#[allow(dead_code)]
+pub(crate) fn l2_normalise_into(out: &mut Vec<f32>, v: &[f32]) {
+    out.clear();
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm <= 1e-12 {
+        out.resize(v.len(), 0.0);
+    } else {
+        let inv = 1.0 / norm;
+        out.extend(v.iter().map(|&x| x * inv));
+    }
+}
+
 /// Assert that every element of `v` is finite (no `NaN`, no `±Inf`).
 ///
 /// ordvec's public `add` / `search` entry points reject non-finite
@@ -662,5 +679,26 @@ mod tests {
         // Count is within MAX_VECTORS, but new_n * elems_per_vec overflows
         // usize — the 32-bit (wasm32) hazard the `resize` in `add` would hit.
         let _ = checked_new_len(0, 2, usize::MAX);
+    }
+
+    #[test]
+    fn l2_normalise_into_matches_l2_normalise_and_reuses_capacity() {
+        use super::{l2_normalise, l2_normalise_into};
+        let v = vec![3.0f32, 0.0, 4.0, 0.0]; // norm 5
+        let expected = l2_normalise(&v);
+        let mut out: Vec<f32> = Vec::new();
+        l2_normalise_into(&mut out, &v);
+        assert_eq!(out, expected);
+        // zero vector → zeros, same length
+        let z = vec![0.0f32; 4];
+        l2_normalise_into(&mut out, &z);
+        assert_eq!(out, vec![0.0f32; 4]);
+        // reuse: second identical call does not grow capacity
+        let cap = {
+            l2_normalise_into(&mut out, &v);
+            out.capacity()
+        };
+        l2_normalise_into(&mut out, &v);
+        assert_eq!(out.capacity(), cap, "l2_normalise_into must reuse capacity");
     }
 }
