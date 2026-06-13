@@ -28,7 +28,7 @@ carries its own critique. Conclusions are tiered by what SURVIVED review.
 ## DEMOTED TO EXPLORATORY (known confounds — NOT a settled finding)
 
 - **"Routing keys are super-Poisson, never rigid"** (`spectral_probe.rs`,
-  `corpus_zoo_results.md`): **WITHDRAWN — the probe does not measure what it
+  `withdrawn/corpus_zoo_results.md`): **WITHDRAWN — the probe does not measure what it
   claims.** Attempted salvage (added `--unfold-smooth K`, a K-knot empirical
   unfold) INVERTED the result: under the smooth unfold the isotropic corpus
   reads super-Poisson (Σ²/L 1.7→12) and clustered reads LOWER (1.4→6.8) — the

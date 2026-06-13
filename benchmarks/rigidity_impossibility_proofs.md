@@ -115,7 +115,7 @@ NOT in favor of quantile-optimality-over-all-partitions. Establishing the latter
 would need a separate argument (that partition quality is monotone in Σ²), which
 is not provided and is likely false.
 
-(The zoo runs in corpus_zoo_results.md are EVIDENCE for the narrow claim, with
+(The zoo runs in withdrawn/corpus_zoo_results.md were EVIDENCE for the narrow claim, with
 the unfolding caveat in ADVERSARIAL_REVIEW.md. The selftest Σ²=0 only shows the
 estimator can represent the o(L) regime; Thm 3 says a fixed-distribution corpus
 cannot reach it.)
