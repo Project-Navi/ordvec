@@ -759,11 +759,11 @@ impl RankQuant {
         let out_k = out_scores.len();
         debug_assert_eq!(out_indices.len(), out_k);
         if out_k == 0 || m == 0 {
-            // Caller has already sentinel-precleared the row, so returning here
-            // (before resetting `scratch.top`) is safe: an empty row never reads
-            // `scratch.top`, and every subsequent non-empty row calls
-            // `reset_with_tie_keys` before use, so the stale collector state left
-            // over from a previous row is never observed.
+            // Defensive guard: both callers (`search_asymmetric_subset` and the
+            // batched `*_serial_into` loop) handle empty candidate rows / `out_k == 0`
+            // before reaching here, so this is normally unreachable. If it ever is
+            // hit, the caller owns sentinel-padding the row; returning before
+            // touching `scratch.top` is safe (the next non-empty row resets it).
             return;
         }
         let norm = rankquant_norm(dim, bits);
@@ -779,12 +779,17 @@ impl RankQuant {
         let sub_len = m
             .checked_mul(bpv)
             .expect("subset rerank: candidate scratch length overflows usize");
+        // `clear` + `reserve` + `extend_from_slice` (not `resize(.., 0)` + indexed
+        // copy): avoids zero-initialising `sub_len` bytes we immediately overwrite.
+        // Still allocation-free after warmup — `reserve` is a no-op once capacity
+        // covers `sub_len`, and `extend_from_slice` fills without reallocating.
         scratch.sub_packed.clear();
-        scratch.sub_packed.resize(sub_len, 0u8);
-        for (i, &di) in candidates_row.iter().enumerate() {
+        scratch.sub_packed.reserve(sub_len);
+        for &di in candidates_row {
             let src = (di as usize) * bpv;
-            scratch.sub_packed[i * bpv..(i + 1) * bpv]
-                .copy_from_slice(&self.packed[src..src + bpv]);
+            scratch
+                .sub_packed
+                .extend_from_slice(&self.packed[src..src + bpv]);
         }
 
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
@@ -925,25 +930,31 @@ impl RankQuant {
             "out_indices length must be nq*out_k ({buf_len})"
         );
 
-        // Preclear the whole output so short / zero-candidate rows never leak
-        // stale caller buffer contents.
-        for s in out_scores.iter_mut() {
-            *s = f32::NEG_INFINITY;
-        }
-        for i in out_indices.iter_mut() {
-            *i = -1;
-        }
         if out_k == 0 || nq == 0 {
             return;
         }
 
+        // No whole-buffer preclear: each row is written exactly once below. A
+        // non-empty row is fully (re)written by `subset_rerank_row_into` (its
+        // `finalize_into_with_scratch` preclears the row slice, then fills it); an
+        // empty row is sentinel-padded explicitly here. Validation above still
+        // precedes every write, so a validation panic leaves caller buffers intact.
         for qi in 0..nq {
             let q = &queries[qi * dim..(qi + 1) * dim];
             let row = &candidates[candidate_offsets[qi]..candidate_offsets[qi + 1]];
             let os = &mut out_scores[qi * out_k..(qi + 1) * out_k];
             let oi = &mut out_indices[qi * out_k..(qi + 1) * out_k];
-            l2_normalise_into(&mut scratch.q_unit, q);
-            self.subset_rerank_row_into(row, os, oi, scratch);
+            if row.is_empty() {
+                for s in os.iter_mut() {
+                    *s = f32::NEG_INFINITY;
+                }
+                for i in oi.iter_mut() {
+                    *i = -1;
+                }
+            } else {
+                l2_normalise_into(&mut scratch.q_unit, q);
+                self.subset_rerank_row_into(row, os, oi, scratch);
+            }
         }
     }
 
