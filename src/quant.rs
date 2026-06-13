@@ -62,6 +62,20 @@ impl SubsetScratch {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
+
+    /// Test-only capacity probe (scratch reuse / allocation-free assertions).
+    /// `#[doc(hidden)]` rather than `#[cfg(test)]` so the integration tests in
+    /// `tests/` (which compile the crate without `cfg(test)`) can reach it; it
+    /// is hidden from the public docs surface.
+    #[doc(hidden)]
+    pub fn capacities_for_test(&self) -> (usize, usize, usize, usize) {
+        (
+            self.q_unit.capacity(),
+            self.sub_packed.capacity(),
+            self.local_indices.capacity(),
+            self.final_order.capacity(),
+        )
+    }
 }
 
 fn check_eval_bits(bits: u8) {
@@ -692,7 +706,6 @@ impl RankQuant {
     /// Validate a CSR candidate batch. Panics on any contract violation
     /// (mirrors `search_asymmetric_subset`'s assert contract). The caller is the
     /// serial batched rerank entry point added alongside this helper.
-    #[allow(dead_code)]
     fn validate_csr_batch(&self, nq: usize, candidate_offsets: &[usize], candidates: &[u32]) {
         assert_eq!(
             candidate_offsets.len(),
@@ -858,6 +871,75 @@ impl RankQuant {
             } else {
                 candidates_row[loc as usize] as i64
             };
+        }
+    }
+
+    /// Serial (NO rayon) batched subset rerank into caller-owned buffers.
+    /// Allocation-free after `scratch` warmup. The integration contract for
+    /// runtimes that own their own parallelism (call this from a bounded pool,
+    /// with the GIL released, one row range per worker is the caller's choice).
+    ///
+    /// `queries` is `nq * dim`. Candidates are CSR: `candidate_offsets.len()
+    /// == nq + 1`, row `qi` is `candidates[candidate_offsets[qi]..candidate_offsets[qi+1]]`.
+    /// Output is rectangular: `out_k = k.min(self.len())`, and both output
+    /// buffers MUST have length `nq * out_k`. Underfull rows are sentinel-padded
+    /// (`NEG_INFINITY` / `-1`). Duplicate candidate ids are scored independently.
+    /// Tie policy: `(score desc, global row-id asc)`.
+    ///
+    /// Panics on any contract violation (CSR malformed, candidate id out of
+    /// range, non-finite query, wrong output-buffer length).
+    #[allow(clippy::too_many_arguments)] // arity is intrinsic to the caller-owned buffered contract (CSR inputs + scratch + two output buffers)
+    pub fn search_asymmetric_subset_batched_serial_into(
+        &self,
+        queries: &[f32],
+        candidate_offsets: &[usize],
+        candidates: &[u32],
+        k: usize,
+        scratch: &mut SubsetScratch,
+        out_scores: &mut [f32],
+        out_indices: &mut [i64],
+    ) {
+        let dim = self.dim;
+        assert!(
+            queries.len().is_multiple_of(dim),
+            "queries length {} must be a multiple of dim {dim}",
+            queries.len()
+        );
+        let nq = queries.len() / dim;
+        assert_all_finite(queries);
+        self.validate_csr_batch(nq, candidate_offsets, candidates);
+        let out_k = k.min(self.n_vectors);
+        let buf_len = result_buffer_len(nq, out_k);
+        assert_eq!(
+            out_scores.len(),
+            buf_len,
+            "out_scores length must be nq*out_k ({buf_len})"
+        );
+        assert_eq!(
+            out_indices.len(),
+            buf_len,
+            "out_indices length must be nq*out_k ({buf_len})"
+        );
+
+        // Preclear the whole output so short / zero-candidate rows never leak
+        // stale caller buffer contents.
+        for s in out_scores.iter_mut() {
+            *s = f32::NEG_INFINITY;
+        }
+        for i in out_indices.iter_mut() {
+            *i = -1;
+        }
+        if out_k == 0 || nq == 0 {
+            return;
+        }
+
+        for qi in 0..nq {
+            let q = &queries[qi * dim..(qi + 1) * dim];
+            let row = &candidates[candidate_offsets[qi]..candidate_offsets[qi + 1]];
+            let os = &mut out_scores[qi * out_k..(qi + 1) * out_k];
+            let oi = &mut out_indices[qi * out_k..(qi + 1) * out_k];
+            l2_normalise_into(&mut scratch.q_unit, q);
+            self.subset_rerank_row_into(row, os, oi, scratch);
         }
     }
 
