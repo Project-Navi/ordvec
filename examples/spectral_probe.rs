@@ -35,7 +35,8 @@ struct Cfg {
     n_keys: usize, // number of independent random-projection keys to average over
     corpus_npy: Option<String>,
     isotropic: bool, // control: N(0,I) corpus, no clusters (true Poisson expected)
-    unfold_empirical: bool, // unfold by empirical CDF (quantile) instead of Gaussian
+    unfold_empirical: bool, // exact-rank unfold (lattice; demo only, not a rigidity test)
+    unfold_smooth_knots: usize, // K>0 => smooth empirical unfold with K knots (correct method)
 }
 
 fn parse() -> Cfg {
@@ -48,6 +49,7 @@ fn parse() -> Cfg {
         corpus_npy: None,
         isotropic: false,
         unfold_empirical: false,
+        unfold_smooth_knots: 0,
     };
     let mut a = std::env::args().skip(1);
     while let Some(x) = a.next() {
@@ -60,6 +62,7 @@ fn parse() -> Cfg {
             "--corpus-npy" => c.corpus_npy = Some(a.next().unwrap()),
             "--isotropic" => c.isotropic = true,
             "--unfold-empirical" => c.unfold_empirical = true,
+            "--unfold-smooth" => c.unfold_smooth_knots = a.next().unwrap().parse().unwrap(),
             "--rigid-selftest" => {} // handled in main, bypasses corpus
             other => panic!("unknown arg {other}"),
         }
@@ -271,23 +274,68 @@ fn build_keys(cfg: &Cfg) -> (Vec<Vec<f64>>, usize) {
                 dot as f64
             })
             .collect();
-        if cfg.unfold_empirical {
-            // quantile unfold: sort, assign rank/N. By construction this maps
-            // to a perfect lattice -> Sigma^2 -> 0 if the sort is the only
-            // structure. Confirms quantile tiling balances the key exactly.
-            keys.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        keys.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        if cfg.unfold_smooth_knots > 0 {
+            // SMOOTH EMPIRICAL unfold (correct method; removes the Gaussian-
+            // mismatch confound). Fit the CDF with K coarse knots placed at
+            // rank-quantiles, linear between. This subtracts the large-scale
+            // marginal density of ANY distribution WITHOUT collapsing local
+            // fluctuation to a lattice (which exact-rank unfolding does).
+            // Number variance must then be read at window scales L << n/K so
+            // the knot smoothing does not wash out the signal being measured.
+            let k = cfg.unfold_smooth_knots.min(cfg.n);
+            let n = cfg.n;
+            // knot j (0..=k): rank index kr = j*n/k, key value = keys[kr], maps
+            // to unfolded position j*n/k. Each key unfolds by linear interp of
+            // its bracketing knots in VALUE space onto POSITION space.
+            let knot_rank = |j: usize| -> usize { (j * n / k).min(n - 1) };
+            let unfolded: Vec<f64> = keys
+                .iter()
+                .map(|&x| {
+                    // find bracketing knots by value (knots are sorted in value)
+                    // binary search over knot index
+                    let mut lo = 0usize;
+                    let mut hi = k;
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if keys[knot_rank(mid)] < x {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let j = lo.clamp(1, k);
+                    let (v0, v1) = (keys[knot_rank(j - 1)], keys[knot_rank(j)]);
+                    let (p0, p1) =
+                        (knot_rank(j - 1) as f64, knot_rank(j) as f64);
+                    if (v1 - v0).abs() < 1e-30 {
+                        p0
+                    } else {
+                        p0 + (x - v0) / (v1 - v0) * (p1 - p0)
+                    }
+                })
+                .collect();
+            let mut u = unfolded;
+            u.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            out.push(u);
+        } else if cfg.unfold_empirical {
+            // exact-rank unfold: assigns rank i. Trivially a lattice (Sigma^2=0)
+            // for ANY input — this is NOT a rigidity test, only a demonstration
+            // that exact quantile tiling balances occupancy. Kept for that use.
             for (i, kv) in keys.iter_mut().enumerate() {
-                *kv = i as f64; // already the unfolded lattice position
+                *kv = i as f64;
             }
+            out.push(keys);
         } else {
-            // unfold by the matching Gaussian CDF -> positions scaled to n.
+            // fixed-Gaussian unfold: ONLY valid for the isotropic marginal.
+            // CONFOUNDED for non-isotropic corpora (see ADVERSARIAL_REVIEW.md);
+            // prefer --unfold-smooth.
             let sigma = (1.0 / d as f64).sqrt();
             for kv in keys.iter_mut() {
                 *kv = normal_cdf(*kv / sigma) * cfg.n as f64;
             }
-            keys.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            out.push(keys);
         }
-        out.push(keys);
     }
     (out, cfg.n)
 }

@@ -142,15 +142,19 @@ fn generate(cfg: &Cfg, rng: &mut ChaCha8Rng, count: usize, is_query: bool) -> Ve
     let d = cfg.dim;
     let l = cfg.latent;
     let noise = if is_query { 0.1 } else { 0.3 };
-    // shared random projection A: d x l  (reused across rows in this call)
+    // Bug O fix: A and prototypes define the SHARED latent geometry and MUST be
+    // identical for corpus and queries (otherwise queries land in a different
+    // space and shard_recall ground truth is meaningless). Seed them from a
+    // dedicated, geometry-only RNG keyed by cfg.seed, NOT the streaming `rng`
+    // (whose state differs between the corpus and query calls).
+    let mut geo = ChaCha8Rng::seed_from_u64(cfg.seed ^ 0x9E37_79B9_7F4A_7C15);
     let mut a = vec![0.0f32; d * l];
     for x in a.iter_mut() {
-        *x = gauss(rng);
+        *x = gauss(&mut geo);
     }
-    // cluster prototypes (latent space)
     let mut protos = vec![0.0f32; cfg.clusters * l];
     for x in protos.iter_mut() {
-        *x = gauss(rng);
+        *x = gauss(&mut geo);
     }
     // power-law per-latent scaling for "anisotropic": sigma_k ~ (k+1)^-alpha
     let scale: Vec<f32> = (0..l)

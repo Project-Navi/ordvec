@@ -28,19 +28,33 @@ carries its own critique. Conclusions are tiered by what SURVIVED review.
 ## DEMOTED TO EXPLORATORY (known confounds — NOT a settled finding)
 
 - **"Routing keys are super-Poisson, never rigid"** (`spectral_probe.rs`,
-  `corpus_zoo_results.md`): the fixed **Gaussian** unfold only fits the isotropic
-  marginal. Non-isotropic corpora are unfolded by the wrong density, which can
-  MANUFACTURE apparent clustering. The isotropic control and zoo are therefore
-  partly circular. To salvage: unfold by each corpus's **empirical** smooth
-  marginal (monotone spline on sorted keys — NOT the rank-overwrite currently
-  mislabeled `--unfold-empirical`, which returns Σ²=0 by construction). UNTIL
-  THEN this is exploratory, not a proven property of embedding keys.
-- **"Random offsets redundant / coprime adds nothing"** (`shard_recall.rs`): the
-  RandomOffset arm draws an extra RNG value per projection, desyncing the stream
-  so arms get DIFFERENT projection directions — it was never the clean phase-only
-  ablation claimed. Plus the "fair envelope" is not fair (coprime arms saturate
-  below high budgets). The *retreat* ("needs a within-axis harness") is sound;
-  the positive tie claim is withdrawn.
+  `corpus_zoo_results.md`): **WITHDRAWN — the probe does not measure what it
+  claims.** Attempted salvage (added `--unfold-smooth K`, a K-knot empirical
+  unfold) INVERTED the result: under the smooth unfold the isotropic corpus
+  reads super-Poisson (Σ²/L 1.7→12) and clustered reads LOWER (1.4→6.8) — the
+  opposite ordering from the Gaussian-unfold version. So the two unfolds
+  disagree and NEITHER is validated against analytic ground truth. The
+  Gaussian-unfold "isotropic = clean Poisson 0.99" was not a control passing —
+  it was the single marginal the wrong unfold happened to fit. The smooth unfold
+  has its own artifact (knot-scale + interpolation structure). CONCLUSION: the
+  number-variance empirical finding is UNSUPPORTED in either direction. Fixing it
+  requires rebuilding the estimator against a case with KNOWN analytic number
+  variance (e.g. a stationary process with closed-form Σ²(L)) to calibrate the
+  unfold + window estimator before trusting any corpus reading. This is open
+  follow-up work, not a patch. The THEORY (rigidity_impossibility_proofs.md) is
+  unaffected — it does not depend on this probe.
+- **"Random offsets redundant / coprime adds nothing"** (`shard_recall.rs`):
+  **Bug L FIXED.** `build_projs` now seeds direction and phase RNGs separately
+  and identically across arms, so aligned vs random-offset share the same R
+  directions and the ablation is clean. Re-run: aligned 0.9095 vs random-offset
+  0.9080 (tied) — the "random offsets add nothing" claim now holds on a
+  controlled comparison. Still-open caveat: the "fair envelope" undersells the
+  coprime arms (they subdivide buckets and saturate below high budgets), and
+  coprimality across R directions is the wrong geometry — the within-axis vernier
+  harness remains unbuilt (theory is in crt_seam_oracle).
+- **`gen_corpus` Bug O FIXED.** Corpus and queries now share one geometry
+  (`A` + prototypes seeded from a dedicated geometry-only RNG keyed by cfg.seed),
+  so query/corpus latent spaces match and shard_recall ground truth is valid.
 
 ## IMPOSSIBILITY PROOFS — repairable, currently overstated
 

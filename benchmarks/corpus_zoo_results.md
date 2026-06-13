@@ -1,9 +1,9 @@
-> ⚠️ EXPLORATORY — CIRCULAR AS WRITTEN (adversarial review). Every non-isotropic
-> geometry is unfolded by a fixed Gaussian CDF it does not match, so the
-> "robustness across geometries" partly measures the unfold mismatch, not the
-> corpus. Isotropic is the only marginal the unfold fits. NOT a settled finding;
-> re-run with per-corpus empirical-marginal unfolding to salvage. See
-> benchmarks/ADVERSARIAL_REVIEW.md.
+> ⛔ WITHDRAWN. This zoo runs the number-variance probe whose unfold is
+> uncalibrated (see spectral_probe_results.md banner and ADVERSARIAL_REVIEW.md).
+> The smooth-unfold salvage inverted the isotropic/clustered ordering, so the
+> "robust across geometries" claim is unsupported. Retained as record only. The
+> gen_corpus.rs zoo GENERATOR itself is fine and reusable; the measurement on top
+> is what's withdrawn.
 
 # Corpus zoo: number-variance robustness across geometries
 

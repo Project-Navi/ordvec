@@ -1,10 +1,12 @@
-> ⚠️ EXPLORATORY — KNOWN CONFOUND (adversarial review). The fixed Gaussian unfold
-> only fits the isotropic marginal; non-isotropic corpora unfolded by the wrong
-> density can MANUFACTURE apparent clustering. The "super-Poisson" reading is NOT
-> a settled property of embedding keys. Salvage path (unfold by each corpus's
-> empirical smooth marginal) and full critique in benchmarks/ADVERSARIAL_REVIEW.md.
-> The theory (rigidity_impossibility_proofs.md Thm 3) is the load-bearing result;
-> this probe is illustrative only.
+> ⛔ WITHDRAWN — PROBE DOES NOT MEASURE WHAT IT CLAIMS. The salvage attempt
+> (`--unfold-smooth K`) INVERTED the result: smooth unfold makes isotropic read
+> super-Poisson (Σ²/L 1.7→12) and clustered read LOWER. The two unfolds disagree
+> and neither is validated against analytic ground truth; the Gaussian "isotropic
+> = 0.99 Poisson" control was just the one marginal that unfold happened to fit.
+> The numbers below are RETAINED ONLY as the record of the failure. Fixing needs
+> the estimator calibrated against a process with known closed-form Σ²(L). The
+> theory (rigidity_impossibility_proofs.md) does NOT depend on this probe. Full
+> account: benchmarks/ADVERSARIAL_REVIEW.md.
 
 # Number-variance probe: is a 1-D routing key rigid or Poisson?
 

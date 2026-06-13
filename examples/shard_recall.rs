@@ -271,31 +271,34 @@ impl Arm {
 /// Build R projections for one arm. `base_width` is calibrated so a single
 /// grid has ~sqrt(n) buckets (a reasonable shard granularity); coprime arms
 /// subdivide by the prime multiplier.
-fn build_projs(cfg: &Cfg, arm: Arm, r: usize, base_width: f32, rng: &mut ChaCha8Rng) -> Vec<Proj> {
+fn build_projs(cfg: &Cfg, arm: Arm, r: usize, base_width: f32) -> Vec<Proj> {
     let d = cfg.dim;
+    // Bug L fix: directions and phases come from SEPARATE, fixed-seed RNGs that
+    // do not depend on the arm. Every arm therefore sees the IDENTICAL R
+    // projection directions (and identical phase draws where used), so the arms
+    // differ ONLY in width/phase policy — the clean ablation. Previously the
+    // RandomOffset arm consumed an extra value from one shared stream, desyncing
+    // the directions so arms were compared on different projections.
+    let mut dir_rng = ChaCha8Rng::seed_from_u64(SEED ^ 0xD132_0000 ^ (r as u64));
+    let mut phase_rng = ChaCha8Rng::seed_from_u64(SEED ^ 0x9DA5E_000 ^ (r as u64));
     (0..r)
         .map(|i| {
             let mut dir = vec![0.0f32; d];
             for x in dir.iter_mut() {
-                *x = gauss(rng);
+                *x = gauss(&mut dir_rng);
             }
             let nrm: f32 = dir.iter().map(|t| t * t).sum::<f32>().sqrt();
             for x in dir.iter_mut() {
                 *x /= nrm;
             }
+            // draw a phase fraction for EVERY arm (keeps phase_rng in lockstep);
+            // arms that don't use it simply ignore the value.
+            let p: f32 = phase_rng.random_range(0.0..1.0);
             let (width, phase) = match arm {
-                // coprime: finer grid per projection by a distinct prime factor
                 Arm::Coprime => (base_width / COPRIME_PERIODS[i] as f32, 0.0),
-                // aligned: identical grid, zero phase — seams stack exactly
                 Arm::Aligned => (base_width, 0.0),
-                // random-offset: identical period, independent random phase
-                Arm::RandomOffset => {
-                    let p: f32 = rng.random_range(0.0..1.0);
-                    (base_width, p * base_width)
-                }
-                // both: coprime period AND random phase
+                Arm::RandomOffset => (base_width, p * base_width),
                 Arm::Both => {
-                    let p: f32 = rng.random_range(0.0..1.0);
                     let w = base_width / COPRIME_PERIODS[i] as f32;
                     (w, p * w)
                 }
@@ -363,10 +366,9 @@ fn run_arms(cfg: &Cfg, corpus: &[f32], queries: &[f32], truth: &[Vec<usize>]) {
     println!("arm\tR\trad\tcand_scanned\trecall@k");
     for &r in &cfg.r_values {
         for &arm in &arms {
-            // Aligned/RandomOffset don't subdivide, so they only differ from
-            // each other by phase; coprime/both subdivide per projection.
-            let mut rng = ChaCha8Rng::seed_from_u64(SEED ^ (r as u64) << 8 ^ arm as u64);
-            let projs = build_projs(cfg, arm, r, base_width, &mut rng);
+            // build_projs now seeds its own direction/phase RNGs internally
+            // (identical across arms for the same r) — Bug L fix.
+            let projs = build_projs(cfg, arm, r, base_width);
             let index = build_index(&projs, corpus, cfg.dim);
             for rad in [0i64, 1, 2, 4] {
                 let stats: Vec<(usize, f32)> = (0..cfg.n_queries)

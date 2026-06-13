@@ -1,10 +1,13 @@
-> ⚠️ EXPLORATORY — UNCONTROLLED COMPARISON (adversarial review). The RandomOffset
-> arm draws an extra RNG value per projection, desyncing the stream so arms get
-> DIFFERENT projection directions — it was never the clean phase-only ablation
-> claimed, so the "random offsets are redundant" tie is WITHDRAWN. The "fair
-> envelope" is also not fair (coprime arms saturate below high budgets). What
-> survives: the retreat — "coprimality across R directions is the wrong geometry;
-> needs a within-axis harness." See benchmarks/ADVERSARIAL_REVIEW.md.
+> ✅ RNG-DESYNC BUG FIXED (was Bug L). build_projs now seeds direction and phase
+> RNGs separately and identically across arms, so aligned vs random-offset share
+> the SAME R projection directions and differ ONLY in phase — the clean ablation.
+> Re-run result: aligned 0.9095 vs random-offset 0.9080 at 16k budget = TIED, so
+> "random phase offsets add nothing across R different directions" now holds on a
+> controlled comparison. CAVEAT STILL OPEN: the coprime/both arms subdivide
+> buckets so the "fair envelope" undersells them (they saturate below high
+> budgets); coprimality across R directions remains the wrong geometry — the
+> within-axis vernier harness (crt_seam_oracle covers the theory) is the right
+> test and is not built here. Numbers below are the post-fix run.
 
 # R-projection shard-recall: does coprime seam-decorrelation help?
 
@@ -17,20 +20,22 @@ Source: `examples/shard_recall.rs`. Synthetic clustered corpus n=50k, dim=256,
 
 ## Fair envelope (max recall@10 at candidates-scanned <= budget)
 
+Post-fix run (Bug L fixed: arms share identical projection directions):
+
 | budget | coprime | aligned | random-offset | both |
 |--------|---------|---------|---------------|------|
-| 1000   | 0.120   | 0.143   | 0.088         | 0.110 |
-| 2000   | 0.214   | 0.239   | 0.218         | 0.207 |
-| 4000   | 0.370   | 0.402   | 0.375         | 0.390 |
-| 8000   | 0.518   | 0.674   | 0.651         | 0.554 |
-| 16000  | 0.518   | 0.895   | 0.883         | 0.554 |
+| 1000   | 0.109   | 0.0885  | 0.0835        | 0.1085 |
+| 2000   | 0.1885  | 0.1795  | 0.1840        | 0.1830 |
+| 4000   | 0.3370  | 0.3780  | 0.3880        | 0.3290 |
+| 8000   | 0.5315  | 0.6425  | 0.6490        | 0.5300 |
+| 16000  | 0.5315  | 0.9095  | 0.9080        | 0.5300 |
 
 ## Findings
 
-**1. CLEAN RESULT (matched granularity): random offsets are redundant.**
-`aligned` and `random-offset` use identical bucket width and differ only in
-phase — they isolate seam decorrelation exactly. They are statistically TIED
-(0.895 vs 0.883 at 16k; aligned marginally ahead). Across R *different* random
+**1. CLEAN RESULT (controlled ablation): random offsets are redundant.**
+After the Bug-L fix, `aligned` and `random-offset` share the SAME R projection
+directions and identical bucket width — differing ONLY in phase. They are
+statistically TIED (0.9095 vs 0.9080 at 16k). Across R *different* random
 projection directions, the direction randomness already decorrelates seams;
 adding random phase buys nothing. Confirms the literature prediction
 (multi-probe LSH / random-rotation decorrelation).
