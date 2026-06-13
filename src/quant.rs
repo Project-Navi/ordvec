@@ -947,6 +947,21 @@ impl RankQuant {
     /// [`Self::search_asymmetric_subset_batched_serial_into`]. Allocates the
     /// output `SearchResults` and a transient `SubsetScratch`. NO rayon.
     /// `result.k == k.min(self.len())`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use ordvec::{RankQuant, SignBitmap};
+    /// # let (dim, queries, k) = (768usize, vec![0.0f32; 768 * 3], 10usize);
+    /// # let sign = SignBitmap::new(dim);
+    /// # let rq = RankQuant::new(dim, 2);
+    /// let cb = sign.top_m_candidates_batched_serial_csr(&queries, 256);
+    /// let results = rq.search_asymmetric_subset_batched_serial(
+    ///     &queries, &cb.offsets, &cb.candidates, k,
+    /// );
+    /// for qi in 0..results.nq {
+    ///     let _ids = results.indices_for_query(qi);
+    /// }
+    /// ```
     pub fn search_asymmetric_subset_batched_serial(
         &self,
         queries: &[f32],

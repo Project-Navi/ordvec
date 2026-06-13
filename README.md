@@ -109,7 +109,7 @@ Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ```toml
 [dependencies]
-ordvec = "0.4"
+ordvec = "0.5"
 
 # Or, to track unreleased `main`, use a git dependency instead:
 # ordvec = { git = "https://github.com/Fieldnote-Echo/ordvec" }
