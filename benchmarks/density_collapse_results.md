@@ -95,9 +95,12 @@ recall gain vs simply using b=4 is the unanswered deployment question.
 
 - Real corpus here is repo-domain (md+rust), 8665 docs — narrow domain, modest
   size. Confirm on a larger, broader corpus (MS MARCO / Wikipedia passages).
-- The test shows the signal EXISTS (separation in tau); it does not yet show a
-  tau-rerank improves end-to-end recall vs simply using b=4. The honest next
-  experiment: tau-rerank of b=2 survivors vs b=4 at matched bytes, R@10 vs FP32.
+- **RESOLVED (negative):** the tau-rerank-vs-b4 bake-off was run
+  (tau_rerank_bakeoff_results.md). b=4 wins decisively even at the tau ceiling
+  (real: b4 0.942 vs tau 0.597, and tau is worse than b2's own 0.898). The
+  ~0.04 tau gap is a real binary discriminator but too weak to ORDER candidates;
+  it does not convert to retrieval value. Conclusion: just use b=4. The signal
+  is real-but-inert — no ordvec feature follows.
 - Kendall-tau is computed on FP32 values restricted to the per-pair union of
   top-k coords; a deployable version computes it on the stored ranks.
 - Single corpus, single model (nomic-embed-text), no cross-encoder check — do

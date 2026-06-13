@@ -10,9 +10,11 @@ tiered below by **what survived scrutiny**. Read the tiers, not all 11 docs.
 
 ## 3-minute path
 
-1. This file (the tiers).
-2. **[density_collapse_results.md](density_collapse_results.md)** — the headline,
-   real-embedding result (and its honest correction).
+1. This file (the tiers + the verdict at the bottom).
+2. **[density_collapse_results.md](density_collapse_results.md)** — the mechanism
+   (real-embedding, with its honest correction), then
+   **[tau_rerank_bakeoff_results.md](tau_rerank_bakeoff_results.md)** — the
+   decisive negative: it doesn't beat b=4.
 3. **[ADVERSARIAL_REVIEW.md](ADVERSARIAL_REVIEW.md)** — what was challenged,
    fixed, retracted, withdrawn. The integrity record.
 
@@ -20,7 +22,8 @@ tiered below by **what survived scrutiny**. Read the tiers, not all 11 docs.
 
 | doc | claim |
 |-----|-------|
-| [density_collapse_results.md](density_collapse_results.md) | **Headline.** RankQuant b=2 density collapse = Hamming-near codes the scorer can't separate. Among those lookalikes, true neighbours have lower intra-code Kendall-tau (gap ≈ 0.04, bootstrap CI > 0) on real `nomic-embed-text` embeddings. Modest but real; the lever is permutation order already in the `Rank` code. |
+| [density_collapse_results.md](density_collapse_results.md) | **Mechanism.** RankQuant b=2 density collapse = Hamming-near codes the scorer can't separate. Among those lookalikes, true neighbours have lower intra-code Kendall-tau (gap ≈ 0.04, CI > 0). Real but small. |
+| [tau_rerank_bakeoff_results.md](tau_rerank_bakeoff_results.md) | **The verdict.** Does that tau signal beat b=4? NO — b=4 wins even at the tau ceiling; tau scores below b=2's own ordering. Signal is real-but-inert; just use b=4. Closes the line: research, not a feature. |
 | [crt_seam_oracle_results.md](crt_seam_oracle_results.md) | CRT vernier seam theorem — exhaustive finite proof: lcm spacing, one coincidence/period, capped density `∏min(2t+1,m_i)/m_i`. Lean 4 skeleton in [lean/](lean/). |
 | [twonn_id_results.md](twonn_id_results.md) | TwoNN intrinsic-dimension probe (chord-metric fix, sphere-validated). `nomic-embed-text` ID ≈ 13 / 768. Estimator-bias caveat noted. |
 | [shard_recall_results.md](shard_recall_results.md) | Controlled ablation (post RNG-desync fix): random phase offsets add nothing vs aligned grids across R random directions. |
@@ -52,9 +55,16 @@ Per-doc commands are at the bottom of each file. Real-embedding pipeline (GPU vi
 ollama) is fully recorded in [density_collapse_results.md](density_collapse_results.md);
 external-corpus recipe in [REAL_CORPUS_RUNBOOK.md](REAL_CORPUS_RUNBOOK.md).
 
-## Open follow-up
+## The deployment question — RESOLVED (negative)
 
-The decisive deployment question is unanswered: does the ≈0.04 tau gap convert to
-real recall gain vs simply using b=4 at matched bytes (R@10 vs FP32)? That, plus a
-second corpus/encoder, is what would move density-collapse from "real effect" to
-"ship it."
+[tau_rerank_bakeoff_results.md](tau_rerank_bakeoff_results.md): the decisive
+matched-bytes experiment was run. **b=4 wins decisively, even at the tau ceiling**
+(real embeddings: b4 0.942, b2 0.898, tau-rerank 0.597, fp32-rerank 1.000). The
+b=2 candidate pool contains every true neighbour (fp32-rerank=1.0), but the ~0.04
+tau gap is too weak to ORDER them — it scores below b=2's own ordering. The
+density-collapse signal is **real but inert**: "just use b=4," no ordvec feature
+follows.
+
+This is the honest bottom line of the whole branch: a characterized mechanism and
+a clean negative. **Research, not a feature** — the prime/spectral/permutation
+ideas for dense-region retrieval do not beat the boring baseline (spend the bits).
