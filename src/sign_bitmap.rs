@@ -31,6 +31,48 @@ use rayon::prelude::*;
 
 use crate::OrdvecError;
 
+/// Candidate sets for a query batch in CSR (compressed-sparse-row) form, as
+/// produced by [`SignBitmap::top_m_candidates_batched_serial_csr`].
+///
+/// Invariants (guaranteed and tested):
+/// - `offsets.len() == query_count() + 1`
+/// - `offsets[0] == 0`
+/// - `offsets` is monotonic non-decreasing
+/// - `*offsets.last().unwrap() == candidates.len()`
+/// - row `i` is `candidates[offsets[i]..offsets[i + 1]]`
+///
+/// Fields are `pub` for zero-copy hand-off (same precedent as
+/// [`crate::SearchResults`]); the invariants above are part of the stable API.
+#[derive(Clone, Debug)]
+#[must_use = "candidate generation scans the corpus; dropping the result discards that work"]
+pub struct CandidateBatch {
+    pub candidates: Vec<u32>,
+    pub offsets: Vec<usize>,
+}
+
+impl CandidateBatch {
+    /// Number of queries in the batch (`offsets.len() - 1`).
+    pub fn query_count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+    /// Candidate row for query `qi`, or `None` if `qi >= query_count()`.
+    pub fn candidates_for_query(&self, qi: usize) -> Option<&[u32]> {
+        let start = *self.offsets.get(qi)?;
+        let end = *self.offsets.get(qi + 1)?;
+        Some(&self.candidates[start..end])
+    }
+    /// `true` iff there are **no queries** (`query_count() == 0`) — NOT iff
+    /// there are no candidates. A 3-query batch with zero candidates per query
+    /// is not empty.
+    pub fn is_empty(&self) -> bool {
+        self.query_count() == 0
+    }
+    /// `true` iff there are no candidates across all queries.
+    pub fn has_no_candidates(&self) -> bool {
+        self.candidates.is_empty()
+    }
+}
+
 /// Index storing a 1-bit sign-cosine fingerprint per document.
 ///
 /// Storage: `dim / 8` bytes per doc. Dim must be a multiple of 64
@@ -603,6 +645,39 @@ mod tests {
             .zip(d.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum()
+    }
+
+    #[test]
+    fn candidate_batch_helpers() {
+        use super::CandidateBatch;
+        let cb = CandidateBatch {
+            candidates: vec![5, 6, 7, 2],
+            offsets: vec![0, 2, 2, 4], // q0=[5,6], q1=[], q2=[7,2]
+        };
+        assert_eq!(cb.query_count(), 3);
+        assert!(!cb.is_empty());
+        assert!(!cb.has_no_candidates());
+        assert_eq!(cb.candidates_for_query(0), Some(&[5u32, 6][..]));
+        assert_eq!(cb.candidates_for_query(1), Some(&[][..]));
+        assert_eq!(cb.candidates_for_query(2), Some(&[7u32, 2][..]));
+        assert_eq!(cb.candidates_for_query(3), None);
+
+        let empty = CandidateBatch {
+            candidates: vec![],
+            offsets: vec![0],
+        };
+        assert_eq!(empty.query_count(), 0);
+        assert!(empty.is_empty());
+        assert!(empty.has_no_candidates());
+
+        // 2 queries, zero candidates each → NOT empty, but has_no_candidates.
+        let no_cands = CandidateBatch {
+            candidates: vec![],
+            offsets: vec![0, 0, 0],
+        };
+        assert_eq!(no_cands.query_count(), 2);
+        assert!(!no_cands.is_empty());
+        assert!(no_cands.has_no_candidates());
     }
 
     #[test]
