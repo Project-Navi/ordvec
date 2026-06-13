@@ -47,10 +47,40 @@ structure is in S_D (the order the encoder induced), NOT on the integer line
 (primes / Sacks spiral, which act on the index and carry no corpus information —
 see the conjecture thread).
 
+## REAL EMBEDDINGS (nomic-embed-text via ollama on RTX 5080, 768-d)
+
+Corpus: 8665 real sentences extracted from this repo's markdown + Rust, embedded
+with `nomic-embed-text` (GPU-resident via ollama). Generator:
+`examples/embed_ollama.py`. Run: `density_collapse --corpus-npy repo_real.npy`.
+
+First real-data facts:
+- TwoNN intrinsic dimension of nomic-embed-text ≈ 13 (ambient 768) — our own
+  measurement, squarely in the predicted low-tens range.
+- Real embeddings are FAR more entangled at b=2 than synthetic clusters: mean
+  nearest-code Hamming 314/768, and ~5083 of 8665 docs sit in each probe's
+  b2-lookalike shell (vs ~60–120 synthetic). Real geometry, much denser collapse.
+
+The tau-signal HOLDS on real data and SHARPENS monotonically with the coordinate
+set size (top-k):
+
+| top-k | tau true-nbr | tau far | win rate (tau_true < tau_far) |
+|-------|--------------|---------|-------------------------------|
+| 8     | 0.3892       | 0.4128  | 0.667 |
+| 16    | 0.3773       | 0.3968  | 0.683 |
+| 32    | 0.3706       | 0.3931  | 0.847 |
+| 64    | 0.3682       | 0.3926  | **0.930** |
+
+At top-k=64, 93% of probes have true neighbours with lower intra-code Kendall-tau
+than the b2-lookalikes — on real encoder geometry. The monotonic climb
+(0.667→0.930) is the signature of a real effect: sparse top-8 order can't
+separate near-parallel real embeddings, but the fuller coordinate order does.
+So the synthetic finding survives contact with real embeddings, and the lever
+(intra-code permutation order, already in the Rank code) is confirmed.
+
 ## Caveats / open
 
-- Synthetic low-rank clustered corpus; confirm on real embeddings via a corpus
-  dump (the probe has no .npy loader yet — add one to test real data).
+- Real corpus here is repo-domain (md+rust), 8665 docs — narrow domain, modest
+  size. Confirm on a larger, broader corpus (MS MARCO / Wikipedia passages).
 - The test shows the signal EXISTS (separation in tau); it does not yet show a
   tau-rerank improves end-to-end recall vs simply using b=4. The honest next
   experiment: tau-rerank of b=2 survivors vs b=4 at matched bytes, R@10 vs FP32.

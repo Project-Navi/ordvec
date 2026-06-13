@@ -36,6 +36,7 @@ struct Cfg {
     noise: f32, // cluster tightness: smaller = denser = more collapse
     bits: u32,  // bucket bits (2 = quartiles)
     topk: usize, // # top coords used for the intra-bucket tau test
+    corpus_npy: Option<String>, // real embeddings; overrides synthetic + dim/n
 }
 
 fn parse() -> Cfg {
@@ -47,6 +48,7 @@ fn parse() -> Cfg {
         noise: 0.3,
         bits: 2,
         topk: 16,
+        corpus_npy: None,
     };
     let mut a = std::env::args().skip(1);
     while let Some(x) = a.next() {
@@ -58,6 +60,7 @@ fn parse() -> Cfg {
             "--noise" => c.noise = a.next().unwrap().parse().unwrap(),
             "--bits" => c.bits = a.next().unwrap().parse().unwrap(),
             "--topk" => c.topk = a.next().unwrap().parse().unwrap(),
+            "--corpus-npy" => c.corpus_npy = Some(a.next().unwrap()),
             other => panic!("unknown arg {other}"),
         }
     }
@@ -155,9 +158,54 @@ fn collision_report(cfg: &Cfg, codes: &[Vec<u8>]) {
     println!("(small Hamming = codes the b={} scorer can barely separate = collapse)", cfg.bits);
 }
 
+/// Minimal NumPy v1/v2 .npy reader for 2-D little-endian f32 C-order arrays.
+fn load_npy_f32(path: &str) -> (Vec<f32>, usize, usize) {
+    let bytes = std::fs::read(path).expect("read npy");
+    assert!(bytes.len() >= 10 && &bytes[..6] == b"\x93NUMPY", "not a numpy file");
+    let major = bytes[6];
+    let (hlen, hstart) = if major == 1 {
+        (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10)
+    } else {
+        (u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize, 12)
+    };
+    let header = std::str::from_utf8(&bytes[hstart..hstart + hlen]).expect("utf8 header");
+    assert!(header.contains("'descr': '<f4'"), "expected <f4 dtype");
+    assert!(header.contains("'fortran_order': False"), "expected C order");
+    let after = &header[header.find("'shape':").expect("shape")..];
+    let inner = &after[after.find('(').unwrap() + 1..after.find(')').unwrap()];
+    let dims: Vec<usize> = inner.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    assert_eq!(dims.len(), 2, "expected 2-D array");
+    let (n, dim) = (dims[0], dims[1]);
+    let dstart = hstart + hlen;
+    assert_eq!(bytes.len() - dstart, n * dim * 4, "data length mismatch");
+    let mut out = vec![0.0f32; n * dim];
+    for (i, ch) in bytes[dstart..].chunks_exact(4).enumerate() {
+        out[i] = f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]);
+    }
+    // L2-normalize rows (cosine geometry)
+    for i in 0..n {
+        let row = &mut out[i * dim..(i + 1) * dim];
+        let nrm: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if nrm > 0.0 {
+            for x in row.iter_mut() {
+                *x /= nrm;
+            }
+        }
+    }
+    (out, n, dim)
+}
+
 fn main() {
-    let cfg = parse();
-    let corpus = make_corpus(&cfg);
+    let mut cfg = parse();
+    let corpus = if let Some(path) = cfg.corpus_npy.clone() {
+        let (v, n, dim) = load_npy_f32(&path);
+        eprintln!("# loaded REAL corpus {n} x {dim} from {path}");
+        cfg.n = n;
+        cfg.dim = dim;
+        v
+    } else {
+        make_corpus(&cfg)
+    };
     let d = cfg.dim;
 
     // b-bit bucket code: top bucket id per coordinate. rank r in [0,D) ->
