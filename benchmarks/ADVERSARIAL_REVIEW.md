@@ -74,6 +74,29 @@ carries its own critique. Conclusions are tiered by what SURVIVED review.
   number-variance-rigid" (true), and drop the optimality-over-all-partitions
   claim unless separately proved (likely false).
 
+## Round 2 (real-embedding pipeline + post-PR code review)
+
+After the real-embedding work and the PR was opened, a second hostile review
+(plus the Gemini/qodo PR bots) hit the new material:
+
+- **CRITICAL — density-collapse headline was an artifact, now corrected.** The
+  win-rate climb 0.667→0.930 with top-k was an estimator-variance effect (M2),
+  and tau was computed on the probe's own coords, coupling it to cosine (M1).
+  FIXED: tau now uses the per-pair UNION of top coords (de-circularized), and we
+  report the tau GAP (effect size) with a bootstrap 95% CI instead of win rate.
+  Result survives but is MODEST and FLAT: gap ≈ 0.04, CI strictly > 0 at every
+  top-k. The "sharpening / signature of a real effect" claim is RETRACTED; the
+  small-but-real separation stands.
+- **qodo: bucketing bug FIXED.** density_collapse reimplemented bucketing as
+  `rank/(d/2^bits)` (panics at d/2^bits==0; wrong for non-divisible dims). Now
+  uses `ordvec::rank::rank_to_bucket` — measures REAL RankQuant behavior.
+- **embed_ollama.py hardened:** E2 (silent row misalignment if ollama returns
+  wrong count) now aborts; E3 (empty corpus) guarded.
+- **Reproducibility (E4/E5):** the repo-sentence extraction + embed procedure is
+  now recorded verbatim in density_collapse_results.md (was unrecorded).
+- **G1 overclaim:** body language softened; single-corpus/single-model
+  generality explicitly NOT claimed.
+
 ## Net
 
 The mathematically defensible deliverables are: the CRT vernier structure

@@ -28,7 +28,15 @@ def embed_batch(texts):
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=120) as r:
-        return json.load(r)["embeddings"]
+        embs = json.load(r)["embeddings"]
+    # E2 fix: ollama must return exactly one vector per input, IN ORDER.
+    # A mismatch would silently misalign rows against the source texts.
+    if len(embs) != len(texts):
+        raise RuntimeError(
+            f"embedding count {len(embs)} != input count {len(texts)} "
+            "(row misalignment) — aborting rather than writing corrupt .npy"
+        )
+    return embs
 
 
 def build_builtin_corpus(n):
@@ -60,6 +68,8 @@ def build_builtin_corpus(n):
 
 
 def write_npy(path, vecs):
+    if not vecs:
+        raise ValueError("no vectors to write (empty corpus?)")
     n = len(vecs)
     dim = len(vecs[0])
     header = ("{'descr': '<f4', 'fortran_order': False, "

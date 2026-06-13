@@ -60,22 +60,36 @@ First real-data facts:
   nearest-code Hamming 314/768, and ~5083 of 8665 docs sit in each probe's
   b2-lookalike shell (vs ~60–120 synthetic). Real geometry, much denser collapse.
 
-The tau-signal HOLDS on real data and SHARPENS monotonically with the coordinate
-set size (top-k):
+### CORRECTED after a second adversarial review (M1 + M2)
 
-| top-k | tau true-nbr | tau far | win rate (tau_true < tau_far) |
-|-------|--------------|---------|-------------------------------|
-| 8     | 0.3892       | 0.4128  | 0.667 |
-| 16    | 0.3773       | 0.3968  | 0.683 |
-| 32    | 0.3706       | 0.3931  | 0.847 |
-| 64    | 0.3682       | 0.3926  | **0.930** |
+The first writeup reported a win-rate climb 0.667→0.930 with top-k as "the
+signature of a real effect." TWO review findings invalidated that framing, and
+the test was rewritten:
 
-At top-k=64, 93% of probes have true neighbours with lower intra-code Kendall-tau
-than the b2-lookalikes — on real encoder geometry. The monotonic climb
-(0.667→0.930) is the signature of a real effect: sparse top-8 order can't
-separate near-parallel real embeddings, but the fuller coordinate order does.
-So the synthetic finding survives contact with real embeddings, and the lever
-(intra-code permutation order, already in the Rank code) is confirmed.
+- **M2 (the win-rate climb was an artifact):** the per-probe tau GAP is flat
+  across top-k; only the win-rate estimator's variance shrinks as k grows,
+  mechanically pushing the win rate up. Win rate was the wrong statistic.
+- **M1 (circularity):** tau was computed on the PROBE'S OWN top-k coords, which
+  couples tau to cosine and makes the test near-tautological. Fixed to use the
+  per-PAIR UNION of top coords, chosen independently of the cosine ranking.
+
+Rewritten test reports the tau GAP (far − near) as an effect size, with a
+bootstrap 95% CI over probes (de-circularized coords):
+
+| top-k | tau gap (far − near) | 95% CI | verdict |
+|-------|----------------------|--------|---------|
+| 8  | 0.0420 | [0.0380, 0.0463] | signal |
+| 16 | 0.0417 | [0.0381, 0.0454] | signal |
+| 32 | 0.0440 | [0.0409, 0.0472] | signal |
+| 64 | 0.0453 | [0.0424, 0.0483] | signal |
+
+**Honest conclusion:** there IS a real effect — true neighbours have lower
+intra-code Kendall-tau than the b2-lookalikes the code conflates them with, gap
+≈ 0.04, CI strictly above 0 at every top-k. But it is MODEST and FLAT, not the
+dramatic "sharpening" originally claimed. The win-rate monotonicity is retracted.
+The lever (intra-code permutation order in the Rank code) shows a measurable but
+small separation on this corpus/model; whether ~0.04 tau converts to useful
+recall gain vs simply using b=4 is the unanswered deployment question.
 
 ## Caveats / open
 
@@ -84,11 +98,36 @@ So the synthetic finding survives contact with real embeddings, and the lever
 - The test shows the signal EXISTS (separation in tau); it does not yet show a
   tau-rerank improves end-to-end recall vs simply using b=4. The honest next
   experiment: tau-rerank of b=2 survivors vs b=4 at matched bytes, R@10 vs FP32.
-- Kendall-tau here is computed on FP32 values restricted to the probe's top-k
-  coords; a deployable version computes it on the stored ranks of those coords.
+- Kendall-tau is computed on FP32 values restricted to the per-pair union of
+  top-k coords; a deployable version computes it on the stored ranks.
+- Single corpus, single model (nomic-embed-text), no cross-encoder check — do
+  NOT read "confirmed" generality from one narrow corpus. Repeat on ≥1 more
+  encoder before any strong claim.
 
-Reproduce:
+Reproduce (synthetic):
 ```
 cargo run --release --example density_collapse                 # noise=0.30
 cargo run --release --example density_collapse -- --noise 0.10 # denser
+```
+
+Reproduce (real embeddings — full recorded procedure, was an E4 repro gap):
+```
+# 1. extract repo sentences (md + rust, 30..300 chars, >=4 words, deduped):
+python - <<'PY'
+import re, glob, os, tempfile
+texts=[]
+for f in glob.glob("**/*.md",recursive=True)+glob.glob("**/*.rs",recursive=True):
+    if "target" in f.split(os.sep) or ".git" in f.split(os.sep): continue
+    t=re.sub(r'```.*?```','',open(f,encoding='utf-8',errors='ignore').read(),flags=re.S)
+    for line in re.split(r'(?<=[.!?])\s+|\n',t):
+        s=line.strip(" #-*/>|`").strip()
+        if 30<=len(s)<=300 and re.search(r'[a-zA-Z]{4}',s) and s.count(' ')>=4: texts.append(s)
+seen=set(); out=[s for s in texts if not (s in seen or seen.add(s))]
+open(os.path.join(tempfile.gettempdir(),"repo_texts.txt"),"w",encoding="utf-8").write("\n".join(out))
+print(len(out),"sentences")
+PY
+# 2. embed via ollama nomic-embed-text (GPU) -> .npy:
+python examples/embed_ollama.py --texts "$TMP/repo_texts.txt" --out "$TMP/repo_real.npy" --n 9000 --batch 128
+# 3. run the probe:
+cargo run --release --example density_collapse -- --corpus-npy "$TMP/repo_real.npy" --topk 32
 ```

@@ -21,7 +21,7 @@
 //!      cargo run --release --example density_collapse -- --noise 0.15   (tighter)
 //! No external data, no BLAS. Uses ordvec::rank::rank_transform.
 
-use ordvec::rank::rank_transform;
+use ordvec::rank::{rank_to_bucket, rank_transform};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -34,7 +34,7 @@ struct Cfg {
     latent: usize,
     clusters: usize,
     noise: f32, // cluster tightness: smaller = denser = more collapse
-    bits: u32,  // bucket bits (2 = quartiles)
+    bits: u8,   // bucket bits (2 = quartiles); ordvec RankQuant uses {1,2,4}
     topk: usize, // # top coords used for the intra-bucket tau test
     corpus_npy: Option<String>, // real embeddings; overrides synthetic + dim/n
 }
@@ -208,19 +208,16 @@ fn main() {
     };
     let d = cfg.dim;
 
-    // b-bit bucket code: top bucket id per coordinate. rank r in [0,D) ->
-    // bucket r / (D / 2^bits). The b=2 "top-bucket membership" code we hash on
-    // is the multiset of bucket ids (order-free), exactly what RankQuant ties on.
-    let nbuckets = 1usize << cfg.bits;
-    let bucket_w = d / nbuckets;
+    // Per-coordinate b-bit bucket id, using ordvec's OWN bucketing
+    // (`rank_to_bucket`) so the probe measures real RankQuant behavior — it is
+    // guarded (d>0, bits<=7, rank<d) and dimension-correct for non-divisible
+    // dims, unlike a hand-rolled `rank / (d/2^bits)`. (qodo review.)
+    assert!(cfg.bits <= 7, "--bits must be <= 7 (RankQuant uses 1/2/4)");
     let codes: Vec<Vec<u8>> = (0..cfg.n)
         .into_par_iter()
         .map(|i| {
             let ranks = rank_transform(&corpus[i * d..(i + 1) * d]);
-            ranks
-                .iter()
-                .map(|&r| (r as usize / bucket_w).min(nbuckets - 1) as u8)
-                .collect()
+            ranks.iter().map(|&r| rank_to_bucket(r, d, cfg.bits)).collect()
         })
         .collect();
 
@@ -263,14 +260,23 @@ fn tau_report(cfg: &Cfg, corpus: &[f32], codes: &[Vec<u8>]) {
                 .iter()
                 .map(|&(_, j)| (cos(pv, &corpus[j * d..(j + 1) * d]), j))
                 .collect();
-            by_cos.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            by_cos.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             let half = by_cos.len() / 2;
-            let coords = top_coords(pv, cfg.topk);
+            // M1 fix (review): tau coords must NOT be the probe's own top-k
+            // (that couples tau to cosine, making the test near-tautological).
+            // Use the UNION of each PAIR's own top coords — chosen independently
+            // of the cosine ranking — so tau measures order agreement on the
+            // dims the two vectors jointly care about, not the probe's alone.
             let tau_of = |slice: &[(f32, usize)]| -> (f32, f32) {
                 let mut st = 0.0f32;
                 let mut sc = 0.0f32;
                 for &(c, j) in slice {
-                    st += kendall_tau(pv, &corpus[j * d..(j + 1) * d], &coords);
+                    let jv = &corpus[j * d..(j + 1) * d];
+                    let mut coords = top_coords(pv, cfg.topk);
+                    coords.extend(top_coords(jv, cfg.topk));
+                    coords.sort_unstable();
+                    coords.dedup();
+                    st += kendall_tau(pv, jv, &coords);
                     sc += c;
                 }
                 let k = slice.len().max(1) as f32;
@@ -289,22 +295,48 @@ fn tau_report(cfg: &Cfg, corpus: &[f32], codes: &[Vec<u8>]) {
     let tau_far = mean(&|r| r.1);
     let cos_near = mean(&|r| r.2);
     let cos_far = mean(&|r| r.3);
-    let wins = rows.iter().filter(|r| r.0 < r.1).count();
-    println!("\n## Intra-code Kendall-tau test (top-{} coords, M={m} b2-lookalikes/probe, {} probes)",
+    // Per-probe tau GAP (far - near): positive => true neighbours have lower
+    // tau. Report its mean with a bootstrap 95% CI over probes. The gap (an
+    // EFFECT SIZE) is the honest statistic — NOT the win rate, whose climb with
+    // top-k is just estimator-variance reduction, not a sharpening effect (M2).
+    let gaps: Vec<f64> = rows.iter().map(|r| (r.1 - r.0) as f64).collect();
+    let gap_mean = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
+    let (lo, hi) = bootstrap_ci(&gaps, 2000);
+    println!("\n## Intra-code Kendall-tau test (top-{} coords PER-PAIR union, M={m}, {} probes)",
         cfg.topk, rows.len());
-    println!("among b2-lookalikes:   mean cosine   mean top-k tau-distance");
+    println!("among b2-lookalikes:   mean cosine   mean tau-distance");
     println!("  FP32-TRUE neighbours {cos_near:.4}        {tau_near:.4}");
     println!("  FP32-FAR lookalikes  {cos_far:.4}        {tau_far:.4}");
-    println!("probes where true-neighbour tau < far-lookalike tau: {wins}/{} = {:.3}",
-        rows.len(), wins as f64 / rows.len().max(1) as f64);
-    let verdict = if tau_near + 0.005 < tau_far {
-        "SIGNAL: fine permutation order separates true neighbours from b2-lookalikes -> recoverable, no new storage"
-    } else if tau_near > tau_far + 0.005 {
-        "INVERTED: true neighbours have HIGHER tau — order does not help here"
+    println!("tau GAP (far - near) = {gap_mean:.4}  95% CI [{lo:.4}, {hi:.4}]");
+    let verdict = if lo > 0.0 {
+        "SIGNAL: gap CI strictly > 0 — true neighbours have lower tau (effect, not just win-rate)"
+    } else if hi < 0.0 {
+        "INVERTED: gap CI strictly < 0"
     } else {
-        "NO SIGNAL: intra-code order does not separate true neighbours from b2-lookalikes"
+        "NO SIGNAL: gap CI spans 0 — cannot distinguish from noise"
     };
     println!("verdict: {verdict}");
+}
+
+/// Percentile bootstrap 95% CI for the mean of `xs`, `b` resamples.
+/// Deterministic RNG (no Date/rand-of-clock) so the CI is reproducible.
+fn bootstrap_ci(xs: &[f64], b: usize) -> (f64, f64) {
+    if xs.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED ^ 0xB007);
+    let n = xs.len();
+    let mut means: Vec<f64> = (0..b)
+        .map(|_| {
+            let mut s = 0.0;
+            for _ in 0..n {
+                s += xs[rng.random_range(0..n)];
+            }
+            s / n as f64
+        })
+        .collect();
+    means.sort_by(|a, c| a.partial_cmp(c).unwrap_or(std::cmp::Ordering::Equal));
+    (means[(0.025 * b as f64) as usize], means[((0.975 * b as f64) as usize).min(b - 1)])
 }
 
 /// Low-rank clustered corpus; `noise` is the density dial.
