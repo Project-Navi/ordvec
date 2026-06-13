@@ -24,8 +24,45 @@ use crate::rank::{
     rankquant_bytes_per_vec, rankquant_norm,
 };
 use crate::sign_bitmap::SignBitmap;
-use crate::util::{assert_all_finite, l2_normalise, result_buffer_len, TopK};
+use crate::util::{assert_all_finite, l2_normalise, l2_normalise_into, result_buffer_len, TopK};
 use crate::{validate_candidate_ids, OrdvecError, SearchResults};
+
+/// Reusable scratch for the serial subset-rerank primitives. Grows to the
+/// maximum shape seen, then reuses capacity — so a caller's bounded-pool worker
+/// runs allocation-free after warmup. Opaque: fields are an implementation
+/// detail.
+pub struct SubsetScratch {
+    q_unit: Vec<f32>,
+    sub_packed: Vec<u8>,
+    top: TopK,
+    local_indices: Vec<i64>,
+    final_order: Vec<(f32, i64, i64, usize)>,
+}
+
+impl Default for SubsetScratch {
+    fn default() -> Self {
+        Self {
+            q_unit: Vec::new(),
+            sub_packed: Vec::new(),
+            top: TopK::new(0),
+            local_indices: Vec::new(),
+            final_order: Vec::new(),
+        }
+    }
+}
+
+impl SubsetScratch {
+    /// Empty scratch; buffers grow on first use.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Release all buffers (reclaim memory). NOT needed between `*_into` calls —
+    /// the scratch auto-resets and reuses capacity each call. Escape hatch for a
+    /// long-lived worker to free memory between bursts.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
 
 fn check_eval_bits(bits: u8) {
     assert!((1..=7).contains(&bits), "bits must be in 1..=7");
@@ -639,107 +676,189 @@ impl RankQuant {
             "search_asymmetric_subset: candidate id out of range (n_vectors {})",
             self.n_vectors,
         );
+        let m = candidates.len();
+        let out_k = k.min(m);
+        if out_k == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let mut scratch = SubsetScratch::new();
+        l2_normalise_into(&mut scratch.q_unit, query);
+        let mut scores = vec![f32::NEG_INFINITY; out_k];
+        let mut indices = vec![-1i64; out_k];
+        self.subset_rerank_row_into(candidates, &mut scores, &mut indices, &mut scratch);
+        (scores, indices)
+    }
+
+    /// Validate a CSR candidate batch. Panics on any contract violation
+    /// (mirrors `search_asymmetric_subset`'s assert contract). The caller is the
+    /// serial batched rerank entry point added alongside this helper.
+    #[allow(dead_code)]
+    fn validate_csr_batch(&self, nq: usize, candidate_offsets: &[usize], candidates: &[u32]) {
+        assert_eq!(
+            candidate_offsets.len(),
+            nq + 1,
+            "candidate_offsets length {} must be nq+1 ({})",
+            candidate_offsets.len(),
+            nq + 1
+        );
+        assert_eq!(candidate_offsets[0], 0, "candidate_offsets[0] must be 0");
+        assert_eq!(
+            *candidate_offsets.last().unwrap(),
+            candidates.len(),
+            "candidate_offsets[nq] must equal candidates.len()"
+        );
+        for w in candidate_offsets.windows(2) {
+            assert!(
+                w[1] >= w[0],
+                "candidate_offsets must be monotonic non-decreasing"
+            );
+            let row_len = w[1] - w[0];
+            assert!(
+                row_len <= self.n_vectors,
+                "per-row candidate count {row_len} exceeds n_vectors {}",
+                self.n_vectors
+            );
+        }
+        assert!(
+            candidates.iter().all(|&di| (di as usize) < self.n_vectors),
+            "candidate id out of range (n_vectors {})",
+            self.n_vectors
+        );
+    }
+
+    /// Rerank one candidate row into `out_scores`/`out_indices` (each length
+    /// `out_k`) using caller scratch. `scratch.q_unit` MUST already hold the
+    /// L2-normalised query. No heap allocation after warmup. NO rayon. Mirrors
+    /// the gather + SIMD dispatch + finalize of `search_asymmetric_subset`,
+    /// reading from `scratch.sub_packed` and emitting global ids.
+    fn subset_rerank_row_into(
+        &self,
+        candidates_row: &[u32],
+        out_scores: &mut [f32],
+        out_indices: &mut [i64],
+        scratch: &mut SubsetScratch,
+    ) {
         let dim = self.dim;
         let bits = self.bits;
         let bpv = self.bytes_per_vec();
         let n_buckets = 1usize << bits;
-        let m = candidates.len();
-        let k_eff = k.min(m);
-        if k_eff == 0 {
-            return (Vec::new(), Vec::new());
+        let m = candidates_row.len();
+        let out_k = out_scores.len();
+        debug_assert_eq!(out_indices.len(), out_k);
+        if out_k == 0 || m == 0 {
+            // Caller has already sentinel-precleared the row.
+            return;
         }
-
         let norm = rankquant_norm(dim, bits);
         let inv_norm = 1.0_f32 / norm;
         #[cfg(target_arch = "x86_64")]
-        let centre = ((1u32 << bits) as f32 - 1.0) / 2.0;
-
-        // L2-normalise the query.
-        let q_unit = l2_normalise(query);
-        #[cfg(target_arch = "x86_64")]
         let centre_offset = {
-            let q_sum: f32 = q_unit.iter().sum();
+            let centre = ((1u32 << bits) as f32 - 1.0) / 2.0;
+            let q_sum: f32 = scratch.q_unit.iter().sum();
             -centre * q_sum * inv_norm
         };
 
-        // Pack the candidate docs' bytes into a contiguous buffer so
-        // the SIMD kernels can scan them as if they were a small dense
-        // sub-index. Cost: m * bpv copy (small for typical m).
-        let sub_packed_len = m
+        // Gather candidate docs into the reused scratch buffer.
+        let sub_len = m
             .checked_mul(bpv)
-            .expect("search_asymmetric_subset: candidate scratch length overflows usize");
-        let mut sub_packed = vec![0u8; sub_packed_len];
-        for (i, &di) in candidates.iter().enumerate() {
+            .expect("subset rerank: candidate scratch length overflows usize");
+        scratch.sub_packed.clear();
+        scratch.sub_packed.resize(sub_len, 0u8);
+        for (i, &di) in candidates_row.iter().enumerate() {
             let src = (di as usize) * bpv;
-            sub_packed[i * bpv..(i + 1) * bpv].copy_from_slice(&self.packed[src..src + bpv]);
+            scratch.sub_packed[i * bpv..(i + 1) * bpv]
+                .copy_from_slice(&self.packed[src..src + bpv]);
         }
 
-        // Dispatch: prefer AVX-512 → AVX2 → scalar LUT. Tier selection
-        // is gated on the kernel lane invariant for (dim, bits) via
-        // `select_simd_tier` — the same guard `search_asymmetric` uses —
-        // so a constructor-valid-but-SIMD-invalid dim (48 / 80 / 20)
-        // never reaches a kernel that would drop its tail chunk.
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
-        let mut top = TopK::new_with_tie_keys(k_eff, candidates);
+        scratch.top.reset_with_tie_keys(out_k, candidates_row);
         #[cfg(target_arch = "x86_64")]
         unsafe {
             match (simd_tier, bits) {
                 (SimdTier::Avx512, 2) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b2_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    scratch.top.set_score_offset(centre_offset);
+                    scan_b2_asym_avx512(
+                        &scratch.sub_packed,
+                        m,
+                        dim,
+                        &scratch.q_unit,
+                        inv_norm,
+                        &mut scratch.top,
+                    );
                 }
                 (SimdTier::Avx512, 4) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b4_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    scratch.top.set_score_offset(centre_offset);
+                    scan_b4_asym_avx512(
+                        &scratch.sub_packed,
+                        m,
+                        dim,
+                        &scratch.q_unit,
+                        inv_norm,
+                        &mut scratch.top,
+                    );
                 }
                 (SimdTier::Avx2, 2) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b2_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    scratch.top.set_score_offset(centre_offset);
+                    scan_b2_asym_avx2(
+                        &scratch.sub_packed,
+                        m,
+                        dim,
+                        &scratch.q_unit,
+                        inv_norm,
+                        &mut scratch.top,
+                    );
                 }
                 (SimdTier::Avx2, 4) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b4_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    scratch.top.set_score_offset(centre_offset);
+                    scan_b4_asym_avx2(
+                        &scratch.sub_packed,
+                        m,
+                        dim,
+                        &scratch.q_unit,
+                        inv_norm,
+                        &mut scratch.top,
+                    );
                 }
                 _ => scan_via_lut_scalar(
-                    &sub_packed,
+                    &scratch.sub_packed,
                     m,
                     dim,
                     bits,
                     n_buckets,
-                    &q_unit,
+                    &scratch.q_unit,
                     inv_norm,
-                    &mut top,
+                    &mut scratch.top,
                 ),
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
         scan_via_lut_scalar(
-            &sub_packed,
+            &scratch.sub_packed,
             m,
             dim,
             bits,
             n_buckets,
-            &q_unit,
+            &scratch.q_unit,
             inv_norm,
-            &mut top,
+            &mut scratch.top,
         );
 
-        let mut scores = vec![f32::NEG_INFINITY; k_eff];
-        let mut local_indices = vec![-1i64; k_eff];
-        top.finalize_into(&mut scores, &mut local_indices);
-        // Map local → global doc IDs.
-        let global_indices: Vec<i64> = local_indices
-            .iter()
-            .map(|&loc| {
-                if loc < 0 {
-                    -1
-                } else {
-                    candidates[loc as usize] as i64
-                }
-            })
-            .collect();
-        (scores, global_indices)
+        // Finalize local positions into reused buffer, then map local → global.
+        scratch.local_indices.clear();
+        scratch.local_indices.resize(out_k, -1);
+        scratch.top.finalize_into_with_scratch(
+            &mut scratch.final_order,
+            out_scores,
+            &mut scratch.local_indices,
+        );
+        for (out, &loc) in out_indices.iter_mut().zip(scratch.local_indices.iter()) {
+            *out = if loc < 0 {
+                -1
+            } else {
+                candidates_row[loc as usize] as i64
+            };
+        }
     }
 
     pub fn try_search_with_sign_probe(

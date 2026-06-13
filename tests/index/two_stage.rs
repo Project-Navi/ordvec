@@ -342,3 +342,18 @@ fn serial_csr_rejects_ragged_queries() {
     let ragged = vec![0.0f32; D + 1]; // not a multiple of D
     let _ = sign.top_m_candidates_batched_serial_csr(&ragged, 4);
 }
+
+#[test]
+fn single_query_subset_unchanged_after_refactor() {
+    let (sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(31)[..D].to_vec();
+    let cands = sign.top_m_candidates(&q, 20);
+    let (scores, ids) = rq.search_asymmetric_subset(&q, &cands, 7);
+    assert_eq!(scores.len(), 7);
+    assert_eq!(ids.len(), 7);
+    assert_score_then_id_order(&scores, &ids);
+    // Fewer candidates than k → returns exactly k.min(m) entries (no padding).
+    let (s2, i2) = rq.search_asymmetric_subset(&q, &cands[..3], 7);
+    assert_eq!(s2.len(), 3);
+    assert_eq!(i2.len(), 3);
+}

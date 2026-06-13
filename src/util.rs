@@ -421,9 +421,11 @@ impl TopK {
     /// Construct a top-k collector whose emitted indices are local scan
     /// positions but whose score ties are broken by caller-supplied keys.
     ///
-    /// This is used by subset scans: SIMD kernels still emit local candidate
-    /// positions into the gathered scratch buffer, while ties must follow the
-    /// public global row-id policy.
+    /// Subset scans now reuse a long-lived `TopK` via
+    /// [`Self::reset_with_tie_keys`]; this fresh-allocation constructor is
+    /// retained as the reference path the reuse tests compare against (hence
+    /// `#[allow(dead_code)]` for non-test builds).
+    #[allow(dead_code)]
     pub(crate) fn new_with_tie_keys(k: usize, tie_key_by_index: &[u32]) -> Self {
         let mut top = Self::new(k);
         top.tie_key_by_index = Some(tie_key_by_index.iter().map(|&id| i64::from(id)).collect());
@@ -535,7 +537,6 @@ impl TopK {
     /// Reset to an empty top-k collector of capacity `k` whose score ties are
     /// broken by caller-supplied global keys (subset scans), reusing buffers —
     /// including the inner tie-key Vec's capacity (allocation-free after warmup).
-    #[allow(dead_code)]
     pub(crate) fn reset_with_tie_keys(&mut self, k: usize, tie_key_by_index: &[u32]) {
         self.k = k;
         self.scores.clear();
