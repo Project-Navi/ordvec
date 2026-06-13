@@ -282,6 +282,46 @@ impl SignBitmap {
             .collect()
     }
 
+    /// Serial (NO rayon) CSR candidate generation for a query batch. Returns a
+    /// [`CandidateBatch`]; row `qi` is the top-`m` candidate doc ids for query
+    /// `qi`, ordered `(hamming ascending, doc_id ascending)`, of length
+    /// `m.min(self.len())`.
+    ///
+    /// This is the caller-owned integration primitive: it never enters rayon,
+    /// so a caller (e.g. a database) parallelises across queries with its own
+    /// pool. (The existing [`Self::top_m_candidates_batched`] remains the
+    /// internally-parallel standalone convenience.)
+    ///
+    /// Track-1 implementation is intentionally naive — it loops the single-query
+    /// [`Self::top_m_candidates`] (which materialises a per-query `n` Hamming
+    /// row). A future release may replace the internals with streaming top-m
+    /// behind this frozen signature; the CSR output contract will not change.
+    #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
+    pub fn top_m_candidates_batched_serial_csr(&self, queries: &[f32], m: usize) -> CandidateBatch {
+        let dim = self.dim;
+        assert!(
+            queries.len().is_multiple_of(dim),
+            "queries length {} must be a multiple of dim {dim}",
+            queries.len()
+        );
+        crate::util::assert_all_finite(queries);
+        let nq = queries.len() / dim;
+        let m_eff = m.min(self.n_vectors);
+        let mut offsets = Vec::with_capacity(nq + 1);
+        offsets.push(0usize);
+        let mut candidates = Vec::with_capacity(nq.saturating_mul(m_eff));
+        for qi in 0..nq {
+            let q = &queries[qi * dim..(qi + 1) * dim];
+            let row = self.top_m_candidates(q, m);
+            candidates.extend_from_slice(&row);
+            offsets.push(candidates.len());
+        }
+        CandidateBatch {
+            candidates,
+            offsets,
+        }
+    }
+
     /// Score every indexed document against one query and return dense
     /// sign-agreement counts aligned by document id.
     ///

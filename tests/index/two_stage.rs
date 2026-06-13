@@ -281,3 +281,64 @@ fn sign_rankquant_subset_orders_visible_ties_after_centre_offset() {
     assert!(scores.iter().all(|score| score.is_finite()));
     assert_score_then_id_order(&scores, &ids);
 }
+
+#[test]
+fn serial_csr_matches_looped_single_query_and_invariants() {
+    let corpus = make_corpus(20_001);
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    let nq = 5usize;
+    let queries = make_corpus(99)[..nq * D].to_vec();
+    let m = 12usize;
+
+    let cb = sign.top_m_candidates_batched_serial_csr(&queries, m);
+
+    // CSR invariants.
+    assert_eq!(cb.offsets.len(), nq + 1);
+    assert_eq!(cb.offsets[0], 0);
+    assert_eq!(*cb.offsets.last().unwrap(), cb.candidates.len());
+    assert!(cb.offsets.windows(2).all(|w| w[1] >= w[0]));
+    assert_eq!(cb.query_count(), nq);
+
+    // Row-for-row parity with looped single-query top_m_candidates.
+    for qi in 0..nq {
+        let q = &queries[qi * D..(qi + 1) * D];
+        let expected = sign.top_m_candidates(q, m);
+        assert_eq!(
+            cb.candidates_for_query(qi).unwrap(),
+            &expected[..],
+            "row {qi}"
+        );
+        assert_eq!(expected.len(), m.min(N));
+    }
+}
+
+#[test]
+fn serial_csr_edges() {
+    let corpus = make_corpus(20_002);
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    // nq == 0
+    let cb0 = sign.top_m_candidates_batched_serial_csr(&[], 8);
+    assert_eq!(cb0.query_count(), 0);
+    assert!(cb0.is_empty());
+    assert_eq!(cb0.offsets, vec![0]);
+    // m == 0 → every row empty, but 2 queries → not empty
+    let q2 = make_corpus(7)[..2 * D].to_vec();
+    let cb = sign.top_m_candidates_batched_serial_csr(&q2, 0);
+    assert_eq!(cb.query_count(), 2);
+    assert!(cb.has_no_candidates());
+    assert_eq!(cb.offsets, vec![0, 0, 0]);
+    // m > n clamps to n
+    let cb_big = sign.top_m_candidates_batched_serial_csr(&q2, N + 100);
+    assert_eq!(cb_big.candidates_for_query(0).unwrap().len(), N);
+}
+
+#[test]
+#[should_panic]
+fn serial_csr_rejects_ragged_queries() {
+    let mut sign = SignBitmap::new(D);
+    sign.add(&make_corpus(20_003));
+    let ragged = vec![0.0f32; D + 1]; // not a multiple of D
+    let _ = sign.top_m_candidates_batched_serial_csr(&ragged, 4);
+}
