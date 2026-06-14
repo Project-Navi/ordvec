@@ -42,7 +42,7 @@ construction, mutation, search, metadata, and persistence methods:
   present;
 - `RankQuant::bits`, `RankQuant::search_asymmetric_subset`, and
   `SignBitmap::top_m_candidates`, which are part of the current downstream
-  `ordgrep` integration surface;
+  a consuming search/index integration surface;
 - `write` and `load` for the primitive index files;
 - `SearchResults` fields and per-query accessors;
 - `rank_io::probe_index_metadata`, `IndexKind`, `IndexParams`, and
@@ -139,7 +139,7 @@ versions are not expected to be forward-compatible with newer format versions
 and should safely reject them.
 
 This is a primitive file-format promise. It does not define an application
-database lifecycle, `.ordgrep` store schema, cache invalidation policy,
+database lifecycle, the consuming store schema, cache invalidation policy,
 manifest trust policy, or migration framework for downstream systems.
 Deployment-side provenance guidance lives in
 [`INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md).

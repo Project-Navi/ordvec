@@ -29,16 +29,16 @@ manifest = ordvec_manifest.create_manifest(
     "bge-small-en-v1.5",
     row_id_is_identity=True,
     auxiliary_artifacts=[
-        {"name": "ordinaldb.ids", "path": "ids.bin"},
+        {"name": "app.ids", "path": "ids.bin"},
         {"name": "optional.stats", "path": "stats.json", "required": False},
     ],
 )
 plan = ordvec_manifest.verify_for_load("index.manifest.json")
 ```
 
-For OrdinalDB v0.1, keep `row_id_identity` for the ordvec row count and declare
-`ids.bin` as required auxiliary artifact name `ordinaldb.ids`. Do not encode
-`ids.bin` as JSONL row identity; the v1 JSONL row-map contract is UUID-only.
+A consuming database can keep `row_id_identity` for the ordvec row count and
+declare its ID sidecar file as a required auxiliary artifact (e.g. `app.ids`).
+Do not encode the ID sidecar as JSONL row identity; the v1 JSONL row-map contract is UUID-only.
 
 The verifier checks manifest shape, declared artifact digests and sizes, probed
 ordvec index metadata, row identity, auxiliary artifact state, optional

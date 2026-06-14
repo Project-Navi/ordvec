@@ -20,7 +20,7 @@ library default feature set is empty and does not depend on `clap`.
 ordvec-manifest create \
   --index path/to/index.tvrq \
   --row-id-is-identity \
-  --aux ordinaldb.ids=path/to/ids.bin \
+  --aux app.ids=path/to/ids.bin \
   --embedding-model bge-small-en-v1.5 \
   --out path/to/index.manifest.json
 
@@ -56,7 +56,7 @@ Controlled-storage load pattern:
 
 ```rust
 let plan = ordvec_manifest::verify_for_load(&manifest_path, options)?;
-let _ordinaldb_ids = plan.require_auxiliary("ordinaldb.ids")?;
+let _app_ids = plan.require_auxiliary("app.ids")?;
 let index = ordvec::RankQuant::load(plan.artifact_path())?;
 ```
 
@@ -144,11 +144,11 @@ bytes only; application semantics remain with the caller.
 `auxiliary_by_name(name)` for inspection and `require_auxiliary(name)` for
 callers that must fail if a named sidecar is not declared and verified.
 
-For OrdinalDB v0.1, keep the ordvec row identity as
-`RowIdentity::RowIdIdentity { row_count }` and declare the OrdinalDB `ids.bin`
-file as required auxiliary artifact name `ordinaldb.ids`. That makes the vector
-row count an ordvec invariant while leaving OrdinalDB's `u64` document IDs as a
-caller-owned sidecar. Do not encode `ids.bin` as `RowIdentity::Jsonl`: v1 JSONL
+A consuming database can keep the ordvec row identity as
+`RowIdentity::RowIdIdentity { row_count }` and declare its ID sidecar file as a
+required auxiliary artifact (e.g. `app.ids`). That makes the vector row count an
+ordvec invariant while leaving the caller's `u64` document IDs as caller-owned
+sidecar bytes. Do not encode the ID sidecar as `RowIdentity::Jsonl`: v1 JSONL
 row identity is UUID-oriented (`id_kind = "uuid"`), and generic row-map ID
 formats are intentionally deferred. The reserved `row_identity.db` metadata
 block is rejected in v1 because it is not byte-bound or path-checked.
@@ -172,10 +172,10 @@ paths, declared digest/length, and observed digest/length:
   },
   "auxiliary_artifacts": [
     {
-      "name": "ordgrep.sidecar",
-      "manifest_path": "ordgrep.sidecar.json",
-      "resolved_path": "/srv/index/ordgrep.sidecar.json",
-      "canonical_path": "/srv/index/ordgrep.sidecar.json",
+      "name": "app.sidecar",
+      "manifest_path": "app.sidecar.json",
+      "resolved_path": "/srv/index/app.sidecar.json",
+      "canonical_path": "/srv/index/app.sidecar.json",
       "expected_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
       "expected_size_bytes": 128,
       "required": true,
@@ -231,10 +231,10 @@ read and absent when the file is missing:
   },
   "auxiliary_artifacts": [
     {
-      "name": "ordgrep.sidecar",
-      "manifest_path": "ordgrep.sidecar.json",
-      "resolved_path": "/srv/index/ordgrep.sidecar.json",
-      "canonical_path": "/srv/index/ordgrep.sidecar.json",
+      "name": "app.sidecar",
+      "manifest_path": "app.sidecar.json",
+      "resolved_path": "/srv/index/app.sidecar.json",
+      "canonical_path": "/srv/index/app.sidecar.json",
       "expected_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
       "expected_size_bytes": 128,
       "required": true,
@@ -280,7 +280,7 @@ read and absent when the file is missing:
   "errors": [
     {
       "code": "auxiliary_artifact_sha256_mismatch",
-      "message": "auxiliary artifact \"ordgrep.sidecar\" SHA-256 was 3333333333333333333333333333333333333333333333333333333333333333, manifest declares 2222222222222222222222222222222222222222222222222222222222222222"
+      "message": "auxiliary artifact \"app.sidecar\" SHA-256 was 3333333333333333333333333333333333333333333333333333333333333333, manifest declares 2222222222222222222222222222222222222222222222222222222222222222"
     },
     {
       "code": "auxiliary_artifact_missing_required",
