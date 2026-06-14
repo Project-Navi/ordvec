@@ -27,27 +27,25 @@
 //! the stateless dense-code contingency surface (`Contingency::new`, issue
 //! #219) without any further transform.
 //!
-//! ## Migration from `ordgraph-proto`
+//! ## Adopting this API — reusable, index-free bucket-code surface
 //!
-//! This surface replaces the local `CompositionSpec` / `RankQuantSpec` /
-//! `BucketCode` / `CompositionViolation` fork in `ordgraph-proto/src/code.rs`.
-//! Type names, constructors, accessors, and error values mirror that prototype
-//! (its tests' literal expectations are reproduced here as parity checks), so
-//! the downstream migration is a drop-in:
+//! This surface is designed to be reusable outside of any retrieval index.
+//! If you maintain a local fork of composition-spec or bucket-code logic,
+//! replace it with:
 //!
-//! 1. depend on `ordvec` (with the `experimental` feature while this surface is
-//!    gated) and `use ordvec::{BucketCode, CompositionSpec, RankQuantSpec,
-//!    CompositionViolation};`
-//! 2. delete `ordgraph-proto/src/code.rs` and its `mod code;`, re-pointing
-//!    callers at the `ordvec` types;
-//! 3. the rank math is *not* re-implemented here — [`BucketCode::from_vector`]
-//!    delegates to the crate's shared [`crate::rank`] primitives, so ordgraph
-//!    no longer forks rank/bucket semantics.
+//! ```rust,ignore
+//! use ordvec::{BucketCode, CompositionSpec, RankQuantSpec, CompositionViolation};
+//! ```
 //!
-//! Two intentional differences from the prototype (rationale in the PR):
-//! `bits = 8` is rejected here (it lands as a capability-gated width in the
-//! separate b=8 work, #221), and [`CompositionSpec::new`] rejects
-//! `buckets > 256` (codes are `u8`).
+//! (Enable the `experimental` feature while this surface is gated.)
+//!
+//! The rank math is not re-implemented here — [`BucketCode::from_vector`]
+//! delegates to the crate's shared [`crate::rank`] primitives, so callers
+//! no longer need to fork rank or bucket semantics.
+//!
+//! Two intentional constraints to note: `bits = 8` is rejected (it lands as a
+//! capability-gated width in the separate b=8 work, #221), and
+//! [`CompositionSpec::new`] rejects `buckets > 256` (codes are `u8`).
 
 use std::error::Error;
 use std::fmt;
@@ -502,9 +500,10 @@ impl Error for CompositionViolation {}
 mod tests {
     use super::*;
 
-    // ---- ordgraph bucket-code parity gate -------------------------------
-    // Every assertion value below is reproduced verbatim from the reference
-    // `code.rs` #[cfg(test)] module.
+    // ---- bucket-code behavioral contract --------------------------------
+    // These tests assert the core behavioral invariants of the bucket-code
+    // surface: composition balance, rank permutation semantics, and error
+    // conditions. Every numeric expectation is pinned to catch regressions.
 
     #[test]
     fn from_ranks_builds_uniform_bucket_code() {
