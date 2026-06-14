@@ -94,6 +94,28 @@ pub use multi_bucket::MultiBucketBitmap;
 #[doc(hidden)]
 pub use fastscan::RankQuantFastscan;
 
+/// Whether the AVX-512 VPOPCNTDQ bitmap/sign scan kernels are active on this
+/// CPU. `#[doc(hidden)]` — a diagnostic for tests and downstream probes, not a
+/// stability surface.
+///
+/// The scan dispatch ([`SignBitmap`] and [`Bitmap`]) consults this and
+/// **nothing else** — it takes no dimension. So once VPOPCNTDQ is present,
+/// *every* `dim` (a multiple of 64) runs the kernel, including dims whose
+/// 64-bit word count is not a multiple of 8 (e.g. 384, 768): those are handled
+/// by a masked tail, not by falling back to the scalar path.
+#[doc(hidden)]
+#[must_use]
+pub fn avx512vpop_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 // Pre-0.2 names (the `Index` suffix was dropped in the OrdVec ontology
 // rebrand). Retained as deprecated type aliases for back-compat; remove
 // in a future release. `pub type` (rather than `pub use … as`) causes

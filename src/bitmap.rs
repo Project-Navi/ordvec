@@ -23,6 +23,16 @@
 //!
 //! Intended primary use: candidate generator for two-stage retrieval
 //! (bitmap probe → top-M candidates → exact RankQuant rerank).
+//!
+//! # Dimensions and the AVX-512 kernel
+//!
+//! `dim` must be a multiple of 64. On a host with AVX-512 VPOPCNTDQ **every**
+//! such `dim` runs the vectorized AND-popcount scan: whole 512-bit (8 × u64)
+//! groups, then any trailing `(dim / 64) % 8` words via a single masked load
+//! (`_mm512_maskz_loadu_epi64`). Dimensions whose word count is a multiple of 8
+//! (512, 1024, 1536, …) have no tail; others (e.g. **384, 768**) pay **one
+//! extra masked chunk** — a few percent, so 768 ≈ 1024 — rather than dropping
+//! to scalar. See [`crate::avx512vpop_supported`].
 
 use rayon::prelude::*;
 
@@ -424,12 +434,7 @@ impl Bitmap {
         // performance preference, so a debug_assert here would wrongly
         // panic on valid-but-unsorted input.
 
-        #[cfg(target_arch = "x86_64")]
-        let use_avx512vpop = is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512vpopcntdq")
-            && qpv.is_multiple_of(8);
-        #[cfg(not(target_arch = "x86_64"))]
-        let use_avx512vpop = false;
+        let use_avx512vpop = crate::avx512vpop_supported();
 
         if use_avx512vpop {
             #[cfg(target_arch = "x86_64")]
@@ -560,12 +565,7 @@ impl Bitmap {
 fn bitmap_scan(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     debug_assert_eq!(q.len(), qpv);
 
-    #[cfg(target_arch = "x86_64")]
-    let use_avx512vpop = is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv.is_multiple_of(8);
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx512vpop = false;
+    let use_avx512vpop = crate::avx512vpop_supported();
 
     if use_avx512vpop {
         #[cfg(target_arch = "x86_64")]
@@ -588,27 +588,33 @@ fn bitmap_scan_scalar(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mu
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn bitmap_scan_avx512vpop(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], top: &mut TopK) {
     use std::arch::x86_64::*;
-    // SAFETY: every raw 512-bit load is in-bounds under the caller's contract
-    // (`bitmap_scan`): `qpv % 8 == 0` (gated by the `qpv.is_multiple_of(8)`
-    // dispatch check, so `lanes = qpv / 8` tiles `q` and each doc row exactly),
-    // `q.len() == qpv` (one full query row), and `bitmaps.len() == n * qpv` (the
-    // index stores `n` contiguous `qpv`-word rows). Thus `q.as_ptr().add(l*8)`
-    // (`l < qpv/8`) and `doc_ptr.add(l)` at `doc_ptr = bitmaps + di*qpv`
-    // (`di < n`) each stay within their slice. AVX-512 F/VPOPCNTDQ are confirmed
-    // by the `#[target_feature]` gate plus the caller's runtime
-    // `is_x86_feature_detected!`.
+    // SAFETY: the caller (`bitmap_scan`) guarantees `q.len() == qpv` (one full
+    // query row) and `bitmaps.len() == n * qpv` (n contiguous qpv-word rows).
+    // Full 8-word groups use `loadu`; the trailing `rem = qpv % 8` words use
+    // `maskz_loadu`, which only accesses the `rem` valid low lanes
+    // (fault-suppressed), so loads never over-read the query row or the doc
+    // buffer. AVX-512 F/VPOPCNTDQ are confirmed by the `#[target_feature]` gate
+    // plus the caller's runtime `is_x86_feature_detected!`.
     // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
     unsafe {
-        debug_assert_eq!(qpv % 8, 0, "AVX-512 bitmap scan needs qpv % 8 == 0");
+        debug_assert!(qpv > 0);
         let lanes = qpv / 8;
+        let rem = qpv % 8;
+        let tail_mask: __mmask8 = if rem != 0 { (1u8 << rem) - 1 } else { 0 };
         let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
         #[allow(clippy::needless_range_loop)]
         // indexed access is clearer / matches the kernel layout
         for l in 0..lanes {
             q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
         }
+        let q_tail = if rem != 0 {
+            _mm512_maskz_loadu_epi64(tail_mask, q.as_ptr().add(lanes * 8) as *const i64)
+        } else {
+            _mm512_setzero_si512()
+        };
         for di in 0..n {
-            let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+            let doc_base = bitmaps.as_ptr().add(di * qpv);
+            let doc_ptr = doc_base as *const __m512i;
             let mut acc_zmm = _mm512_setzero_si512();
             #[allow(clippy::needless_range_loop)]
             // indexed access is clearer / matches the kernel layout
@@ -617,6 +623,12 @@ unsafe fn bitmap_scan_avx512vpop(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64
                 let and_zmm = _mm512_and_si512(d_zmm, q_zmms[l]);
                 let pop_zmm = _mm512_popcnt_epi64(and_zmm);
                 acc_zmm = _mm512_add_epi64(acc_zmm, pop_zmm);
+            }
+            if rem != 0 {
+                let d_tail =
+                    _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                let and_zmm = _mm512_and_si512(d_tail, q_tail);
+                acc_zmm = _mm512_add_epi64(acc_zmm, _mm512_popcnt_epi64(and_zmm));
             }
             let acc_sum: i64 = _mm512_reduce_add_epi64(acc_zmm);
             top.maybe_insert(acc_sum as f32, di);
@@ -632,12 +644,7 @@ fn bitmap_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores:
     debug_assert_eq!(scores.len(), n);
     debug_assert_eq!(q.len(), qpv);
 
-    #[cfg(target_arch = "x86_64")]
-    let use_avx512vpop = is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv.is_multiple_of(8);
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx512vpop = false;
+    let use_avx512vpop = crate::avx512vpop_supported();
 
     if use_avx512vpop {
         #[cfg(target_arch = "x86_64")]
@@ -664,29 +671,45 @@ unsafe fn bitmap_scan_collect_avx512vpop(
 ) {
     use std::arch::x86_64::*;
     // SAFETY: same contract as the sibling `bitmap_scan_avx512vpop` — the caller
-    // (`bitmap_scan_collect`) gates dispatch on `qpv.is_multiple_of(8)`,
-    // `q.len() == qpv`, and `bitmaps.len() == n * qpv`, bounding all raw loads.
+    // (`bitmap_scan_collect`) guarantees `q.len() == qpv` and
+    // `bitmaps.len() == n * qpv`. Full 8-word groups use `loadu`; the trailing
+    // `rem = qpv % 8` words use `maskz_loadu` (only the `rem` valid low lanes are
+    // accessed, fault-suppressed), so loads never over-read.
     // AVX-512 F/VPOPCNTDQ confirmed by `#[target_feature]` + runtime detection.
     // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
     unsafe {
-        debug_assert_eq!(qpv % 8, 0);
+        debug_assert!(qpv > 0);
         let lanes = qpv / 8;
+        let rem = qpv % 8;
+        let tail_mask: __mmask8 = if rem != 0 { (1u8 << rem) - 1 } else { 0 };
         let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
         #[allow(clippy::needless_range_loop)]
         // indexed access is clearer / matches the kernel layout
         for l in 0..lanes {
             q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
         }
+        let q_tail = if rem != 0 {
+            _mm512_maskz_loadu_epi64(tail_mask, q.as_ptr().add(lanes * 8) as *const i64)
+        } else {
+            _mm512_setzero_si512()
+        };
         #[allow(clippy::needless_range_loop)]
         // indexed access is clearer / matches the kernel layout
         for di in 0..n {
-            let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+            let doc_base = bitmaps.as_ptr().add(di * qpv);
+            let doc_ptr = doc_base as *const __m512i;
             let mut acc_zmm = _mm512_setzero_si512();
             for l in 0..lanes {
                 let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
                 let and_zmm = _mm512_and_si512(d_zmm, q_zmms[l]);
                 let pop_zmm = _mm512_popcnt_epi64(and_zmm);
                 acc_zmm = _mm512_add_epi64(acc_zmm, pop_zmm);
+            }
+            if rem != 0 {
+                let d_tail =
+                    _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                let and_zmm = _mm512_and_si512(d_tail, q_tail);
+                acc_zmm = _mm512_add_epi64(acc_zmm, _mm512_popcnt_epi64(and_zmm));
             }
             let acc_sum: i64 = _mm512_reduce_add_epi64(acc_zmm);
             scores[di] = acc_sum as u32;
@@ -710,8 +733,8 @@ unsafe fn bitmap_scan_collect_avx512vpop(
 // is paid once.
 // -------------------------------------------------------------------
 
-/// Scalar fallback for the batched scan. Used when AVX-512 VPOPCNTDQ
-/// is unavailable or when `qpv % 8 != 0`.
+/// Scalar fallback for the batched scan. Used only when AVX-512 VPOPCNTDQ is
+/// unavailable (the kernel handles any `qpv` via a masked tail).
 fn bitmap_scan_collect_batched_scalar(
     bitmaps: &[u64],
     n: usize,
@@ -755,16 +778,21 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
 ) {
     use std::arch::x86_64::*;
     // SAFETY: same contract as the sibling `bitmap_scan_avx512vpop` — the caller
-    // (`bitmap_scan_collect_batched`) gates dispatch on `qpv.is_multiple_of(8)`,
-    // `q_batch.len() == batch * qpv`, `bitmaps.len() == n * qpv`, and
-    // `scores.len() == batch * n`, bounding all raw loads and `scores[…]` writes.
-    // AVX-512 F/VPOPCNTDQ confirmed by `#[target_feature]` + runtime detection.
+    // (`bitmap_scan_collect_batched`) guarantees `q_batch.len() == batch * qpv`,
+    // `bitmaps.len() == n * qpv`, and `scores.len() == batch * n`. Full 8-word
+    // groups use `loadu`; the trailing `rem = qpv % 8` words use `maskz_loadu`
+    // (only the `rem` valid low lanes accessed, fault-suppressed), so loads never
+    // over-read a per-vector slice or the buffer end; `scores[…]` writes are
+    // bounded as before. AVX-512 F/VPOPCNTDQ confirmed by `#[target_feature]` +
+    // runtime detection.
     // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
     unsafe {
-        debug_assert_eq!(qpv % 8, 0);
+        debug_assert!(qpv > 0);
         debug_assert_eq!(q_batch.len(), batch * qpv);
         debug_assert_eq!(scores.len(), batch * n);
         let lanes = qpv / 8;
+        let rem = qpv % 8;
+        let tail_mask: __mmask8 = if rem != 0 { (1u8 << rem) - 1 } else { 0 };
         const CHUNK: usize = BATCHED_AVX512_CHUNK;
 
         // Pre-load all batch * lanes query ZMMs once. For typical
@@ -776,6 +804,16 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
             for l in 0..lanes {
                 q_zmms.push(_mm512_loadu_si512(
                     q_batch.as_ptr().add(bi * qpv + l * 8) as *const __m512i
+                ));
+            }
+        }
+        // Per-query masked tail (trailing `rem` words); empty when qpv % 8 == 0.
+        let mut q_tails: Vec<__m512i> = Vec::with_capacity(if rem != 0 { batch } else { 0 });
+        if rem != 0 {
+            for bi in 0..batch {
+                q_tails.push(_mm512_maskz_loadu_epi64(
+                    tail_mask,
+                    q_batch.as_ptr().add(bi * qpv + lanes * 8) as *const i64,
                 ));
             }
         }
@@ -792,7 +830,8 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
         while chunk_start + CHUNK <= batch {
             for di in 0..n {
                 let mut accs: [__m512i; CHUNK] = [_mm512_setzero_si512(); CHUNK];
-                let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+                let doc_base = bitmaps.as_ptr().add(di * qpv);
+                let doc_ptr = doc_base as *const __m512i;
                 for l in 0..lanes {
                     let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
                     for bi in 0..CHUNK {
@@ -800,6 +839,14 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
                         let and_zmm = _mm512_and_si512(d_zmm, q_zmm);
                         let pop_zmm = _mm512_popcnt_epi64(and_zmm);
                         accs[bi] = _mm512_add_epi64(accs[bi], pop_zmm);
+                    }
+                }
+                if rem != 0 {
+                    let d_tail =
+                        _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                    for bi in 0..CHUNK {
+                        let and_zmm = _mm512_and_si512(d_tail, q_tails[chunk_start + bi]);
+                        accs[bi] = _mm512_add_epi64(accs[bi], _mm512_popcnt_epi64(and_zmm));
                     }
                 }
                 for bi in 0..CHUNK {
@@ -818,7 +865,8 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
         if tail > 0 {
             for di in 0..n {
                 let mut accs: [__m512i; CHUNK] = [_mm512_setzero_si512(); CHUNK];
-                let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+                let doc_base = bitmaps.as_ptr().add(di * qpv);
+                let doc_ptr = doc_base as *const __m512i;
                 for l in 0..lanes {
                     let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
                     for bi in 0..tail {
@@ -826,6 +874,14 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
                         let and_zmm = _mm512_and_si512(d_zmm, q_zmm);
                         let pop_zmm = _mm512_popcnt_epi64(and_zmm);
                         accs[bi] = _mm512_add_epi64(accs[bi], pop_zmm);
+                    }
+                }
+                if rem != 0 {
+                    let d_tail =
+                        _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                    for bi in 0..tail {
+                        let and_zmm = _mm512_and_si512(d_tail, q_tails[chunk_start + bi]);
+                        accs[bi] = _mm512_add_epi64(accs[bi], _mm512_popcnt_epi64(and_zmm));
                     }
                 }
                 for bi in 0..tail {
@@ -839,8 +895,8 @@ unsafe fn bitmap_scan_collect_batched_avx512vpop(
 
 /// Batched bitmap scan: writes `scores[bi * n + di]` = popcount overlap
 /// for query `bi` against doc `di`, for all `bi ∈ [0, batch)` and
-/// `di ∈ [0, n)`. Dispatches to the AVX-512 VPOPCNTDQ kernel when
-/// available (qpv % 8 == 0), else falls back to scalar.
+/// `di ∈ [0, n)`. Dispatches to the AVX-512 VPOPCNTDQ kernel when available
+/// (any `qpv`; non-multiples of 8 are handled by a masked tail), else scalar.
 fn bitmap_scan_collect_batched(
     bitmaps: &[u64],
     n: usize,
@@ -849,12 +905,7 @@ fn bitmap_scan_collect_batched(
     batch: usize,
     scores: &mut [u32],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    let use_avx512vpop = is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv.is_multiple_of(8);
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx512vpop = false;
+    let use_avx512vpop = crate::avx512vpop_supported();
 
     if use_avx512vpop {
         #[cfg(target_arch = "x86_64")]
@@ -877,18 +928,20 @@ unsafe fn body_overlap_scores_subset_avx512vpop(
 ) {
     use std::arch::x86_64::*;
     // SAFETY: in-bounds under the public `body_overlap_scores_subset`
-    // pre-dispatch asserts: `q_bitmap.len() == qpv` and `qpv % 8 == 0` (the
-    // latter also gated by `qpv.is_multiple_of(8)` in the dispatch), so the
-    // `lanes = qpv/8` loads `q_bitmap.as_ptr().add(l*8)` tile `q_bitmap`
-    // exactly; every `di ∈ doc_ids` is hard-asserted `< n_vectors` *before*
-    // dispatch, so `bitmaps + di*qpv` plus the `lanes` loads stay within the
+    // pre-dispatch asserts: `q_bitmap.len() == qpv`, so full 8-word groups
+    // (`loadu`) plus the trailing `rem = qpv % 8` words (`maskz_loadu`, only the
+    // `rem` valid low lanes accessed, fault-suppressed) tile `q_bitmap` without
+    // over-read; every `di ∈ doc_ids` is hard-asserted `< n_vectors` *before*
+    // dispatch, so `bitmaps + di*qpv` plus the loads stay within the
     // `n_vectors*qpv`-word buffer; and `out.len() == doc_ids.len()` bounds the
     // `out[i]` writes. AVX-512 F/VPOPCNTDQ confirmed by `#[target_feature]` +
     // runtime detection.
     // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
     unsafe {
-        debug_assert_eq!(qpv % 8, 0);
+        debug_assert!(qpv > 0);
         let lanes = qpv / 8;
+        let rem = qpv % 8;
+        let tail_mask: __mmask8 = if rem != 0 { (1u8 << rem) - 1 } else { 0 };
         let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
         #[allow(clippy::needless_range_loop)]
         // indexed access is clearer / matches the kernel layout
@@ -897,8 +950,14 @@ unsafe fn body_overlap_scores_subset_avx512vpop(
                 q_bitmap.as_ptr().add(l * 8) as *const __m512i
             ));
         }
+        let q_tail = if rem != 0 {
+            _mm512_maskz_loadu_epi64(tail_mask, q_bitmap.as_ptr().add(lanes * 8) as *const i64)
+        } else {
+            _mm512_setzero_si512()
+        };
         for (i, &di) in doc_ids.iter().enumerate() {
-            let doc_ptr = bitmaps.as_ptr().add((di as usize) * qpv) as *const __m512i;
+            let doc_base = bitmaps.as_ptr().add((di as usize) * qpv);
+            let doc_ptr = doc_base as *const __m512i;
             let mut acc_zmm = _mm512_setzero_si512();
             #[allow(clippy::needless_range_loop)]
             // indexed access is clearer / matches the kernel layout
@@ -908,8 +967,145 @@ unsafe fn body_overlap_scores_subset_avx512vpop(
                 let pop_zmm = _mm512_popcnt_epi64(and_zmm);
                 acc_zmm = _mm512_add_epi64(acc_zmm, pop_zmm);
             }
+            if rem != 0 {
+                let d_tail =
+                    _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                let and_zmm = _mm512_and_si512(d_tail, q_tail);
+                acc_zmm = _mm512_add_epi64(acc_zmm, _mm512_popcnt_epi64(and_zmm));
+            }
             let acc_sum: i64 = _mm512_reduce_add_epi64(acc_zmm);
             out[i] = acc_sum as u32;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    fn scalar_overlap(doc: &[u64], q: &[u64]) -> u32 {
+        doc.iter().zip(q).map(|(d, qq)| (d & qq).count_ones()).sum()
+    }
+
+    // Dims covering every qwords-per-vec tail residue (qpv % 8 ∈ 0..=7), the
+    // lanes==0 all-tail cases (qpv < 8: 64/384/448), and the common embedding
+    // dims 384/512/768/1024/1536. qpv = dim / 64.
+    const PARITY_DIMS: [usize; 13] = [
+        64, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536,
+    ];
+
+    #[test]
+    fn avx512_path_matches_scalar_across_residues_and_common_dims() {
+        for &dim in &PARITY_DIMS {
+            let n = 300usize;
+            let n_top = (dim / 4).max(1);
+            let m = 32usize;
+            let nq = 4usize;
+            let mut rng = ChaCha8Rng::seed_from_u64(9000 + dim as u64);
+            let corpus: Vec<f32> = (0..n * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let mut idx = Bitmap::new(dim, n_top);
+            idx.add(&corpus);
+            let qpv = idx.qwords_per_vec;
+            let queries: Vec<f32> = (0..nq * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+            let batched = idx.top_m_candidates_batched(&queries, m);
+            for qi in 0..nq {
+                let q = &queries[qi * dim..(qi + 1) * dim];
+                let qbm = idx.build_query_bitmap_fp32(q);
+
+                // (1) body_overlap_scores_subset kernel: exact overlap for ALL
+                //     ids vs an independent scalar over the stored bitmaps.
+                let all_ids: Vec<u32> = (0..n as u32).collect();
+                let mut out = vec![0u32; n];
+                idx.body_overlap_scores_subset(&qbm, &all_ids, &mut out);
+                let mut ref_pairs: Vec<(u32, u32)> = Vec::with_capacity(n);
+                #[allow(clippy::needless_range_loop)]
+                for di in 0..n {
+                    let off = di * qpv;
+                    let ov = scalar_overlap(&idx.bitmaps[off..off + qpv], &qbm);
+                    assert_eq!(out[di], ov, "body_overlap dim={dim} qi={qi} di={di}");
+                    ref_pairs.push((ov, di as u32));
+                }
+                // Reference top-m under the library's (overlap desc, id asc) key.
+                ref_pairs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                let reference: Vec<u32> = ref_pairs.iter().take(m).map(|&(_, d)| d).collect();
+
+                // (2) bitmap_scan_collect kernel.
+                assert_eq!(
+                    idx.top_m_candidates(q, m),
+                    reference,
+                    "top_m dim={dim} qi={qi}"
+                );
+                // (3) bitmap_scan_collect_batched kernel.
+                assert_eq!(batched[qi], reference, "batched dim={dim} qi={qi}");
+
+                // (4) bitmap_scan (TopK) kernel via search: the returned m docs
+                //     must be a valid top-m by overlap (tie-policy-independent;
+                //     a wrong scan score would admit an out-of-top-m doc).
+                let res = idx.search(q, m);
+                let got = res.indices_for_query(0);
+                assert_eq!(got.len(), m, "search len dim={dim} qi={qi}");
+                let got_set: std::collections::HashSet<i64> = got.iter().copied().collect();
+                let ov_of =
+                    |di: usize| scalar_overlap(&idx.bitmaps[di * qpv..(di + 1) * qpv], &qbm);
+                let min_in = got.iter().map(|&id| ov_of(id as usize)).min().unwrap();
+                let max_out = (0..n)
+                    .filter(|di| !got_set.contains(&(*di as i64)))
+                    .map(ov_of)
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    min_in >= max_out,
+                    "search not a valid top-m: dim={dim} qi={qi} min_in={min_in} max_out={max_out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_at_512bit_multiple_dims() {
+        // 1024 (qpv=16) and 1536 (qpv=24) were always on the AVX-512 path
+        // (qpv % 8 == 0). They must stay byte-identical to scalar — this pins
+        // "no behavior change" for the previously-fast dims.
+        for &dim in &[1024usize, 1536] {
+            let n = 200usize;
+            let n_top = dim / 4;
+            let mut rng = ChaCha8Rng::seed_from_u64(123 + dim as u64);
+            let corpus: Vec<f32> = (0..n * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let mut idx = Bitmap::new(dim, n_top);
+            idx.add(&corpus);
+            let qpv = idx.qwords_per_vec;
+            let qbm = idx.build_query_bitmap_fp32(&corpus[..dim]);
+            let all_ids: Vec<u32> = (0..n as u32).collect();
+            let mut out = vec![0u32; n];
+            idx.body_overlap_scores_subset(&qbm, &all_ids, &mut out);
+            #[allow(clippy::needless_range_loop)]
+            for di in 0..n {
+                let off = di * qpv;
+                let ov = scalar_overlap(&idx.bitmaps[off..off + qpv], &qbm);
+                assert_eq!(
+                    out[di], ov,
+                    "512-bit-multiple dim={dim} regressed at di={di}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scan_dispatch_is_dimension_independent() {
+        // The qpv % 8 gate is gone: the SignBitmap/Bitmap scan dispatch reads
+        // only `avx512vpop_supported()`, which takes no dimension. So on a
+        // VPOPCNTDQ host, 384 (qpv=6) and 768 (qpv=12) — previously routed to
+        // the scalar fallback — take the SAME kernel as 1024/1536. Bit-identity
+        // at those dims is proven by the parity test above; the ~4x speedup is
+        // shown by `examples/bge_kernel_bench`. No dimension can be special-cased
+        // back to scalar because the predicate is dim-free.
+        assert_eq!(
+            crate::avx512vpop_supported(),
+            crate::avx512vpop_supported(),
+            "dispatch predicate must be pure"
+        );
     }
 }

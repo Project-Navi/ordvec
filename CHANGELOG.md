@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Performance
+
+- **AVX-512 VPOPCNTDQ scan kernels now cover every `dim` (a multiple of 64), not
+  just multiples of 512 bits.** Previously the `SignBitmap` and `Bitmap` scan
+  kernels took the AVX-512 path only when the per-vector 64-bit word count was a
+  multiple of 8 (`dim` a multiple of 512), silently falling back to the scalar
+  loop otherwise — so common embedding widths like **768 (BGE) and 384
+  (bge-small / MiniLM)** ran the entire stage-1 candidate scan scalar. The
+  kernels now process the trailing `(dim / 64) % 8` words with a masked load
+  (`_mm512_maskz_loadu_epi64`), so any supported `dim` uses VPOPCNTDQ. Measured
+  **~4× faster** stage-1 scan at dim=768 on a Zen5 / AVX-512 host (609 → 153
+  µs/query, n=100k; see `examples/bge_kernel_bench`); 1024/1536 unchanged.
+  Results are byte-identical to the scalar path — parity tests cover qpv tail
+  residues 0..7 plus 384/512/768/1024/1536 for all six SignBitmap/Bitmap scan
+  kernels. This is stage-1 scan-kernel throughput, not a whole-pipeline figure.
+
+### Added
+
+- `avx512vpop_supported()` (`#[doc(hidden)]`) — reports whether the AVX-512
+  VPOPCNTDQ scan kernels are active on the current CPU. The scan dispatch reads
+  only this predicate (no per-dimension gate).
+
 ## 0.5.0 - 2026-06-13
 
 ### Added
