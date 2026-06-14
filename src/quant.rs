@@ -903,6 +903,36 @@ impl RankQuant {
     /// `nq + 1` long, not starting at `0`, non-monotonic, or not ending at
     /// `candidates.len()`), a row longer than `self.len()`, a candidate id
     /// `>= self.len()`, a non-finite query value, or a wrong output-buffer length.
+    ///
+    /// Buffer sizing differs from the single-query [`Self::search_asymmetric_subset`]
+    /// (which returns a short `Vec` of `min(k, row_len)`): here the output is a
+    /// rectangular `nq * out_k` grid, sentinel-padded — size both buffers to
+    /// `nq * k.min(self.len())`. A too-short buffer trips the fail-loud length
+    /// assert rather than under-writing; this is a common porting pitfall.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use ordvec::{RankQuant, SignBitmap, SubsetScratch};
+    /// # let (dim, k, m) = (1024usize, 10usize, 256usize);
+    /// let sign = SignBitmap::new(dim);
+    /// let rq = RankQuant::new(dim, 2);
+    /// # let queries = vec![0.0f32; dim * 64];
+    /// let nq = queries.len() / dim;
+    /// let out_k = k.min(rq.len());
+    /// // Allocate scratch + output buffers ONCE; reuse across batches.
+    /// let mut scratch = SubsetScratch::new();
+    /// let mut out_scores = vec![f32::NEG_INFINITY; nq * out_k];
+    /// let mut out_indices = vec![-1i64; nq * out_k];
+    /// let cb = sign.top_m_candidates_batched_serial_csr(&queries, m);
+    /// rq.search_asymmetric_subset_batched_serial_into(
+    ///     &queries, &cb.offsets, &cb.candidates, k,
+    ///     &mut scratch, &mut out_scores, &mut out_indices,
+    /// );
+    /// // Query qi's top-k is out_indices[qi*out_k..(qi+1)*out_k] (sentinel-padded).
+    /// // Reuse scratch + buffers for the next batch — no further allocation once
+    /// // scratch has warmed to this shape (NO internal rayon: drive this from
+    /// // your own pool, one query-range per worker).
+    /// ```
     #[allow(clippy::too_many_arguments)] // arity is intrinsic to the caller-owned buffered contract (CSR inputs + scratch + two output buffers)
     pub fn search_asymmetric_subset_batched_serial_into(
         &self,

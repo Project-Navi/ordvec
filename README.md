@@ -135,6 +135,40 @@ For the two-stage compressed-scan path (`Bitmap` / `SignBitmap` candidate
 generation → `RankQuant` rerank) and the full mode comparison, see
 [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
+### Caller-owned serial two-stage (DB / runtime integration)
+
+For runtimes that own their own parallelism — an embedded vector DB driving a
+bounded thread pool, or a binding releasing the GIL — ordvec exposes a
+**no-rayon, allocation-free** serial two-stage path so the *caller* schedules
+the work:
+
+```rust
+use ordvec::{RankQuant, SignBitmap, SubsetScratch};
+// Stage 1 — serial CSR candidate generation (never enters rayon):
+let cb = sign.top_m_candidates_batched_serial_csr(&queries, m); // CandidateBatch { offsets, candidates }
+// Stage 2 — rerank into CALLER-OWNED buffers with a reusable scratch:
+let nq = queries.len() / dim;
+let out_k = k.min(rq.len());
+let mut scratch = SubsetScratch::new();               // reuse across batches
+let mut out_scores = vec![f32::NEG_INFINITY; nq * out_k];
+let mut out_indices = vec![-1i64; nq * out_k];
+rq.search_asymmetric_subset_batched_serial_into(
+    &queries, &cb.offsets, &cb.candidates, k,
+    &mut scratch, &mut out_scores, &mut out_indices,
+);
+```
+
+Contract: candidates are **CSR** (`offsets.len() == nq + 1`; row `qi` is
+`candidates[offsets[qi]..offsets[qi+1]]`; rows need **not** be sorted). Output is
+**rectangular** `nq * out_k` and **sentinel-padded** (`-1` / `NEG_INFINITY`) for
+underfull rows — size both buffers to `nq * k.min(index.len())`. Scores, row ids,
+and the deterministic tie policy (`score desc, global row-id asc`) match the
+single-query `search_asymmetric_subset`. The `_into` form performs **no heap
+allocation** once `scratch` has warmed to the batch shape. Neither primitive
+enters rayon — partition the query batch and call `_into` once per worker range
+from your own pool. A focused decomposition benchmark lives in
+[`examples/two_stage_bench.rs`](examples/two_stage_bench.rs).
+
 ### Python
 
 The same `Rank` / `RankQuant` / `Bitmap` / `SignBitmap` API is available from

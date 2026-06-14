@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- **Release-hardened the caller-owned serial two-stage primitives** (no API
+  change; added in 0.5.0). The trust model is now explicit and tested:
+  - Rejection-path regression tests for the full CSR/query/buffer validation set
+    on the rerank entry points — overlong row (the guard that bounds the unsafe
+    gather), non-monotonic / wrong-final / non-zero-first offsets, non-finite and
+    ragged queries, and wrong output-buffer length — so a malformed-but-accepted
+    input can never reach the SIMD scan.
+  - A counting-allocator test proving `search_asymmetric_subset_batched_serial_into`
+    performs **zero heap allocations** in steady state (warmed `SubsetScratch`,
+    reused caller buffers) — the strong form of the prior capacity-stability proxy.
+  - A focused `two_stage_bench` example decomposing stage-1 candidate-gen /
+    single-query rerank loop / batched `_into` / full two-stage at the
+    Harrier-1024 shape, with a committed reference capture
+    (`benchmarks/two_stage_caller_owned_dim1024.txt`, SYNTHETIC corpus).
+  - User-facing docs for the caller-owned / no-rayon / allocation-free contract
+    (README + rustdoc examples on the `_into` hot path and the CSR candidate-gen).
+
 ## 0.5.0 - 2026-06-13
 
 ### Added
