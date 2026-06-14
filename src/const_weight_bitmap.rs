@@ -29,10 +29,23 @@
 //!   [`BitmapNull::space_size`] give an exact upper-tail probability for an
 //!   overlap cutoff.
 //!
-//! Ported to reach behavioural parity with the `ordgraph` bitmap prototype
-//! (`ordgraph-proto/src/bitmap.rs`); the popcount reduction is *not*
-//! re-implemented — it delegates to the crate's shared `crate::util`
-//! primitive.
+//! ## Adopting this API — reusable, index-free bitmap surface
+//!
+//! This surface is designed to be reusable outside of any retrieval or graph
+//! index. If you maintain a local fork of constant-weight bitmap or null logic,
+//! replace it with:
+//!
+//! ```rust,ignore
+//! use ordvec::const_weight_bitmap::{
+//!     BitmapNull, ConstantWeightBitmap, PackedConstantWeightBitmap,
+//!     choose, top_group_overlap_vector,
+//! };
+//! ```
+//!
+//! (Enable the `experimental` feature while this surface is gated.)
+//!
+//! The popcount reduction is not re-implemented here — it delegates to the
+//! crate's shared `crate::util::and_popcount` primitive.
 //!
 //! # Overflow
 //! [`choose`] (and therefore [`BitmapNull::space_size`] / `fiber_count` /
@@ -435,12 +448,13 @@ mod tests {
             .sum()
     }
 
-    // ---- ordgraph bitmap parity gate ------------------------------------
-    // Assertion values reproduced verbatim from the reference
-    // `ordgraph-proto/src/bitmap.rs` #[cfg(test)] module. The prototype
-    // cross-checked the overlap against `Contingency::top_overlap`; here the
-    // same literal (1, and [1, 3, 8]) is asserted directly and cross-checked
-    // against the naive shared-set-bit count instead.
+    // ---- bitmap behavioral contract — pinned literals -------------------
+    // The following assertion values pin the core bitmap overlap contract: a
+    // top-bucket membership bitmap over a 4-bucket code correctly counts the
+    // shared set bits, and the overlap vector `[1, 3, 8]` across widths
+    // `[1, 2, 4]` reproduces the expected cumulative shared-coordinate counts.
+    // Cross-checked against the naive shared-set-bit count (`naive_packed_overlap`)
+    // to keep both the bool-bitmap and packed-popcount paths honest.
 
     #[test]
     fn top_bitmap_has_expected_constant_weight() {
