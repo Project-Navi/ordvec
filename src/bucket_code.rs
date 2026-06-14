@@ -556,6 +556,22 @@ mod tests {
         );
     }
 
+    // Pin the b=8 decision: the reference prototype accepted bits=8 but ordvec
+    // rejects it. These tests ensure that boundary cannot change silently.
+    #[test]
+    fn rankquant_spec_rejects_bits_8() {
+        assert_eq!(
+            RankQuantSpec::new(8, 8).unwrap_err(),
+            CompositionViolation::InvalidBits { bits: 8 }
+        );
+        // `from_vector` takes the same path: bits=8 is rejected at the spec level.
+        let v: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        assert_eq!(
+            BucketCode::from_vector(8, 8, &v).unwrap_err(),
+            CompositionViolation::InvalidBits { bits: 8 }
+        );
+    }
+
     #[test]
     fn composition_spec_rejects_more_than_256_buckets() {
         // Codes are u8: a bucket id must fit 0..=255.
