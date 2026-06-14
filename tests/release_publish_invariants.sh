@@ -19,4 +19,9 @@ done
 
 python3 tests/release_publish_invariants.py
 
+# Unit-test the canonical-dist helper (filename/count/hash gating AND the
+# wheel/sdist license-member inspection) so the runtime release guard is
+# exercised on every PR, not only during an actual release run.
+python3 -m unittest tests.release_pypi_canonical_dist_tests
+
 echo "OK: release-publish SBOM invariants hold."

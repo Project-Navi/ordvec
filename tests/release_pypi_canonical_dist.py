@@ -13,17 +13,29 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_PROJECT = "ordvec"
 DIST_SUFFIXES = (".whl", ".tar.gz")
+
+# A wheel carries its license text under `<dist>.dist-info/licenses/<name>`
+# (the PEP 639 location maturin writes to); an sdist carries it at the archive
+# root `<root>/<name>`. We deliberately ignore deeper copies (e.g. a vendored
+# workspace member's own LICENSE inside the sdist) — the regression this guards
+# is the license missing from the canonical location the packaging metadata
+# points at, not the absence of every copy.
+_WHEEL_LICENSE_MEMBER = re.compile(r"[^/]+\.dist-info/licenses/([^/]+)")
+_SDIST_ROOT_MEMBER = re.compile(r"[^/]+/([^/]+)")
 
 
 class PyPIReadError(RuntimeError):
@@ -63,6 +75,56 @@ def dist_files(directory: Path) -> dict[str, Path]:
     if not files:
         fail(f"no wheel/sdist files found in {directory}")
     return files
+
+
+def canonical_license_basenames(path: Path) -> set[str]:
+    """Basenames present at the canonical license location of a built dist
+    archive — where a license file MUST appear to be detected by tooling:
+    `*.dist-info/licenses/` for a wheel (license-only by construction), and the
+    archive root `<root>/` for an sdist (which also holds PKG-INFO, pyproject,
+    etc.). Callers intersect this with the required license names, so the extra
+    sdist-root entries are harmless. Deeper copies (a vendored member's own
+    LICENSE) are intentionally excluded. Unknown suffixes return an empty set."""
+    name = path.name
+    if name.endswith(".whl"):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = archive.namelist()
+        except (zipfile.BadZipFile, OSError) as exc:
+            fail(f"could not read wheel {name}: {exc!r}")
+        pattern = _WHEEL_LICENSE_MEMBER
+    elif name.endswith(".tar.gz"):
+        try:
+            with tarfile.open(path, "r:gz") as archive:
+                members = archive.getnames()
+        except (tarfile.TarError, OSError) as exc:
+            fail(f"could not read sdist {name}: {exc!r}")
+        pattern = _SDIST_ROOT_MEMBER
+    else:
+        return set()
+    found: set[str] = set()
+    for member in members:
+        match = pattern.fullmatch(member.replace("\\", "/"))
+        if match:
+            found.add(match.group(1))
+    return found
+
+
+def check_license_members(files: dict[str, Path], required: tuple[str, ...]) -> None:
+    """Fail unless every required license file is present in the canonical
+    license location of every wheel and sdist. Closes the regression class where
+    a crate declares `license = "MIT OR Apache-2.0"` but ships no license text."""
+    if not required:
+        return
+    required_set = set(required)
+    for filename, path in sorted(files.items()):
+        present = canonical_license_basenames(path) & required_set
+        missing = sorted(required_set - present)
+        if missing:
+            fail(
+                f"{filename} is missing required license file(s) in its canonical "
+                f"license location: {', '.join(missing)}"
+            )
 
 
 def validate_expected_dist(
@@ -162,6 +224,7 @@ def canonicalize(
     expected_wheels: int | None = None,
     expected_sdists: int | None = None,
     required_wheel_tags: tuple[str, ...] = (),
+    required_license_files: tuple[str, ...] = (),
 ) -> None:
     built = dist_files(built_dir)
     validate_expected_dist(
@@ -170,6 +233,7 @@ def canonicalize(
         expected_sdists=expected_sdists,
         required_wheel_tags=required_wheel_tags,
     )
+    check_license_members(built, required_license_files)
     prepare_empty_dir(out_dir)
     try:
         payload = fetch_pypi_payload(project, version)
@@ -251,6 +315,7 @@ def verify(
     expected_wheels: int | None = None,
     expected_sdists: int | None = None,
     required_wheel_tags: tuple[str, ...] = (),
+    required_license_files: tuple[str, ...] = (),
 ) -> None:
     local = local_hashes(
         dist_dir,
@@ -258,6 +323,7 @@ def verify(
         expected_sdists=expected_sdists,
         required_wheel_tags=required_wheel_tags,
     )
+    check_license_members(dist_files(dist_dir), required_license_files)
     url = f"https://pypi.org/pypi/{project}/{version}/json"
     last_error = "not checked"
     for attempt in range(1, attempts + 1):
@@ -292,6 +358,13 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Require at least one wheel filename containing this substring; may be repeated.",
     )
+    canonical.add_argument(
+        "--require-license-file",
+        action="append",
+        default=[],
+        help="Require this license basename in every wheel/sdist's canonical "
+        "license location; may be repeated.",
+    )
 
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--project", default=DEFAULT_PROJECT)
@@ -306,6 +379,13 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Require at least one wheel filename containing this substring; may be repeated.",
+    )
+    verify_parser.add_argument(
+        "--require-license-file",
+        action="append",
+        default=[],
+        help="Require this license basename in every wheel/sdist's canonical "
+        "license location; may be repeated.",
     )
 
     return parser.parse_args()
@@ -322,6 +402,7 @@ def main() -> None:
             expected_wheels=args.expected_wheels,
             expected_sdists=args.expected_sdists,
             required_wheel_tags=tuple(args.required_wheel_tag),
+            required_license_files=tuple(args.require_license_file),
         )
         return
     if args.command == "verify":
@@ -334,6 +415,7 @@ def main() -> None:
             expected_wheels=args.expected_wheels,
             expected_sdists=args.expected_sdists,
             required_wheel_tags=tuple(args.required_wheel_tag),
+            required_license_files=tuple(args.require_license_file),
         )
         return
     raise AssertionError(f"unknown command: {args.command}")

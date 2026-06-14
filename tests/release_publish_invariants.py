@@ -1139,6 +1139,7 @@ def check_pypi_canonical_dist(
     sdist_artifact_name: str = "sdist",
     canonical_artifact_name: str = "pypi-canonical-dist",
     project: str | None = None,
+    required_license_files: tuple[str, ...] = (),
 ) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
@@ -1203,6 +1204,12 @@ def check_pypi_canonical_dist(
             for required_arg in PYPI_CANONICAL_EXPECTED_ARGS:
                 if required_arg not in run:
                     fail(f"{path}: {job_name} canonicalize step must pass {required_arg}")
+            for license_file in required_license_files:
+                if f"--require-license-file {license_file}" not in run:
+                    fail(
+                        f"{path}: {job_name} canonicalize step must pass "
+                        f"--require-license-file {license_file}"
+                    )
 
     if len(wheels_downloads) != 1:
         fail(f"{path}: {job_name} must download exactly one {wheel_artifact_pattern} artifact set")
@@ -1231,6 +1238,7 @@ def check_publish_pypi(
     canonical_artifact_name: str = "pypi-canonical-dist",
     project: str | None = None,
     crate_publish_job: str = "publish-crate",
+    required_license_files: tuple[str, ...] = (),
 ) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
@@ -1268,6 +1276,12 @@ def check_publish_pypi(
             for required_arg in PYPI_CANONICAL_EXPECTED_ARGS:
                 if required_arg not in run:
                     fail(f"{path}: {job_name} PyPI verify step must pass {required_arg}")
+            for license_file in required_license_files:
+                if f"--require-license-file {license_file}" not in run:
+                    fail(
+                        f"{path}: {job_name} PyPI verify step must pass "
+                        f"--require-license-file {license_file}"
+                    )
 
     if len(publish_steps) != 1:
         fail(f"{path}: {job_name} must have exactly one pypa/gh-action-pypi-publish step")
@@ -1728,6 +1742,7 @@ def main() -> None:
         sdist_artifact_name="sdist-manifest",
         canonical_artifact_name="pypi-manifest-canonical-dist",
         project="ordvec-manifest",
+        required_license_files=("LICENSE-MIT", "LICENSE-APACHE-2.0"),
     )
     check_publish_crates(workflow, WORKFLOW_PATH)
     check_ci_manifest_package_defer(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH)
@@ -1740,6 +1755,7 @@ def main() -> None:
         canonical_artifact_name="pypi-manifest-canonical-dist",
         project="ordvec-manifest",
         crate_publish_job="publish-manifest-crate",
+        required_license_files=("LICENSE-MIT", "LICENSE-APACHE-2.0"),
     )
     check_sde_cache_invariants()
 
