@@ -83,6 +83,45 @@ fn rankquant_subset_ties_use_global_row_ids() {
 }
 
 #[test]
+fn batched_subset_rerank_ties_use_global_row_ids_and_keep_duplicates() {
+    const DIM: usize = 64;
+    let docs = repeated_docs(12, DIM, 1.0);
+    let query = vec![0.0; DIM];
+    let mut index = RankQuant::new(DIM, 2);
+    index.add(&docs);
+
+    // Single tied-score row routed through the batched `_into` path. All scores
+    // are equal (zero query over constant-composition docs), so the order is
+    // purely (score desc, global row-id asc). Duplicate candidate ids must NOT
+    // be collapsed — each is scored independently.
+    let candidate_offsets = [0usize, 4];
+    let candidates = [7u32, 7, 3, 7];
+    let k = 4usize;
+    let out_k = k.min(12);
+    let mut scratch = ordvec::SubsetScratch::new();
+    let mut scores = vec![0.0f32; out_k];
+    let mut indices = vec![0i64; out_k];
+    index.search_asymmetric_subset_batched_serial_into(
+        &query,
+        &candidate_offsets,
+        &candidates,
+        k,
+        &mut scratch,
+        &mut scores,
+        &mut indices,
+    );
+    // (score desc, global id asc): id 3 sorts first, then the three duplicate 7s.
+    assert_eq!(scores, vec![0.0, 0.0, 0.0, 0.0]);
+    assert_ids(&indices, &[3, 7, 7, 7]);
+
+    // The batched `_into` row must agree byte-for-byte with the single-query
+    // `search_asymmetric_subset` reference on the same tied/duplicate row.
+    let (ref_scores, ref_ids) = index.search_asymmetric_subset(&query, &candidates, k);
+    assert_eq!(scores, ref_scores);
+    assert_ids(&indices, &ref_ids);
+}
+
+#[test]
 fn candidate_prefilters_preserve_order_across_single_and_batched_paths() {
     const DIM: usize = 64;
     const N: usize = 10;
