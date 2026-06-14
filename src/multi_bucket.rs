@@ -233,6 +233,15 @@ impl MultiBucketBitmap {
     // -----------------------------------------------------------------
     // Indexed contingency / projection surface (issue #219, API 2 of 2).
     //
+    // **Feature gate:** this entire surface is behind the non-default
+    // `experimental` Cargo feature and is excluded from semver guarantees.
+    // It is *not* the default single-score retrieval path — for standard
+    // nearest-neighbour scoring use [`crate::RankQuant`] (asymmetric LUT
+    // or symmetric dot-product) or [`crate::Bitmap`] (top-bucket overlap).
+    // `MultiBucketBitmap` targets niche workloads where the full bilinear
+    // decomposition, multi-projection evidence, or the diagonal fast path
+    // are needed (one query vs. many docs with many weight projections).
+    //
     // `bilinear_score` / `top_m_bilinear` recompute one weighted `Σ W·C`
     // per call and rescan the doc's bitmaps once per *projection*. The
     // methods below decouple the accumulation from the projection: the
@@ -362,6 +371,12 @@ impl MultiBucketBitmap {
                 // One accumulation pass over this doc's bitmaps. nb <= 16 ⇒
                 // nb*nb <= 256, so a stack table avoids a per-doc heap
                 // allocation inside the parallel map (allocator contention).
+                assert!(
+                    nb * nb <= 256,
+                    "project_all_batched: nb={nb} exceeds stack table capacity \
+                     (nb*nb={} > 256); bits must be <=4 so nb<=16",
+                    nb * nb,
+                );
                 let mut table = [0u32; 256];
                 let table = &mut table[..nb * nb];
                 contingency_accumulate(q_bitmaps, doc, nb, qpb, table);
@@ -445,6 +460,12 @@ impl MultiBucketBitmap {
                 let doc = &bitmaps[di * per_doc..(di + 1) * per_doc];
                 // Stack table (nb*nb <= 256): no per-doc heap alloc in the
                 // parallel map.
+                assert!(
+                    nb * nb <= 256,
+                    "project_all_batched_scalar: nb={nb} exceeds stack table capacity \
+                     (nb*nb={} > 256); bits must be <=4 so nb<=16",
+                    nb * nb,
+                );
                 let mut table = [0u32; 256];
                 let table = &mut table[..nb * nb];
                 contingency_accumulate_scalar(q_bitmaps, doc, nb, qpb, table);

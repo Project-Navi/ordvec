@@ -334,7 +334,7 @@ mod bench {
             "{:<34} {:>14.3} {:>13.2}x",
             "rebuild-per-projection",
             rebuild_each * 1e6,
-            1.0 / speedup
+            speedup
         );
         println!(
             "DATA\ta\tbits={}\tbuild_once_us={:.3}\trebuild_each_us={:.3}\tn_proj={}\tspeedup={:.2}",
@@ -409,7 +409,7 @@ mod bench {
             "{:<34} {:>14.2} {:>15.2}x",
             "dense full-table diagonal",
             per(dense_full),
-            1.0 / fastpath_speedup
+            fastpath_speedup
         );
         println!(
             "DATA\tb\tbits={}\tdiag_disp_ns={:.2}\tdiag_scalar_ns={:.2}\tdense_full_ns={:.2}\tsimd_speedup={:.2}\tfastpath_speedup={:.2}",
