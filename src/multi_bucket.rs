@@ -1,5 +1,14 @@
 //! MultiBucketBitmap: `2^bits` bitmaps per document, one per bucket.
 //!
+//! **Stability — not a default surface.** [`MultiBucketBitmap`] and the indexed
+//! contingency / projection kernels built on it are gated behind the
+//! **non-default `experimental` Cargo feature**. They are a research scaffold,
+//! **not** part of the stable public API, and are **excluded from semver
+//! guarantees** — they may change or be removed without a major-version bump.
+//! The stable, semver-covered bucket-overlap surface is the stateless dense
+//! `Contingency` / `Projection` API; reach for this indexed path only when you
+//! have explicitly opted into `experimental`.
+//!
 //! Represents the constant-composition bucket assignment of each
 //! document explicitly as a set of `2^bits` disjoint bitmaps over the
 //! `dim` coordinates. The bilinear bucket-overlap score
