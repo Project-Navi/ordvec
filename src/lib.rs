@@ -51,6 +51,8 @@
 use std::fmt;
 
 mod bitmap;
+#[cfg(feature = "experimental")]
+mod contingency;
 mod fastscan;
 #[cfg(feature = "experimental")]
 mod multi_bucket;
@@ -84,6 +86,15 @@ pub use quant::search_asymmetric_byte_lut;
 // feature; the default surface excludes it.
 #[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmap;
+
+// `Contingency` / `Projection` are the stateless dense-code contingency-table
+// surface (issue #219): the full `nb × nb` bucket-overlap table for two `&[u8]`
+// code slices, plus its named projections. This is a research/analysis
+// primitive — it is *not* a retrieval index and is never wired into a search
+// path — so it lives behind the same `experimental` gate as
+// `MultiBucketBitmap`, the bilinear-decomposition surface it complements.
+#[cfg(feature = "experimental")]
+pub use contingency::{Contingency, Projection};
 
 // `RankQuantFastscan` is an optional FastScan b=2 scan path. It is
 // re-exported `#[doc(hidden)]` at the crate root — reachable as
