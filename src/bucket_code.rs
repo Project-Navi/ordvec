@@ -65,6 +65,15 @@ impl CompositionSpec {
         if buckets < 2 {
             return Err(CompositionViolation::InvalidSpec("buckets must be >= 2"));
         }
+        // Codes are stored as `u8`, so a bucket id must fit in `0..=255`. Reject
+        // `buckets > 256` here rather than letting `from_ranks` silently truncate
+        // a computed id via `as u8` and fail later with a misleading
+        // `WrongBucketCount`.
+        if buckets > u8::MAX as usize + 1 {
+            return Err(CompositionViolation::InvalidSpec(
+                "buckets must be <= 256 (codes are stored as u8)",
+            ));
+        }
         if !dim.is_multiple_of(buckets) {
             return Err(CompositionViolation::NonUniformSpec { dim, buckets });
         }
@@ -269,9 +278,11 @@ impl BucketCode {
             }
             seen[rank] = true;
             // `rank < dim` and `dim % buckets == 0`, so `rank * buckets / dim`
-            // lands in `[0, buckets)` and `buckets <= 1 << 8` for any code that
-            // can be a `u8`. (For the RankQuant domain `buckets <= 16`.)
-            codes.push((rank * buckets / dim) as u8);
+            // lands in `[0, buckets)` and `buckets <= 256` (enforced in
+            // `CompositionSpec::new`), so the result fits a `u8`. Compute the
+            // product in `u64`: `rank * buckets` can exceed `usize::MAX` on
+            // 32-bit / wasm32 targets for large `dim`.
+            codes.push(((rank as u64 * buckets as u64) / dim as u64) as u8);
         }
         Self::new(spec, codes)
     }
@@ -513,6 +524,11 @@ mod tests {
             RankQuantSpec::new(8, 3).unwrap_err(),
             CompositionViolation::InvalidBits { bits: 3 }
         );
+        // `from_vector` surfaces the same unsupported-bits rejection.
+        assert_eq!(
+            BucketCode::from_vector(8, 3, &[0.0f32; 8]).unwrap_err(),
+            CompositionViolation::InvalidBits { bits: 3 }
+        );
         assert_eq!(
             RankQuantSpec::new(u16::MAX as usize + 1, 2).unwrap_err(),
             CompositionViolation::DimTooLarge {
@@ -520,6 +536,17 @@ mod tests {
                 max: u16::MAX as usize,
             }
         );
+    }
+
+    #[test]
+    fn composition_spec_rejects_more_than_256_buckets() {
+        // Codes are u8: a bucket id must fit 0..=255.
+        assert_eq!(
+            CompositionSpec::new(512, 257).unwrap_err(),
+            CompositionViolation::InvalidSpec("buckets must be <= 256 (codes are stored as u8)")
+        );
+        // 256 is the boundary and is accepted (dim a multiple of it).
+        assert!(CompositionSpec::new(512, 256).is_ok());
     }
 
     #[test]
