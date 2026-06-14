@@ -27,9 +27,25 @@
 //! the stateless dense-code contingency surface (`Contingency::new`, issue
 //! #219) without any further transform.
 //!
-//! Ported to reach behavioural parity with the `ordgraph` bucket-code
-//! prototype; the rank math is *not* re-implemented here — it delegates to the
-//! crate's shared [`crate::rank`] primitives.
+//! ## Adopting this API — reusable, index-free bucket-code surface
+//!
+//! This surface is designed to be reusable outside of any retrieval index.
+//! If you maintain a local fork of composition-spec or bucket-code logic,
+//! replace it with:
+//!
+//! ```rust,ignore
+//! use ordvec::{BucketCode, CompositionSpec, RankQuantSpec, CompositionViolation};
+//! ```
+//!
+//! (Enable the `experimental` feature while this surface is gated.)
+//!
+//! The rank math is not re-implemented here — [`BucketCode::from_vector`]
+//! delegates to the crate's shared [`crate::rank`] primitives, so callers
+//! no longer need to fork rank or bucket semantics.
+//!
+//! Two intentional constraints to note: `bits = 8` is rejected (it lands as a
+//! capability-gated width in the separate b=8 work, #221), and
+//! [`CompositionSpec::new`] rejects `buckets > 256` (codes are `u8`).
 
 use std::error::Error;
 use std::fmt;
@@ -64,6 +80,15 @@ impl CompositionSpec {
         }
         if buckets < 2 {
             return Err(CompositionViolation::InvalidSpec("buckets must be >= 2"));
+        }
+        // Codes are stored as `u8`, so a bucket id must fit in `0..=255`. Reject
+        // `buckets > 256` here rather than letting `from_ranks` silently truncate
+        // a computed id via `as u8` and fail later with a misleading
+        // `WrongBucketCount`.
+        if buckets > u8::MAX as usize + 1 {
+            return Err(CompositionViolation::InvalidSpec(
+                "buckets must be <= 256 (codes are stored as u8)",
+            ));
         }
         if !dim.is_multiple_of(buckets) {
             return Err(CompositionViolation::NonUniformSpec { dim, buckets });
@@ -269,9 +294,11 @@ impl BucketCode {
             }
             seen[rank] = true;
             // `rank < dim` and `dim % buckets == 0`, so `rank * buckets / dim`
-            // lands in `[0, buckets)` and `buckets <= 1 << 8` for any code that
-            // can be a `u8`. (For the RankQuant domain `buckets <= 16`.)
-            codes.push((rank * buckets / dim) as u8);
+            // lands in `[0, buckets)` and `buckets <= 256` (enforced in
+            // `CompositionSpec::new`), so the result fits a `u8`. Compute the
+            // product in `u64`: `rank * buckets` can exceed `usize::MAX` on
+            // 32-bit / wasm32 targets for large `dim`.
+            codes.push(((rank as u64 * buckets as u64) / dim as u64) as u8);
         }
         Self::new(spec, codes)
     }
@@ -473,9 +500,10 @@ impl Error for CompositionViolation {}
 mod tests {
     use super::*;
 
-    // ---- ordgraph bucket-code parity gate -------------------------------
-    // Every assertion value below is reproduced verbatim from the reference
-    // `code.rs` #[cfg(test)] module.
+    // ---- bucket-code behavioral contract --------------------------------
+    // These tests assert the core behavioral invariants of the bucket-code
+    // surface: composition balance, rank permutation semantics, and error
+    // conditions. Every numeric expectation is pinned to catch regressions.
 
     #[test]
     fn from_ranks_builds_uniform_bucket_code() {
@@ -513,6 +541,11 @@ mod tests {
             RankQuantSpec::new(8, 3).unwrap_err(),
             CompositionViolation::InvalidBits { bits: 3 }
         );
+        // `from_vector` surfaces the same unsupported-bits rejection.
+        assert_eq!(
+            BucketCode::from_vector(8, 3, &[0.0f32; 8]).unwrap_err(),
+            CompositionViolation::InvalidBits { bits: 3 }
+        );
         assert_eq!(
             RankQuantSpec::new(u16::MAX as usize + 1, 2).unwrap_err(),
             CompositionViolation::DimTooLarge {
@@ -520,6 +553,33 @@ mod tests {
                 max: u16::MAX as usize,
             }
         );
+    }
+
+    // Pin the b=8 decision: the reference prototype accepted bits=8 but ordvec
+    // rejects it. These tests ensure that boundary cannot change silently.
+    #[test]
+    fn rankquant_spec_rejects_bits_8() {
+        assert_eq!(
+            RankQuantSpec::new(8, 8).unwrap_err(),
+            CompositionViolation::InvalidBits { bits: 8 }
+        );
+        // `from_vector` takes the same path: bits=8 is rejected at the spec level.
+        let v: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        assert_eq!(
+            BucketCode::from_vector(8, 8, &v).unwrap_err(),
+            CompositionViolation::InvalidBits { bits: 8 }
+        );
+    }
+
+    #[test]
+    fn composition_spec_rejects_more_than_256_buckets() {
+        // Codes are u8: a bucket id must fit 0..=255.
+        assert_eq!(
+            CompositionSpec::new(512, 257).unwrap_err(),
+            CompositionViolation::InvalidSpec("buckets must be <= 256 (codes are stored as u8)")
+        );
+        // 256 is the boundary and is accepted (dim a multiple of it).
+        assert!(CompositionSpec::new(512, 256).is_ok());
     }
 
     #[test]
