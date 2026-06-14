@@ -1,9 +1,22 @@
 //! `B`-bit bucketed-rank index ([`RankQuant`]).
 //!
-//! Storage is `dim * bits / 8` bytes per document at `bits ∈ {1, 2, 4}`.
-//! Symmetric search uses a per-query, per-coord LUT; asymmetric search
-//! dispatches AVX-512 → AVX2 → scalar via the kernels in
-//! [`crate::quant_kernels`].
+//! Storage is `dim * bits / 8` bytes per document at `bits ∈ {1, 2, 4, 8}`
+//! (`b=8` is one byte per coordinate). Symmetric search uses a per-query,
+//! per-coord LUT; asymmetric search dispatches AVX-512 → AVX2 → scalar via
+//! the kernels in [`crate::quant_kernels`].
+//!
+//! `b=8` is an evidence/refinement-oriented width: it is supported for
+//! asymmetric scoring and code/projection generation at **any** dimension,
+//! but symmetric scoring uses the equal-bucket analytical norm and therefore
+//! requires `dim % 256 == 0`. For `b ∈ {1, 2, 4}` the existing retrieval
+//! modes remain the stable headline surface; `b=8` is an opt-in,
+//! explicitly-documented high-precision evidence/refinement surface
+//! (e.g. asymmetric quant storage after repair flows, edge-case rerank
+//! healing), not a broad retrieval-quant method. It is **not**
+//! unstable-experimental. See [`RankQuantCapability`] and
+//! [`RankQuant::new_asymmetric`]. Its asymmetric path is a per-coordinate
+//! gather against the `dim * 256` LUT: an AVX-512 `vgatherdps` kernel when
+//! available (`avx512f` + `dim % 16 == 0`), else the portable scalar LUT.
 //!
 //! The byte-LUT path ([`search_asymmetric_byte_lut`]) is re-exported
 //! `#[doc(hidden)]` (reachable as `ordvec::search_asymmetric_byte_lut`)
@@ -13,7 +26,8 @@
 use rayon::prelude::*;
 
 use crate::quant_kernels::{
-    scan_b1_to_topk, scan_b2_to_topk, scan_b4_to_topk, scan_via_lut_scalar,
+    scan_b1_to_topk, scan_b2_to_topk, scan_b4_to_topk, scan_b8_asym, scan_b8_to_topk,
+    scan_via_lut_scalar,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::quant_kernels::{
@@ -61,21 +75,66 @@ fn rankquant_eval_buckets(v: &[f32], bits: u8, out: &mut [u8]) {
     }
 }
 
+/// Which scoring modes a [`RankQuant`] instance supports.
+///
+/// The distinction only matters for `b=8`. For `b ∈ {1, 2, 4}` every
+/// constructor produces a [`SymmetricAndAsymmetric`](Self::SymmetricAndAsymmetric)
+/// instance (the `dim % 2^bits == 0` constructor invariant always holds),
+/// so callers never need to branch on this for the headline widths.
+///
+/// For `b=8` the symmetric analytical L2 norm is exact only when every
+/// bucket receives equal occupancy, i.e. `dim % 256 == 0`. When that
+/// holds the instance is [`SymmetricAndAsymmetric`](Self::SymmetricAndAsymmetric);
+/// otherwise it is [`AsymmetricOnly`](Self::AsymmetricOnly) — code/projection
+/// generation, pair-evidence/contingency, and asymmetric (float-query)
+/// scoring all work at *any* dim, but the symmetric path
+/// ([`RankQuant::search`]) panics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankQuantCapability {
+    /// Asymmetric (float-query) scoring and code/projection generation
+    /// only. Reachable for `b=8` when `dim % 256 != 0`. Symmetric
+    /// scoring ([`RankQuant::search`]) panics on these instances.
+    AsymmetricOnly,
+    /// Full surface: both symmetric and asymmetric scoring. The only
+    /// capability for `b ∈ {1, 2, 4}`, and the capability for `b=8` when
+    /// `dim % 256 == 0`.
+    SymmetricAndAsymmetric,
+}
+
 /// `B`-bit RankQuant index.
 ///
 /// Each document is encoded by bucketing its rank vector into
 /// `1 << bits` equal-width bins on `[0, dim)` and packing `bits` bits
 /// per coordinate. Storage is `dim * bits / 8` bytes per document.
-/// Supported bit widths are `1`, `2`, and `4` (3-bit packing is left
-/// for a follow-up; use `2` or `4` in the interim).
+/// Supported bit widths are `1`, `2`, `4`, and `8` (3-bit packing is
+/// left for a follow-up; use `2` or `4` in the interim).
 ///
 /// The mean-centred bucket vector has fixed analytical L2 norm
 /// `sqrt(dim * (2^(2B) - 1) / 12)` when `dim % (1 << bits) == 0`, so
 /// no per-document norms are stored.
+///
+/// # `b=8` — evidence/refinement width
+/// `b=8` is an evidence/refinement-oriented RankQuant width. It is
+/// supported for asymmetric scoring and code/projection generation at
+/// any dimension; symmetric scoring uses the equal-bucket analytical
+/// norm and therefore requires `dim % 256 == 0`. For `b ∈ {1, 2, 4}`,
+/// the existing retrieval modes remain the stable headline surface;
+/// `b=8` is an opt-in, explicitly-documented high-precision
+/// evidence/refinement surface (e.g. asymmetric quant storage after
+/// repair flows, edge-case rerank healing), not a broad retrieval-quant
+/// method. It is **not** unstable-experimental — it is a stable, core
+/// surface — but it is capability-gated: construct an asymmetric-only
+/// `b=8` index for non-`256`-aligned dims via [`Self::new_asymmetric`]
+/// and check [`Self::symmetric_supported`] before calling
+/// [`Self::search`]. See [`RankQuantCapability`].
 pub struct RankQuant {
     pub(crate) dim: usize,
     pub(crate) bits: u8,
     pub(crate) n_vectors: usize,
+    /// Scoring modes this instance supports — see [`RankQuantCapability`].
+    /// Computed once at construction; for `b ∈ {1, 2, 4}` always
+    /// [`RankQuantCapability::SymmetricAndAsymmetric`].
+    pub(crate) capability: RankQuantCapability,
     /// Row-major packed bucket bytes. `n_vectors * dim * bits / 8` total.
     pub(crate) packed: Vec<u8>,
 }
@@ -178,11 +237,27 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
 }
 
 impl RankQuant {
+    /// Validate `(dim, bits)` for **code validity** — the precondition for
+    /// generating bucket codes, projections, and asymmetric scores.
+    ///
+    /// Accepts `bits ∈ {1, 2, 4, 8}` and `dim ∈ [2, u16::MAX]`.
+    ///
+    /// For `b ∈ {1, 2, 4}` this additionally requires `dim % 2^bits == 0`
+    /// (the equal-bucket constant-composition invariant): those widths only
+    /// expose a full symmetric+asymmetric surface, so code validity and
+    /// symmetric-norm validity coincide.
+    ///
+    /// For `b = 8` it validates **only** that codes pack (`codes_per_byte ==
+    /// 1`, so any `dim` works) — it does **not** require `dim % 256 == 0`.
+    /// That `dim % 256 == 0` rule is a *symmetric-scoring* precondition, not
+    /// a code-validity one, and is checked separately on the symmetric path
+    /// (and by [`Self::new`], which constructs a full-capability `b=8`
+    /// instance). Use [`Self::new_asymmetric`] for any-`dim` `b=8`.
     pub fn validate_params(dim: usize, bits: u8) -> Result<(), OrdvecError> {
-        if !matches!(bits, 1 | 2 | 4) {
+        if !matches!(bits, 1 | 2 | 4 | 8) {
             return Err(OrdvecError::InvalidParameter {
                 name: "bits",
-                message: "must be 1, 2, or 4".to_string(),
+                message: "must be 1, 2, 4, or 8".to_string(),
             });
         }
         if dim < 2 {
@@ -204,20 +279,45 @@ impl RankQuant {
                 message: format!("must be a multiple of {codes_per_byte} for bits = {bits}"),
             });
         }
-        let n_buckets = 1usize << bits;
-        if !dim.is_multiple_of(n_buckets) {
-            return Err(OrdvecError::InvalidParameter {
-                name: "dim",
-                message: format!(
-                    "must be divisible by 2^bits = {n_buckets} so every bucket receives exactly dim / 2^bits rank entries"
-                ),
-            });
+        // The constant-composition invariant `dim % 2^bits == 0` exists only to
+        // make the symmetric analytical L2 norm exact (equal bucket occupancy).
+        // For b ∈ {1,2,4} we keep requiring it here (those widths are
+        // full-capability by definition), but for b=8 it is a *symmetric*
+        // precondition checked elsewhere — code/projection/asymmetric paths
+        // never need equal buckets, so a non-256-aligned dim is a valid b=8
+        // *code* configuration.
+        if bits != 8 {
+            let n_buckets = 1usize << bits;
+            if !dim.is_multiple_of(n_buckets) {
+                return Err(OrdvecError::InvalidParameter {
+                    name: "dim",
+                    message: format!(
+                        "must be divisible by 2^bits = {n_buckets} so every bucket receives exactly dim / 2^bits rank entries"
+                    ),
+                });
+            }
         }
         Ok(())
     }
 
+    /// Construct a full-capability (`SymmetricAndAsymmetric`) index.
+    ///
+    /// For `b ∈ {1, 2, 4}` this is unchanged: `bits` must be one of those
+    /// widths and `dim % 2^bits == 0` (and `dim % (8 / bits) == 0`).
+    ///
+    /// For `b = 8` this requires `dim % 256 == 0`, which yields the full
+    /// symmetric+asymmetric surface. If `dim % 256 != 0` it **panics**
+    /// (consistent with this constructor's existing fail-loud style),
+    /// directing the caller to [`Self::new_asymmetric`] for an any-`dim`
+    /// asymmetric-only `b=8` index. See [`RankQuantCapability`].
+    ///
+    /// # Panics
+    /// Panics if `bits ∉ {1, 2, 4, 8}`, if `dim < 2`, if `dim > u16::MAX`,
+    /// if `dim % (8 / bits) != 0`, or — for the equal-bucket symmetric
+    /// invariant — if `dim % 2^bits != 0` (`b ∈ {1,2,4}`) / `dim % 256 != 0`
+    /// (`b = 8`).
     pub fn new(dim: usize, bits: u8) -> Self {
-        assert!(matches!(bits, 1 | 2 | 4), "bits must be 1, 2, or 4");
+        assert!(matches!(bits, 1 | 2 | 4 | 8), "bits must be 1, 2, 4, or 8");
         assert!(dim >= 2, "dim must be >= 2");
         assert!(dim <= u16::MAX as usize, "dim must fit in u16");
         let codes_per_byte = (8 / bits) as usize;
@@ -226,6 +326,27 @@ impl RankQuant {
             0,
             "dim must be a multiple of {codes_per_byte} for bits = {bits}",
         );
+        if bits == 8 {
+            // b=8 full-capability requires dim % 256 == 0 (equal bucket
+            // occupancy → exact symmetric analytical norm). Fail loud and
+            // point at the asymmetric-only constructor so the caller has a
+            // non-surprising path for non-aligned dims.
+            assert_eq!(
+                dim % 256,
+                0,
+                "RankQuant::new(dim, 8) requires dim % 256 == 0 for symmetric \
+                 scoring (equal-bucket analytical norm); dim={dim} is not \
+                 256-aligned. Use RankQuant::new_asymmetric(dim, 8) for an \
+                 asymmetric-only b=8 index at any dim.",
+            );
+            return Self {
+                dim,
+                bits,
+                n_vectors: 0,
+                capability: RankQuantCapability::SymmetricAndAsymmetric,
+                packed: Vec::new(),
+            };
+        }
         // Audit-safety: require dim divisible by 2^bits so every bucket
         // gets exactly dim / (1 << bits) rank entries per document. This
         // is what makes `rankquant_norm` analytically exact (every doc
@@ -245,8 +366,92 @@ impl RankQuant {
             dim,
             bits,
             n_vectors: 0,
+            capability: RankQuantCapability::SymmetricAndAsymmetric,
             packed: Vec::new(),
         }
+    }
+
+    /// Construct an asymmetric-capable index at **any** valid `dim`.
+    ///
+    /// This is the non-surprising entry point for `b = 8` at a dimension
+    /// that is not `256`-aligned: it produces a
+    /// [`RankQuantCapability::AsymmetricOnly`] instance whose
+    /// code/projection generation, pair-evidence/contingency, and
+    /// asymmetric (float-query) scoring all work, but whose symmetric path
+    /// ([`Self::search`]) panics (the equal-bucket analytical norm is not
+    /// exact off the `256`-aligned grid). When `dim % 256 == 0`, the `b=8`
+    /// instance is upgraded to full [`RankQuantCapability::SymmetricAndAsymmetric`]
+    /// (there is no reason to withhold symmetric scoring when it is exact).
+    ///
+    /// For `b ∈ {1, 2, 4}` this constructs the same full-capability instance
+    /// as [`Self::new`] (those widths are always symmetric-capable when their
+    /// constructor invariants hold), so it is never *less* capable than
+    /// `new` — it is simply the width-agnostic constructor.
+    ///
+    /// # Panics
+    /// Panics if `(dim, bits)` is not a valid **code** configuration —
+    /// i.e. `bits ∉ {1, 2, 4, 8}`, `dim < 2`, `dim > u16::MAX`, or
+    /// `dim % (8 / bits) != 0`. For `b ∈ {1, 2, 4}` it additionally requires
+    /// `dim % 2^bits == 0` (same as [`Self::new`]).
+    pub fn new_asymmetric(dim: usize, bits: u8) -> Self {
+        // Reuse the code-validity gate (accepts any 256-unaligned dim for b=8,
+        // still requires dim % 2^bits for b ∈ {1,2,4}). Convert the structured
+        // error into a panic so this constructor matches `new`'s fail-loud style.
+        Self::validate_params(dim, bits)
+            .unwrap_or_else(|e| panic!("RankQuant::new_asymmetric invalid params: {e}"));
+        let capability = Self::capability_for(dim, bits);
+        Self {
+            dim,
+            bits,
+            n_vectors: 0,
+            capability,
+            packed: Vec::new(),
+        }
+    }
+
+    /// Compute the capability for a code-valid `(dim, bits)` pair.
+    ///
+    /// `b ∈ {1, 2, 4}` and `256`-aligned `b=8` are full-capability; any
+    /// other (i.e. non-`256`-aligned) `b=8` is asymmetric-only.
+    #[inline]
+    fn capability_for(dim: usize, bits: u8) -> RankQuantCapability {
+        if bits == 8 && !dim.is_multiple_of(256) {
+            RankQuantCapability::AsymmetricOnly
+        } else {
+            RankQuantCapability::SymmetricAndAsymmetric
+        }
+    }
+
+    /// The scoring modes this instance supports — see [`RankQuantCapability`].
+    ///
+    /// Always [`RankQuantCapability::SymmetricAndAsymmetric`] for
+    /// `b ∈ {1, 2, 4}`. For `b=8` it reflects whether `dim % 256 == 0`.
+    #[inline]
+    pub fn capability(&self) -> RankQuantCapability {
+        self.capability
+    }
+
+    /// Whether [`Self::search`] (symmetric scoring) is supported on this
+    /// instance. `true` for `b ∈ {1, 2, 4}` and for `256`-aligned `b=8`;
+    /// `false` for `b=8` at a non-`256`-aligned dim (asymmetric-only).
+    ///
+    /// Callers should check this before invoking [`Self::search`] on a
+    /// `b=8` index built via [`Self::new_asymmetric`].
+    #[inline]
+    pub fn symmetric_supported(&self) -> bool {
+        matches!(self.capability, RankQuantCapability::SymmetricAndAsymmetric)
+    }
+
+    /// Fail loud with the exact symmetric-gating message when symmetric
+    /// scoring is invoked on an asymmetric-only (`b=8`, non-`256`-aligned)
+    /// instance. No-op for symmetric-capable instances.
+    #[inline]
+    fn assert_symmetric_supported(&self) {
+        assert!(
+            self.symmetric_supported(),
+            "RankQuant b=8 symmetric scoring requires dim % 256 == 0; dim={} supports asymmetric/evidence APIs only.",
+            self.dim,
+        );
     }
 
     /// Add documents. Each vector is rank-transformed, bucketed to `bits`
@@ -288,7 +493,21 @@ impl RankQuant {
 
     /// Symmetric search: bucket the query and score against bucketed
     /// docs.
+    ///
+    /// # Panics
+    /// For a `b=8` index built via [`Self::new_asymmetric`] at a
+    /// non-`256`-aligned dim (an [`RankQuantCapability::AsymmetricOnly`]
+    /// instance), this **panics**: the symmetric analytical norm requires
+    /// equal bucket occupancy (`dim % 256 == 0`). Check
+    /// [`Self::symmetric_supported`] first, or use [`Self::search_asymmetric`],
+    /// which works at any dim. (`b ∈ {1, 2, 4}` and `256`-aligned `b=8`
+    /// instances never trip this.) The panic message is:
+    /// `RankQuant b=8 symmetric scoring requires dim % 256 == 0; dim={dim}
+    /// supports asymmetric/evidence APIs only.`
     pub fn search(&self, queries: &[f32], k: usize) -> SearchResults {
+        // Symmetric gating: fail loud (with the exact message) for an
+        // asymmetric-only b=8 instance before doing any work.
+        self.assert_symmetric_supported();
         let nq = queries.len() / self.dim;
         assert_eq!(queries.len(), nq * self.dim);
         assert_all_finite(queries);
@@ -338,6 +557,7 @@ impl RankQuant {
                     1 => scan_b1_to_topk(&self.packed, n, dim, &lut, inv_norm_sq, &mut top),
                     2 => scan_b2_to_topk(&self.packed, n, dim, &lut, inv_norm_sq, &mut top),
                     4 => scan_b4_to_topk(&self.packed, n, dim, &lut, inv_norm_sq, &mut top),
+                    8 => scan_b8_to_topk(&self.packed, n, dim, &lut, inv_norm_sq, &mut top),
                     _ => unreachable!(),
                 }
                 top.finalize_into(out_scores, out_indices);
@@ -359,6 +579,15 @@ impl RankQuant {
     /// (`LUT[d][b] = q_unit[d] * bucket_centre(b)`). The scan unpacks
     /// `8 / bits` codes per byte and accumulates via LUT lookups; the
     /// compiler autovectorises the inner sum.
+    ///
+    /// Works at **any** valid dim for all supported widths including `b=8`
+    /// (the asymmetric path needs no equal-bucket precondition). For `b=8`
+    /// the score is a per-coordinate gather `Σ_d lut[d*256 + code[d]]`
+    /// against the `dim * 256` LUT: it dispatches to the AVX-512
+    /// `vgatherdps` kernel (`scan_b8_asym` → `scan_b8_asym_avx512_gather`)
+    /// when `avx512f` is present and `dim % 16 == 0`, else the portable
+    /// scalar LUT reference (`scan_b8_to_topk`). Unlike [`Self::search`],
+    /// this never panics on an asymmetric-only instance.
     pub fn search_asymmetric(&self, queries: &[f32], k: usize) -> SearchResults {
         let nq = queries.len() / self.dim;
         assert_eq!(queries.len(), nq * self.dim);
@@ -421,6 +650,18 @@ impl RankQuant {
             .for_each(|((q, out_scores), out_indices)| {
                 let q_unit = l2_normalise(q);
                 let mut top = TopK::new(k_eff);
+
+                // b=8 is a per-coordinate gather (`Σ_d lut[d*256 + code[d]]`),
+                // not a centre-drop dot product — it routes to its own
+                // dispatch (AVX-512 vgatherdps → scalar LUT) and never uses
+                // the centre-drop offset (its LUT bakes the centre in).
+                if bits == 8 {
+                    scan_b8_asym(&self.packed, n, dim, &q_unit, inv_norm, &mut top);
+                    top.finalize_into(out_scores, out_indices);
+                    let _ = bytes_per_vec; // shape clarity
+                    return;
+                }
+
                 #[cfg(target_arch = "x86_64")]
                 let centre_offset = {
                     let q_sum: f32 = q_unit.iter().sum();
@@ -518,7 +759,23 @@ impl RankQuant {
     }
 
     /// Persist to a `.tvrq` file. Format: 14-byte header + packed bytes.
+    ///
+    /// # `b=8`
+    /// The `.tvrq` on-disk format and its loader currently support only
+    /// `bits ∈ {1, 2, 4}`. `b=8` is an in-memory evidence/refinement surface
+    /// in this phase; persisting it is a follow-up. To avoid writing a file
+    /// that [`Self::load`] would then reject (a silent broken round-trip),
+    /// this returns `io::Error` (kind `Unsupported`) for a `b=8` index rather
+    /// than emitting an unloadable file.
     pub fn write(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        if self.bits == 8 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "RankQuant b=8 persistence is not supported yet (the .tvrq loader \
+                 accepts bits ∈ {1, 2, 4}); b=8 is an in-memory evidence surface \
+                 in this phase",
+            ));
+        }
         crate::rank_io::write_rankquant(path, self.bits, self.dim, self.n_vectors, &self.packed)
     }
 
@@ -578,10 +835,16 @@ impl RankQuant {
                 ),
             ));
         }
+        // `load_rankquant` only admits bits ∈ {1,2,4} (b=8 is not persistable
+        // in this phase — see `write`), and those widths are always
+        // full-capability, so the loaded instance is SymmetricAndAsymmetric.
+        // `capability_for` keeps that derivation in one place.
+        let capability = Self::capability_for(dim, bits);
         Ok(Self {
             dim,
             bits,
             n_vectors,
+            capability,
             packed,
         })
     }
@@ -682,48 +945,56 @@ impl RankQuant {
         #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
         let simd_tier = select_simd_tier(dim, bits);
         let mut top = TopK::new_with_tie_keys(k_eff, candidates);
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            match (simd_tier, bits) {
-                (SimdTier::Avx512, 2) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b2_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+        // b=8 routes to its own gather dispatch (AVX-512 vgatherdps → scalar
+        // LUT), with the centre baked into the LUT (no score-offset trick).
+        // The tie keys on `top` still map local scratch positions → global
+        // row IDs exactly as for b ∈ {1,2,4}.
+        if bits == 8 {
+            scan_b8_asym(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+        } else {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                match (simd_tier, bits) {
+                    (SimdTier::Avx512, 2) => {
+                        top.set_score_offset(centre_offset);
+                        scan_b2_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    }
+                    (SimdTier::Avx512, 4) => {
+                        top.set_score_offset(centre_offset);
+                        scan_b4_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    }
+                    (SimdTier::Avx2, 2) => {
+                        top.set_score_offset(centre_offset);
+                        scan_b2_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    }
+                    (SimdTier::Avx2, 4) => {
+                        top.set_score_offset(centre_offset);
+                        scan_b4_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
+                    }
+                    _ => scan_via_lut_scalar(
+                        &sub_packed,
+                        m,
+                        dim,
+                        bits,
+                        n_buckets,
+                        &q_unit,
+                        inv_norm,
+                        &mut top,
+                    ),
                 }
-                (SimdTier::Avx512, 4) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b4_asym_avx512(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                }
-                (SimdTier::Avx2, 2) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b2_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                }
-                (SimdTier::Avx2, 4) => {
-                    top.set_score_offset(centre_offset);
-                    scan_b4_asym_avx2(&sub_packed, m, dim, &q_unit, inv_norm, &mut top);
-                }
-                _ => scan_via_lut_scalar(
-                    &sub_packed,
-                    m,
-                    dim,
-                    bits,
-                    n_buckets,
-                    &q_unit,
-                    inv_norm,
-                    &mut top,
-                ),
             }
+            #[cfg(not(target_arch = "x86_64"))]
+            scan_via_lut_scalar(
+                &sub_packed,
+                m,
+                dim,
+                bits,
+                n_buckets,
+                &q_unit,
+                inv_norm,
+                &mut top,
+            );
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        scan_via_lut_scalar(
-            &sub_packed,
-            m,
-            dim,
-            bits,
-            n_buckets,
-            &q_unit,
-            inv_norm,
-            &mut top,
-        );
 
         let mut scores = vec![f32::NEG_INFINITY; k_eff];
         let mut local_indices = vec![-1i64; k_eff];

@@ -63,7 +63,7 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
-pub use quant::{rankquant_eval_search, RankQuant, TwoStageCandidatePolicy};
+pub use quant::{rankquant_eval_search, RankQuant, RankQuantCapability, TwoStageCandidatePolicy};
 pub use rank::Rank;
 pub use rank_io::{probe_index_metadata, IndexKind, IndexMetadata, IndexParams};
 pub use sign_bitmap::SignBitmap;
