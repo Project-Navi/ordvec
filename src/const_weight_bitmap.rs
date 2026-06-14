@@ -36,13 +36,16 @@
 //!
 //! # Overflow
 //! [`choose`] (and therefore [`BitmapNull::space_size`] / `fiber_count` /
-//! `tail_count`) accumulates in `u128`. For very large `dim` the binomial
-//! `C(dim, weight)` exceeds `u128::MAX` and the running product overflows —
-//! this panics in debug builds and wraps in release, exactly as the reference
-//! prototype does. The finite null is intended for the small `dim`/`weight`
-//! regime where the exact count is representable; callers operating near the
-//! `u128` ceiling must bound their parameters. This matches the prototype's
-//! behaviour (see the module-level FLAG in the porting notes — no divergence).
+//! `tail_count`) accumulates in `u128`. gcd-cancellation keeps the running
+//! product minimal, so the representable range is the full set of `(dim, weight)`
+//! whose true `C(dim, weight)` fits `u128`. Beyond that the result is not
+//! representable and the count **panics (fail-loud)** — in both debug and
+//! release — rather than silently wrapping to a wrong value. (This is a
+//! deliberate divergence from the reference prototype, which wrapped in release;
+//! a public combinatorial that returns a wrong count is unacceptable for an
+//! exact null.) The finite null targets the small `dim`/`weight` regime where
+//! the exact count is representable; callers near the `u128` ceiling must bound
+//! their parameters or pre-check.
 
 use crate::bucket_code::BucketCode;
 use crate::util::and_popcount;
@@ -286,7 +289,9 @@ impl BitmapNull {
         if outside > self.dim - self.weight {
             return 0;
         }
-        choose(self.weight, overlap) * choose(self.dim - self.weight, outside)
+        choose(self.weight, overlap)
+            .checked_mul(choose(self.dim - self.weight, outside))
+            .expect("fiber count overflows u128")
     }
 
     /// Upper-tail count `Σ_{o>=threshold} fiber_count(o)`.
@@ -312,10 +317,11 @@ impl BitmapNull {
 /// Binomial coefficient `C(n, k)` in `u128`.
 ///
 /// Returns `0` for `k > n`. Uses the symmetric `k.min(n - k)` factor count and
-/// the multiply-then-divide recurrence, which stays exact (each partial product
-/// `C(n, i+1)` is integral). For large `n` the running product can exceed
-/// `u128::MAX` — this panics in debug and wraps in release, matching the
-/// reference prototype; see the module-level Overflow note.
+/// an exact multiply-then-divide recurrence, with gcd-cancellation of each
+/// `(n - i)/(i + 1)` factor to keep the running product as small as possible
+/// before each step. The multiply is `checked_mul`: if the true `C(n, k)`
+/// exceeds `u128::MAX` this **panics** (fail-loud) rather than silently wrapping
+/// to a wrong count. See the module-level Overflow note.
 pub fn choose(n: usize, k: usize) -> u128 {
     if k > n {
         return 0;
@@ -323,9 +329,28 @@ pub fn choose(n: usize, k: usize) -> u128 {
     let k = k.min(n - k);
     let mut acc = 1u128;
     for i in 0..k {
-        acc = acc * (n - i) as u128 / (i + 1) as u128;
+        let num = (n - i) as u128;
+        let den = (i + 1) as u128;
+        // Cancel the shared factor first: this both shrinks the intermediate
+        // product (extending the representable range) and keeps the division
+        // exact — `den / g` is coprime to `num / g`, and the result `C(n, i+1)`
+        // is integral, so `den / g` divides `acc`.
+        let g = gcd(num, den);
+        acc = (acc / (den / g))
+            .checked_mul(num / g)
+            .expect("binomial coefficient C(n, k) overflows u128");
     }
     acc
+}
+
+/// Greatest common divisor (Euclid), for the exact binomial cancellation above.
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
 }
 
 #[cfg(test)]
@@ -519,6 +544,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn choose_extends_range_via_gcd_cancellation() {
+        // C(128, 64) fits u128 but the naive multiply-then-divide recurrence
+        // overflows the intermediate product; gcd-cancellation computes it.
+        // Validate via Pascal's identity (no huge literal): C(n,k)=C(n-1,k-1)+C(n-1,k).
+        assert_eq!(choose(128, 64), choose(127, 63) + choose(127, 64));
+        assert!(choose(128, 64) > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflows u128")]
+    fn choose_panics_fail_loud_on_overflow() {
+        // C(300, 150) is far beyond u128::MAX: fail loud, never wrap to a wrong count.
+        let _ = choose(300, 150);
     }
 
     #[test]
