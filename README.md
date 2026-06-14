@@ -111,7 +111,7 @@ Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ```toml
 [dependencies]
-ordvec = "0.4"
+ordvec = "0.5"
 
 # Or, to track unreleased `main`, use a git dependency instead:
 # ordvec = { git = "https://github.com/Fieldnote-Echo/ordvec" }
@@ -121,13 +121,17 @@ ordvec = "0.4"
 use ordvec::RankQuant;
 
 let dim = 1024;
+let n_docs = 10_000;
 let mut index = RankQuant::new(dim, 2);   // 2 bits/coord → 256 bytes/doc
 
 // `add` takes a flat, row-major buffer of `dim * n_docs` f32s.
-index.add(&doc_embeddings);               // &[f32], len = dim * n_docs
+// Replace this with your real embeddings.
+let doc_embeddings: Vec<f32> = vec![0.0; dim * n_docs];
+index.add(&doc_embeddings);
 
 // Asymmetric scan: full-precision queries vs bucketed docs (recommended).
-let results = index.search_asymmetric(&query_embeddings, 10); // len = dim * n_queries
+let query_embeddings: Vec<f32> = vec![0.0; dim * 4]; // 4 queries, row-major
+let results = index.search_asymmetric(&query_embeddings, 10);
 
 let top_ids = results.indices_for_query(0);     // top-10 doc ids for query 0
 let top_scores = results.scores_for_query(0);

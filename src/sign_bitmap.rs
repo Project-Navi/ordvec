@@ -31,6 +31,48 @@ use rayon::prelude::*;
 
 use crate::OrdvecError;
 
+/// Candidate sets for a query batch in CSR (compressed-sparse-row) form, as
+/// produced by [`SignBitmap::top_m_candidates_batched_serial_csr`].
+///
+/// Invariants (guaranteed and tested):
+/// - `offsets.len() == query_count() + 1`
+/// - `offsets[0] == 0`
+/// - `offsets` is monotonic non-decreasing
+/// - `*offsets.last().unwrap() == candidates.len()`
+/// - row `i` is `candidates[offsets[i]..offsets[i + 1]]`
+///
+/// Fields are `pub` for zero-copy hand-off (same precedent as
+/// [`crate::SearchResults`]); the invariants above are part of the stable API.
+#[derive(Clone, Debug)]
+#[must_use = "candidate generation scans the corpus; dropping the result discards that work"]
+pub struct CandidateBatch {
+    pub candidates: Vec<u32>,
+    pub offsets: Vec<usize>,
+}
+
+impl CandidateBatch {
+    /// Number of queries in the batch (`offsets.len() - 1`).
+    pub fn query_count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+    /// Candidate row for query `qi`, or `None` if `qi >= query_count()`.
+    pub fn candidates_for_query(&self, qi: usize) -> Option<&[u32]> {
+        let start = *self.offsets.get(qi)?;
+        let end = *self.offsets.get(qi + 1)?;
+        Some(&self.candidates[start..end])
+    }
+    /// `true` iff there are **no queries** (`query_count() == 0`) — NOT iff
+    /// there are no candidates. A 3-query batch with zero candidates per query
+    /// is not empty.
+    pub fn is_empty(&self) -> bool {
+        self.query_count() == 0
+    }
+    /// `true` iff there are no candidates across all queries.
+    pub fn has_no_candidates(&self) -> bool {
+        self.candidates.is_empty()
+    }
+}
+
 /// Index storing a 1-bit sign-cosine fingerprint per document.
 ///
 /// Storage: `dim / 8` bytes per doc. Dim must be a multiple of 64
@@ -238,6 +280,46 @@ impl SignBitmap {
                 head
             })
             .collect()
+    }
+
+    /// Serial (NO rayon) CSR candidate generation for a query batch. Returns a
+    /// [`CandidateBatch`]; row `qi` is the top-`m` candidate doc ids for query
+    /// `qi`, ordered `(hamming ascending, doc_id ascending)`, of length
+    /// `m.min(self.len())`.
+    ///
+    /// This is the caller-owned integration primitive: it never enters rayon,
+    /// so a caller (e.g. a database) parallelises across queries with its own
+    /// pool. (The existing [`Self::top_m_candidates_batched`] remains the
+    /// internally-parallel standalone convenience.)
+    ///
+    /// Track-1 implementation is intentionally naive — it loops the single-query
+    /// [`Self::top_m_candidates`] (which materialises a per-query `n` Hamming
+    /// row). A future release may replace the internals with streaming top-m
+    /// behind this frozen signature; the CSR output contract will not change.
+    #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
+    pub fn top_m_candidates_batched_serial_csr(&self, queries: &[f32], m: usize) -> CandidateBatch {
+        let dim = self.dim;
+        assert!(
+            queries.len().is_multiple_of(dim),
+            "queries length {} must be a multiple of dim {dim}",
+            queries.len()
+        );
+        crate::util::assert_all_finite(queries);
+        let nq = queries.len() / dim;
+        let m_eff = m.min(self.n_vectors);
+        let mut offsets = Vec::with_capacity(nq + 1);
+        offsets.push(0usize);
+        let mut candidates = Vec::with_capacity(nq.saturating_mul(m_eff));
+        for qi in 0..nq {
+            let q = &queries[qi * dim..(qi + 1) * dim];
+            let row = self.top_m_candidates(q, m);
+            candidates.extend_from_slice(&row);
+            offsets.push(candidates.len());
+        }
+        CandidateBatch {
+            candidates,
+            offsets,
+        }
     }
 
     /// Score every indexed document against one query and return dense
@@ -603,6 +685,39 @@ mod tests {
             .zip(d.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum()
+    }
+
+    #[test]
+    fn candidate_batch_helpers() {
+        use super::CandidateBatch;
+        let cb = CandidateBatch {
+            candidates: vec![5, 6, 7, 2],
+            offsets: vec![0, 2, 2, 4], // q0=[5,6], q1=[], q2=[7,2]
+        };
+        assert_eq!(cb.query_count(), 3);
+        assert!(!cb.is_empty());
+        assert!(!cb.has_no_candidates());
+        assert_eq!(cb.candidates_for_query(0), Some(&[5u32, 6][..]));
+        assert_eq!(cb.candidates_for_query(1), Some(&[][..]));
+        assert_eq!(cb.candidates_for_query(2), Some(&[7u32, 2][..]));
+        assert_eq!(cb.candidates_for_query(3), None);
+
+        let empty = CandidateBatch {
+            candidates: vec![],
+            offsets: vec![0],
+        };
+        assert_eq!(empty.query_count(), 0);
+        assert!(empty.is_empty());
+        assert!(empty.has_no_candidates());
+
+        // 2 queries, zero candidates each → NOT empty, but has_no_candidates.
+        let no_cands = CandidateBatch {
+            candidates: vec![],
+            offsets: vec![0, 0, 0],
+        };
+        assert_eq!(no_cands.query_count(), 2);
+        assert!(!no_cands.is_empty());
+        assert!(no_cands.has_no_candidates());
     }
 
     #[test]
