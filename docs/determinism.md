@@ -23,10 +23,14 @@ empty, the **allocating** search APIs return an empty result shape rather than
 padded sentinel hits.
 
 The caller-owned `RankQuant::search_asymmetric_subset_batched_serial_into` is the
-deliberate exception: it writes into a fixed, caller-sized rectangular
-`nq * k.min(len)` grid, so empty and underfull rows are **sentinel-padded**
-(`-1` indices / `NEG_INFINITY` scores) rather than shortened. The padded cells
-carry no ranking meaning; they pad the row to the fixed width.
+deliberate exception. Its output width is `out_k = k.min(index.len())` — clamped
+to the **index length** (`self.n_vectors`), NOT to each row's candidate-list
+length — so it writes a fixed rectangular `nq * out_k` grid (both output buffers
+must be exactly that length). Rows with fewer than `out_k` hits — underfull or
+empty candidate rows — are **sentinel-padded** (`-1` indices / `NEG_INFINITY`
+scores) to the fixed width rather than shortened. (Contrast the allocating subset
+APIs above, whose result length clamps to the candidate-list length.) The padded
+cells carry no ranking meaning.
 
 ## Backend Scope
 
