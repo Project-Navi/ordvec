@@ -80,10 +80,10 @@ pub use sign_bitmap::SignBitmap;
 #[doc(hidden)]
 pub use quant::search_asymmetric_byte_lut;
 
-// `subset_rerank_uses_simd` reports whether the asymmetric subset rerank takes a
-// SIMD kernel (vs the allocating scalar LUT fallback) for a `(dim, bits)` on
-// this CPU. `#[doc(hidden)]` — reachable for the allocation-free test so its
-// skip-gate cannot drift from the actual rerank dispatch.
+// `subset_rerank_uses_simd` is a test-only dispatch probe used by the crate's
+// own SIMD-parity tests. Gated behind the non-default `test-utils` feature and
+// excluded from semver guarantees — not a supported downstream API.
+#[cfg(feature = "test-utils")]
 #[doc(hidden)]
 pub use quant::subset_rerank_uses_simd;
 

@@ -228,10 +228,14 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
     }
 }
 
-/// Whether the asymmetric subset rerank takes a SIMD kernel (vs the scalar LUT
-/// fallback) for a **constructor-valid** `(dim, bits)` on this CPU. The scalar
-/// fallback allocates a per-query LUT, so the allocation-free steady-state
-/// guarantee of
+/// Test-only dispatch probe used by the crate's own SIMD-parity tests. Not a
+/// supported downstream API; gated behind the non-default `test-utils` feature
+/// and excluded from semver guarantees.
+///
+/// Returns `true` when the asymmetric subset rerank takes a SIMD kernel (vs the
+/// scalar LUT fallback) for a **constructor-valid** `(dim, bits)` on this CPU.
+/// The scalar fallback allocates a per-query LUT, so the allocation-free
+/// steady-state guarantee of
 /// [`RankQuant::search_asymmetric_subset_batched_serial_into`] holds exactly
 /// when this is `true`.
 ///
@@ -241,9 +245,9 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
 /// constructor-valid (e.g. `bits = 4` with `dim` a multiple of 8 but not of
 /// `2^bits = 16`).
 ///
-/// `#[doc(hidden)]` — a diagnostic for tests, not a stability surface. It reads
-/// the same [`select_simd_tier`] the rerank dispatch reads, so it cannot drift
-/// from the actual dispatch.
+/// It reads the same [`select_simd_tier`] the rerank dispatch reads, so it
+/// cannot drift from the actual dispatch.
+#[cfg(feature = "test-utils")]
 #[doc(hidden)]
 #[must_use]
 pub fn subset_rerank_uses_simd(dim: usize, bits: u8) -> bool {

@@ -11,8 +11,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "test-utils")]
 use ordvec::{RankQuant, SignBitmap, SubsetScratch};
+#[cfg(feature = "test-utils")]
 use rand::{RngExt, SeedableRng};
+#[cfg(feature = "test-utils")]
 use rand_chacha::ChaCha8Rng;
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -45,6 +48,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
+#[cfg(feature = "test-utils")]
 #[test]
 fn batched_into_is_truly_allocation_free_after_warmup() {
     let dim = 128usize;

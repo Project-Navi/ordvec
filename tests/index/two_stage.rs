@@ -1001,6 +1001,7 @@ fn batched_into_pads_mixed_full_and_underfull_rows() {
     }
 }
 
+#[cfg(feature = "test-utils")]
 #[test]
 fn subset_rerank_uses_simd_is_false_for_constructor_invalid_params() {
     // The dispatch probe must answer "the rerank will take a SIMD kernel" only

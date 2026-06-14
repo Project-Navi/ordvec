@@ -73,6 +73,10 @@ rand_chacha = "0.10"
 # target takes the scalar fallback. `experimental` exposes MultiBucketBitmap
 # (research scaffold), kept off the stable surface.
 experimental = []
+# `test-utils` exposes internal dispatch probes used by the crate's own integration
+# tests (e.g. the allocation-free guarantee check). Gated off the default surface
+# because these helpers are not part of the public API and carry no semver guarantee.
+test-utils = []
 
 [profile.release]
 lto = true

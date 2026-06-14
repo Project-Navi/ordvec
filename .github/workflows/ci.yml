@@ -185,6 +185,8 @@ jobs:
         run: cargo test
       - name: cargo test (experimental)
         run: cargo test --features experimental
+      - name: cargo test (test-utils)
+        run: cargo test --features test-utils
       - name: cargo test (no default features)
         run: cargo test --no-default-features
       - name: cargo build --release --example bench_rank
