@@ -34,7 +34,9 @@ vector on its own:
   the product / scalar / binary quantization most crates use.
 - **Predictable footprint.** Exactly `dim * bits / 8` bytes per document —
   known before you see any data (256 B at dim = 1024, 2-bit), with
-  `bits ∈ {1, 2, 4}` the size/recall knob.
+  `bits ∈ {1, 2, 4}` the size/recall knob. (`b = 8` is an opt-in
+  evidence/refinement width — asymmetric scoring at any dim, symmetric only
+  when `dim % 256 == 0` — not a broad retrieval mode.)
 - **Two-stage retrieval, built in.** A cheap bitmap / sign-popcount
   prefilter feeds an exact rerank — the coarse→fine pipeline ships as
   library primitives.

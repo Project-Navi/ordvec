@@ -13,7 +13,10 @@
 //!   coordinate, `2 * dim` bytes per document).
 //! - [`RankQuant`] buckets each rank into `1 << bits` equal-width
 //!   bins and packs `bits` bits per coordinate (`dim * bits / 8` bytes
-//!   per document).
+//!   per document). `bits ∈ {1, 2, 4}` are the stable retrieval widths;
+//!   `b = 8` is a capability-gated evidence/refinement width — asymmetric
+//!   scoring and code/projection generation at any dim, symmetric scoring
+//!   only when `dim % 256 == 0` (see [`RankQuant::new_asymmetric`]).
 //! - [`Bitmap`] stores a top-bucket bitmap per document (one bit
 //!   per coordinate) and scores via `popcount(Q AND D)`.
 //! - [`SignBitmap`] stores a sign bitmap per document (one bit per
