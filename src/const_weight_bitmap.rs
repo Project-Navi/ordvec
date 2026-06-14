@@ -198,8 +198,15 @@ impl PackedConstantWeightBitmap {
     /// Panics if the two bitmaps have different dimensions (their word counts
     /// then differ, which `and_popcount` itself rejects). The explicit `dim`
     /// check fails loud with the bitmap-specific message before the reduction.
+    /// Also panics if `dim > u32::MAX`: `and_popcount` accumulates into `u32`,
+    /// so a larger bitmap could overflow the popcount before the cast to `usize`.
     pub fn overlap(&self, other: &Self) -> usize {
         assert_eq!(self.dim, other.dim, "bitmap dimensions must match");
+        assert!(
+            self.dim <= u32::MAX as usize,
+            "bitmap dim {} exceeds u32::MAX; and_popcount accumulates in u32 and would overflow",
+            self.dim
+        );
         and_popcount(&self.words, &other.words) as usize
     }
 }
@@ -208,13 +215,25 @@ impl PackedConstantWeightBitmap {
 ///
 /// For each `width` in `widths`, builds the packed top-`width`-group bitmaps of
 /// `lhs` and `rhs` and returns their popcount overlap. The result is a vector
-/// parallel to `widths`. Both codes must share the same dimension (and, for
-/// `from_top_group` to be meaningful, the same spec).
+/// parallel to `widths`. Both codes must share the same spec (same `dim` and
+/// `buckets`): the top-group bitmaps are only comparable when the constant
+/// weight per bucket is identical across both codes.
+///
+/// # Panics
+/// Panics if `lhs` and `rhs` have different specs (dim or bucket count differs).
 pub fn top_group_overlap_vector(
     lhs: &BucketCode,
     rhs: &BucketCode,
     widths: &[usize],
 ) -> Vec<usize> {
+    assert_eq!(
+        lhs.spec(),
+        rhs.spec(),
+        "top_group_overlap_vector: lhs and rhs must share the same spec \
+         (dim and buckets must match); got lhs={:?}, rhs={:?}",
+        lhs.spec(),
+        rhs.spec()
+    );
     widths
         .iter()
         .map(|&width| {
@@ -311,6 +330,39 @@ impl BitmapNull {
         (threshold..=self.weight)
             .map(|overlap| self.fiber_count(overlap))
             .sum()
+    }
+
+    /// Exact upper-tail probability `P(overlap >= observed)` under the uniform
+    /// constant-weight null.
+    ///
+    /// Returns `tail_count(observed) / space_size` as an `f64`. This is the
+    /// fraction of all weight-`weight` bitmaps whose overlap with a fixed
+    /// weight-`weight` bitmap is at least `observed` — the exact hypergeometric
+    /// upper tail at the given threshold.
+    ///
+    /// Returns `0.0` for `observed > weight` (impossible overlap) and `1.0`
+    /// for `observed == 0` (all bitmaps overlap in `>= 0` positions).
+    ///
+    /// # Example
+    /// ```
+    /// # #[cfg(feature = "experimental")] {
+    /// use ordvec::const_weight_bitmap::BitmapNull;
+    /// let null = BitmapNull::new(10, 3);
+    /// // All bitmaps have overlap >= 0.
+    /// assert_eq!(null.tail_probability(0), 1.0);
+    /// // No bitmap overlaps in more than weight positions.
+    /// assert_eq!(null.tail_probability(4), 0.0);
+    /// // The probability is in [0, 1].
+    /// let p = null.tail_probability(2);
+    /// assert!(p >= 0.0 && p <= 1.0);
+    /// # }
+    /// ```
+    pub fn tail_probability(&self, observed: usize) -> f64 {
+        let space = self.space_size();
+        if space == 0 {
+            return 0.0;
+        }
+        self.tail_count(observed) as f64 / space as f64
     }
 }
 
@@ -581,6 +633,91 @@ mod tests {
         assert_eq!(null.tail_count(0), space);
         for threshold in 0..=5 {
             assert!(null.tail_count(threshold) <= space);
+        }
+    }
+
+    // ---- Finding 1: u32 overflow in overlap (assert dim <= u32::MAX) -------
+    //
+    // Constructing a bitmap with dim > u32::MAX would require ~512 MB of u64
+    // words, so we only test that the guard is present and correct for the
+    // reachable domain. The positive test confirms no panic at a large-but-safe
+    // dim (128 words = 8192 coords, well below u32::MAX).
+
+    #[test]
+    fn packed_overlap_within_u32_max_does_not_panic() {
+        // dim = 128 (well within u32::MAX) must not trigger the domain guard.
+        let values: Vec<u8> = (0..128).map(|i| (i % 4) as u8).collect();
+        let c = BucketCode::new(CompositionSpec::new(128, 4).unwrap(), values).unwrap();
+        let bm = PackedConstantWeightBitmap::from_top_group(&c, 1);
+        // Should not panic: dim=128 is far below u32::MAX.
+        let _ = bm.overlap(&bm);
+    }
+
+    // ---- Finding 2: Unenforced same-spec precondition ----------------------
+
+    #[test]
+    #[should_panic(expected = "lhs and rhs must share the same spec")]
+    fn top_group_overlap_vector_panics_on_mismatched_spec() {
+        // Two codes with the same dim but different bucket counts — different
+        // specs — must trigger the precondition assert.
+        let lhs = BucketCode::new(
+            CompositionSpec::new(8, 4).unwrap(),
+            vec![0, 0, 1, 1, 2, 2, 3, 3],
+        )
+        .unwrap();
+        let rhs = BucketCode::new(
+            CompositionSpec::new(8, 2).unwrap(),
+            vec![0, 0, 0, 0, 1, 1, 1, 1],
+        )
+        .unwrap();
+        let _ = top_group_overlap_vector(&lhs, &rhs, &[1]);
+    }
+
+    #[test]
+    fn top_group_overlap_vector_passes_on_matching_spec() {
+        // Two codes with the same spec must not trigger the precondition.
+        let lhs = code(&[0, 0, 1, 1, 2, 2, 3, 3]);
+        let rhs = code(&[0, 1, 1, 2, 2, 3, 3, 0]);
+        // Should not panic: same spec.
+        let _ = top_group_overlap_vector(&lhs, &rhs, &[1]);
+    }
+
+    // ---- Finding 3: BitmapNull::tail_probability ---------------------------
+
+    #[test]
+    fn tail_probability_boundary_values() {
+        // P(overlap >= 0) == 1.0 (every bitmap qualifies).
+        // P(overlap >= weight + 1) == 0.0 (no bitmap qualifies).
+        let null = BitmapNull::new(10, 3);
+        assert_eq!(null.tail_probability(0), 1.0);
+        assert_eq!(null.tail_probability(4), 0.0);
+    }
+
+    #[test]
+    fn tail_probability_known_value() {
+        // C(10, 3) = 120.  fiber_count(3) = C(3,3)*C(7,0) = 1.
+        // So P(overlap >= 3) = 1/120 = 0.008333...
+        let null = BitmapNull::new(10, 3);
+        let expected = 1.0_f64 / 120.0_f64;
+        let got = null.tail_probability(3);
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "tail_probability(3) expected {expected} got {got}"
+        );
+    }
+
+    #[test]
+    fn tail_probability_is_in_unit_interval_and_monotone() {
+        let null = BitmapNull::new(16, 4);
+        let mut prev = 1.0_f64;
+        for threshold in 0..=5 {
+            let p = null.tail_probability(threshold);
+            assert!(
+                (0.0..=1.0).contains(&p),
+                "probability out of [0,1] at threshold={threshold}"
+            );
+            assert!(p <= prev, "tail_probability must be non-increasing");
+            prev = p;
         }
     }
 }
