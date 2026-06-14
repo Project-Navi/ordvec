@@ -229,10 +229,17 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
 }
 
 /// Whether the asymmetric subset rerank takes a SIMD kernel (vs the scalar LUT
-/// fallback) for `(dim, bits)` on this CPU. The scalar fallback allocates a
-/// per-query LUT, so the allocation-free steady-state guarantee of
+/// fallback) for a **constructor-valid** `(dim, bits)` on this CPU. The scalar
+/// fallback allocates a per-query LUT, so the allocation-free steady-state
+/// guarantee of
 /// [`RankQuant::search_asymmetric_subset_batched_serial_into`] holds exactly
 /// when this is `true`.
+///
+/// Returns `false` for any `(dim, bits)` that [`RankQuant::new`] would reject,
+/// so it answers "the rerank will take a SIMD kernel" rather than acting as a
+/// raw tier probe: a SIMD tier can be selected for a `(dim, bits)` that is not
+/// constructor-valid (e.g. `bits = 4` with `dim` a multiple of 8 but not of
+/// `2^bits = 16`).
 ///
 /// `#[doc(hidden)]` — a diagnostic for tests, not a stability surface. It reads
 /// the same [`select_simd_tier`] the rerank dispatch reads, so it cannot drift
@@ -240,7 +247,8 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
 #[doc(hidden)]
 #[must_use]
 pub fn subset_rerank_uses_simd(dim: usize, bits: u8) -> bool {
-    !matches!(select_simd_tier(dim, bits), SimdTier::None)
+    RankQuant::validate_params(dim, bits).is_ok()
+        && !matches!(select_simd_tier(dim, bits), SimdTier::None)
 }
 
 impl RankQuant {

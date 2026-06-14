@@ -1000,3 +1000,34 @@ fn batched_into_pads_mixed_full_and_underfull_rows() {
         }
     }
 }
+
+#[test]
+fn subset_rerank_uses_simd_is_false_for_constructor_invalid_params() {
+    // The dispatch probe must answer "the rerank will take a SIMD kernel" only
+    // for `(dim, bits)` that `RankQuant::new` accepts. A SIMD tier can be
+    // selected for params the constructor rejects — `bits = 4` needs
+    // `dim % 2^bits == 0`, but the AVX2 b=4 lane invariant is only
+    // `dim % 8 == 0` — so the probe must not claim SIMD for an index you
+    // cannot even build.
+    for &(dim, bits) in &[(8usize, 4u8), (24, 4), (3, 1), (6, 4)] {
+        assert!(
+            RankQuant::validate_params(dim, bits).is_err(),
+            "fixture ({dim},{bits}) must be constructor-invalid"
+        );
+        assert!(
+            !ordvec::subset_rerank_uses_simd(dim, bits),
+            "probe must be false for constructor-invalid ({dim},{bits})"
+        );
+    }
+    // Invariant: wherever the probe claims SIMD, the params must be buildable.
+    for dim in 2..=130usize {
+        for bits in [1u8, 2, 4] {
+            if ordvec::subset_rerank_uses_simd(dim, bits) {
+                assert!(
+                    RankQuant::validate_params(dim, bits).is_ok(),
+                    "probe claimed SIMD for constructor-invalid ({dim},{bits})"
+                );
+            }
+        }
+    }
+}
