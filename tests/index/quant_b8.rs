@@ -396,6 +396,62 @@ fn b8_asymmetric_subset_optimized_path_parity() {
     }
 }
 
+// The b=8 routing also runs through the *batched* two-stage rerank entry point
+// (`search_asymmetric_subset_batched_serial`), which packs each query's
+// candidate row into a reused `SubsetScratch` and scans it with the same b=8
+// gather kernel. Cover both a non-256-aligned dim (384, exercising the
+// empirical asymmetric norm) and an aligned dim (768), with two queries that
+// have distinct candidate rows (exercising the CSR offsets and scratch reuse
+// across rows). Every returned score must match the per-doc naive reference.
+#[test]
+fn b8_asymmetric_subset_batched_serial_path_parity() {
+    for &dim in &[384usize, 768] {
+        let n = 256;
+        let corpus = random_corpus(8100 + dim as u64, n, dim);
+        let mut idx = RankQuant::new_asymmetric(dim, 8);
+        idx.add(&corpus);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(8200 + dim as u64);
+        let q0: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let q1: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let mut queries = q0.clone();
+        queries.extend_from_slice(&q1);
+
+        // Two distinct, intentionally-unsorted candidate rows in CSR layout.
+        let cand0: Vec<u32> = (0..n as u32).rev().step_by(3).collect();
+        let cand1: Vec<u32> = (0..n as u32).step_by(5).collect();
+        let mut candidates = cand0.clone();
+        candidates.extend_from_slice(&cand1);
+        let candidate_offsets = [0usize, cand0.len(), cand0.len() + cand1.len()];
+
+        let k = 10;
+        let res = idx.search_asymmetric_subset_batched_serial(
+            &queries,
+            &candidate_offsets,
+            &candidates,
+            k,
+        );
+
+        for (qi, q) in [&q0, &q1].into_iter().enumerate() {
+            let got_scores = res.scores_for_query(qi);
+            let got_indices = res.indices_for_query(qi);
+            for slot in 0..k {
+                let di = got_indices[slot];
+                if di < 0 {
+                    continue; // fewer candidates than k in this row
+                }
+                let di = di as usize;
+                let want = ref_b8_asymmetric(q, &corpus[di * dim..(di + 1) * dim]);
+                assert!(
+                    (got_scores[slot] - want).abs() < 1e-4,
+                    "dim={dim} q{qi} slot {slot} doc {di}: batched {} vs ref {want}",
+                    got_scores[slot]
+                );
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // validate_params: b=8 is code-valid at any dim; b ∈ {1,2,4} unchanged.
 // ---------------------------------------------------------------------
