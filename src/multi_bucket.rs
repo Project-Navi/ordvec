@@ -359,10 +359,13 @@ impl MultiBucketBitmap {
             .into_par_iter()
             .map(|di| {
                 let doc = &bitmaps[di * per_doc..(di + 1) * per_doc];
-                // One accumulation pass over this doc's bitmaps.
-                let mut table = vec![0u32; nb * nb];
-                contingency_accumulate(q_bitmaps, doc, nb, qpb, &mut table);
-                project_table(&table, weights)
+                // One accumulation pass over this doc's bitmaps. nb <= 16 ⇒
+                // nb*nb <= 256, so a stack table avoids a per-doc heap
+                // allocation inside the parallel map (allocator contention).
+                let mut table = [0u32; 256];
+                let table = &mut table[..nb * nb];
+                contingency_accumulate(q_bitmaps, doc, nb, qpb, table);
+                project_table(table, weights)
             })
             .collect()
     }
@@ -440,9 +443,12 @@ impl MultiBucketBitmap {
             .into_par_iter()
             .map(|di| {
                 let doc = &bitmaps[di * per_doc..(di + 1) * per_doc];
-                let mut table = vec![0u32; nb * nb];
-                contingency_accumulate_scalar(q_bitmaps, doc, nb, qpb, &mut table);
-                project_table(&table, weights)
+                // Stack table (nb*nb <= 256): no per-doc heap alloc in the
+                // parallel map.
+                let mut table = [0u32; 256];
+                let table = &mut table[..nb * nb];
+                contingency_accumulate_scalar(q_bitmaps, doc, nb, qpb, table);
+                project_table(table, weights)
             })
             .collect()
     }
