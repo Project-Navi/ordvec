@@ -739,10 +739,12 @@ mod tests {
     /// exercises the `find_out_of_range` skip branch (all u8 codes in range).
     #[test]
     fn large_nb_uses_scalar_and_skips_range_scan() {
+        // nb = 256 is the max (codes are u8) and still `> 255`, so the
+        // out-of-range scan is skipped and the scalar path is taken (nb > 16).
         let query = [0u8, 5, 200, 255];
         let doc = [255u8, 200, 5, 0];
-        let c = Contingency::new(&query, &doc, 300).unwrap();
-        assert_eq!(c.buckets(), 300);
+        let c = Contingency::new(&query, &doc, 256).unwrap();
+        assert_eq!(c.buckets(), 256);
         assert_eq!(c.count(0, 255), 1);
         assert_eq!(c.count(255, 0), 1);
         assert_eq!(c.count(200, 5), 1);
