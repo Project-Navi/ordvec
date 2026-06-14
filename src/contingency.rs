@@ -170,7 +170,9 @@ impl Contingency {
             // Iterate only the in-band columns instead of scanning every
             // column with an `abs_diff` filter.
             let start = qb.saturating_sub(radius);
-            let end = (qb + radius).min(self.buckets - 1);
+            // `saturating_add`: `radius` is an uncapped public parameter, so a
+            // near-`usize::MAX` value must not overflow before the `.min()`.
+            let end = qb.saturating_add(radius).min(self.buckets - 1);
             for db in start..=end {
                 total += self.counts[base + db];
             }
@@ -532,6 +534,16 @@ mod tests {
         assert_eq!(c.top_group_overlap(2), 3);
         assert_eq!(c.bucket_l1_distance(), 6);
         assert_eq!(c.rankquant_symmetric_score(), 4.0);
+    }
+
+    #[test]
+    fn band_agreement_saturates_on_huge_radius() {
+        // `radius` is uncapped public input; a near-`usize::MAX` value must not
+        // overflow `qb + radius`. It should clamp to the whole table.
+        let query = [0u8, 0, 1, 1, 2, 2, 3, 3];
+        let doc = [0u8, 1, 1, 2, 2, 3, 3, 0];
+        let c = Contingency::new(&query, &doc, 4).unwrap();
+        assert_eq!(c.band_agreement(usize::MAX), c.total_count());
     }
 
     /// `bucket_l1_distance` must not overflow for constructor-accepted inputs.
