@@ -226,7 +226,7 @@ fn check_dim(dim: usize) -> io::Result<()> {
     Ok(())
 }
 
-/// Dimension check for `.tvsb` sign-bitmap files.
+/// Dimension check for `.ovsb` sign-bitmap files.
 ///
 /// The `u16::MAX` ceiling in [`check_dim`] exists to honour
 /// [`crate::Rank`]'s `u16` rank-storage invariant. Sign bitmaps
@@ -237,11 +237,11 @@ fn check_dim(dim: usize) -> io::Result<()> {
 fn check_sign_bitmap_dim(dim: usize) -> io::Result<()> {
     if !(64..=MAX_SIGN_BITMAP_DIM).contains(&dim) {
         return Err(invalid(format!(
-            "TVSB dim {dim} out of range [64, {MAX_SIGN_BITMAP_DIM}]"
+            "OVSB dim {dim} out of range [64, {MAX_SIGN_BITMAP_DIM}]"
         )));
     }
     if !dim.is_multiple_of(64) {
-        return Err(invalid(format!("TVSB dim {dim} is not a multiple of 64")));
+        return Err(invalid(format!("OVSB dim {dim} is not a multiple of 64")));
     }
     Ok(())
 }
@@ -323,20 +323,20 @@ fn rank_payload_bytes(dim: usize, vector_count: usize) -> io::Result<usize> {
     vector_count
         .checked_mul(dim)
         .and_then(|x| x.checked_mul(2))
-        .ok_or_else(|| invalid("TVR1 payload size overflows usize"))
+        .ok_or_else(|| invalid("OVR1 payload size overflows usize"))
 }
 
 fn rankquant_bytes_per_vec(dim: usize, bits: u8) -> io::Result<usize> {
     dim.checked_mul(bits as usize)
         .map(|x| x / 8)
-        .ok_or_else(|| invalid("TVRQ bytes_per_vec overflows usize"))
+        .ok_or_else(|| invalid("OVRQ bytes_per_vec overflows usize"))
 }
 
 fn rankquant_payload_bytes(dim: usize, vector_count: usize, bits: u8) -> io::Result<usize> {
     let bytes_per_vec = rankquant_bytes_per_vec(dim, bits)?;
     vector_count
         .checked_mul(bytes_per_vec)
-        .ok_or_else(|| invalid("TVRQ payload size overflows usize"))
+        .ok_or_else(|| invalid("OVRQ payload size overflows usize"))
 }
 
 fn bitmap_payload_bytes(dim: usize, vector_count: usize, label: &str) -> io::Result<usize> {
@@ -373,15 +373,15 @@ fn probe_rank_metadata<R: Read + Seek>(
     reader: &mut R,
     file_size_bytes: u64,
 ) -> io::Result<IndexMetadata> {
-    let format_version = read_version(reader, "TVR1")?;
-    let dim = read_u32_le(reader, "TVR1", "dim")? as usize;
+    let format_version = read_version(reader, "OVR1")?;
+    let dim = read_u32_le(reader, "OVR1", "dim")? as usize;
     check_dim(dim)?;
-    let vector_count = read_u32_le(reader, "TVR1", "n_vectors")? as usize;
+    let vector_count = read_u32_le(reader, "OVR1", "n_vectors")? as usize;
     check_n_vectors(vector_count)?;
     let bytes_per_vec = rank_payload_bytes(dim, 1)?;
     let payload_bytes = rank_payload_bytes(dim, vector_count)?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(reader, "TVR1", file_size_bytes, payload_bytes)?;
+    check_payload_matches_file(reader, "OVR1", file_size_bytes, payload_bytes)?;
     Ok(IndexMetadata {
         kind: IndexKind::Rank,
         format_version,
@@ -397,33 +397,33 @@ fn probe_rankquant_metadata<R: Read + Seek>(
     reader: &mut R,
     file_size_bytes: u64,
 ) -> io::Result<IndexMetadata> {
-    let format_version = read_version(reader, "TVRQ")?;
-    let bits = read_u8_field(reader, "TVRQ", "bits")?;
+    let format_version = read_version(reader, "OVRQ")?;
+    let bits = read_u8_field(reader, "OVRQ", "bits")?;
     if !matches!(bits, 1 | 2 | 4) {
         return Err(invalid(format!(
-            "unsupported TVRQ bits: {bits} (expected 1, 2, or 4)"
+            "unsupported OVRQ bits: {bits} (expected 1, 2, or 4)"
         )));
     }
-    let dim = read_u32_le(reader, "TVRQ", "dim")? as usize;
+    let dim = read_u32_le(reader, "OVRQ", "dim")? as usize;
     check_dim(dim)?;
     let n_buckets = 1usize << bits;
     if !dim.is_multiple_of(n_buckets) {
         return Err(invalid(format!(
-            "TVRQ dim {dim} is not a multiple of 2^bits = {n_buckets}; \
+            "OVRQ dim {dim} is not a multiple of 2^bits = {n_buckets}; \
              constant-composition invariant violated"
         )));
     }
     let codes_per_byte = (8 / bits) as usize;
     if !dim.is_multiple_of(codes_per_byte) {
         return Err(invalid(format!(
-            "TVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}"
+            "OVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}"
         )));
     }
-    let vector_count = read_u32_le(reader, "TVRQ", "n_vectors")? as usize;
+    let vector_count = read_u32_le(reader, "OVRQ", "n_vectors")? as usize;
     check_n_vectors(vector_count)?;
     let payload_bytes = rankquant_payload_bytes(dim, vector_count, bits)?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(reader, "TVRQ", file_size_bytes, payload_bytes)?;
+    check_payload_matches_file(reader, "OVRQ", file_size_bytes, payload_bytes)?;
     let bytes_per_vec = rankquant_bytes_per_vec(dim, bits)?;
     Ok(IndexMetadata {
         kind: IndexKind::RankQuant,
@@ -440,23 +440,23 @@ fn probe_bitmap_metadata<R: Read + Seek>(
     reader: &mut R,
     file_size_bytes: u64,
 ) -> io::Result<IndexMetadata> {
-    let format_version = read_version(reader, "TVBM")?;
-    let dim = read_u32_le(reader, "TVBM", "dim")? as usize;
+    let format_version = read_version(reader, "OVBM")?;
+    let dim = read_u32_le(reader, "OVBM", "dim")? as usize;
     check_dim(dim)?;
     if !dim.is_multiple_of(64) {
-        return Err(invalid(format!("TVBM dim {dim} is not a multiple of 64")));
+        return Err(invalid(format!("OVBM dim {dim} is not a multiple of 64")));
     }
-    let n_top = read_u32_le(reader, "TVBM", "n_top")? as usize;
+    let n_top = read_u32_le(reader, "OVBM", "n_top")? as usize;
     if n_top == 0 || n_top >= dim {
         return Err(invalid(format!(
-            "TVBM n_top {n_top} must satisfy 0 < n_top < dim ({dim})"
+            "OVBM n_top {n_top} must satisfy 0 < n_top < dim ({dim})"
         )));
     }
-    let vector_count = read_u32_le(reader, "TVBM", "n_vectors")? as usize;
+    let vector_count = read_u32_le(reader, "OVBM", "n_vectors")? as usize;
     check_n_vectors(vector_count)?;
-    let payload_bytes = bitmap_payload_bytes(dim, vector_count, "TVBM")?;
+    let payload_bytes = bitmap_payload_bytes(dim, vector_count, "OVBM")?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(reader, "TVBM", file_size_bytes, payload_bytes)?;
+    check_payload_matches_file(reader, "OVBM", file_size_bytes, payload_bytes)?;
     Ok(IndexMetadata {
         kind: IndexKind::Bitmap,
         format_version,
@@ -472,14 +472,14 @@ fn probe_sign_bitmap_metadata<R: Read + Seek>(
     reader: &mut R,
     file_size_bytes: u64,
 ) -> io::Result<IndexMetadata> {
-    let format_version = read_version(reader, "TVSB")?;
-    let dim = read_u32_le(reader, "TVSB", "dim")? as usize;
+    let format_version = read_version(reader, "OVSB")?;
+    let dim = read_u32_le(reader, "OVSB", "dim")? as usize;
     check_sign_bitmap_dim(dim)?;
-    let vector_count = read_u32_le(reader, "TVSB", "n_vectors")? as usize;
+    let vector_count = read_u32_le(reader, "OVSB", "n_vectors")? as usize;
     check_n_vectors(vector_count)?;
-    let payload_bytes = bitmap_payload_bytes(dim, vector_count, "TVSB")?;
+    let payload_bytes = bitmap_payload_bytes(dim, vector_count, "OVSB")?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(reader, "TVSB", file_size_bytes, payload_bytes)?;
+    check_payload_matches_file(reader, "OVSB", file_size_bytes, payload_bytes)?;
     Ok(IndexMetadata {
         kind: IndexKind::SignBitmap,
         format_version,
@@ -530,18 +530,18 @@ pub(crate) fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "TVR1")?;
+    let magic = read_magic(&mut f, "OVR1")?;
     if &magic != OVR_MAGIC && &magic != TVR_MAGIC {
         return Err(invalid("not an OVR1/TVR1 (Rank) file: wrong magic"));
     }
-    read_version(&mut f, "TVR1")?;
-    let dim = read_u32_le(&mut f, "TVR1", "dim")? as usize;
+    read_version(&mut f, "OVR1")?;
+    let dim = read_u32_le(&mut f, "OVR1", "dim")? as usize;
     check_dim(dim)?;
-    let n_vectors = read_u32_le(&mut f, "TVR1", "n_vectors")? as usize;
+    let n_vectors = read_u32_le(&mut f, "OVR1", "n_vectors")? as usize;
     check_n_vectors(n_vectors)?;
     let payload_bytes = rank_payload_bytes(dim, n_vectors)?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(&mut f, "TVR1", file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, "OVR1", file_len, payload_bytes)?;
     // `payload_bytes == n_vectors * dim * 2`, so the u16 element count is
     // `payload_bytes / 2`. Read directly into a fallibly reserved Vec<u16>
     // instead of allocating a byte buffer and `.collect()`-ing it — the old
@@ -569,12 +569,12 @@ pub(crate) fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec
             let ri = r as usize;
             if ri >= dim {
                 return Err(invalid(format!(
-                    "TVR1 rank value {r} >= dim ({dim}); ranks must be a permutation of [0, dim)"
+                    "OVR1 rank value {r} >= dim ({dim}); ranks must be a permutation of [0, dim)"
                 )));
             }
             if seen[ri] == stamp {
                 return Err(invalid(format!(
-                    "TVR1 row {row_idx} is not a permutation of [0, dim): value {r} repeats"
+                    "OVR1 row {row_idx} is not a permutation of [0, dim): value {r} repeats"
                 )));
             }
             seen[ri] = stamp;
@@ -622,18 +622,18 @@ pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, u
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "TVRQ")?;
+    let magic = read_magic(&mut f, "OVRQ")?;
     if &magic != OVRQ_MAGIC && &magic != TVRQ_MAGIC {
         return Err(invalid("not an OVRQ/TVRQ (RankQuant) file: wrong magic"));
     }
-    read_version(&mut f, "TVRQ")?;
-    let bits = read_u8_field(&mut f, "TVRQ", "bits")?;
+    read_version(&mut f, "OVRQ")?;
+    let bits = read_u8_field(&mut f, "OVRQ", "bits")?;
     if !matches!(bits, 1 | 2 | 4) {
         return Err(invalid(format!(
-            "unsupported TVRQ bits: {bits} (expected 1, 2, or 4)"
+            "unsupported OVRQ bits: {bits} (expected 1, 2, or 4)"
         )));
     }
-    let dim = read_u32_le(&mut f, "TVRQ", "dim")? as usize;
+    let dim = read_u32_le(&mut f, "OVRQ", "dim")? as usize;
     check_dim(dim)?;
     // Constant-composition invariants (documented at module level and
     // enforced by `RankQuant::new`): `dim` must be a multiple of
@@ -645,21 +645,21 @@ pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, u
     let n_buckets = 1usize << bits;
     if !dim.is_multiple_of(n_buckets) {
         return Err(invalid(format!(
-            "TVRQ dim {dim} is not a multiple of 2^bits = {n_buckets}; \
+            "OVRQ dim {dim} is not a multiple of 2^bits = {n_buckets}; \
              constant-composition invariant violated"
         )));
     }
     let codes_per_byte = (8 / bits) as usize;
     if !dim.is_multiple_of(codes_per_byte) {
         return Err(invalid(format!(
-            "TVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}"
+            "OVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}"
         )));
     }
-    let n_vectors = read_u32_le(&mut f, "TVRQ", "n_vectors")? as usize;
+    let n_vectors = read_u32_le(&mut f, "OVRQ", "n_vectors")? as usize;
     check_n_vectors(n_vectors)?;
     let payload_bytes = rankquant_payload_bytes(dim, n_vectors, bits)?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(&mut f, "TVRQ", file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, "OVRQ", file_len, payload_bytes)?;
     let mut packed = try_alloc_zeroed(payload_bytes)?;
     f.read_exact(&mut packed)?;
     // Constant-composition invariant: every document must place exactly
@@ -684,7 +684,7 @@ pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, u
         for (bucket, &count) in hist[..n_buckets].iter().enumerate() {
             if count != expected_per_bucket {
                 return Err(invalid(format!(
-                    "TVRQ row {row_idx} violates constant composition: bucket {bucket} \
+                    "OVRQ row {row_idx} violates constant composition: bucket {bucket} \
                      has {count} codes, expected {expected_per_bucket} (= dim / 2^bits)"
                 )));
             }
@@ -709,7 +709,7 @@ pub(crate) fn write_bitmap(
     // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
     // depth; a rejected write must not truncate an existing file). Mirrors
     // load_bitmap.
-    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "TVBM")?;
+    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVBM")?;
     check_payload_bytes(payload_bytes)?;
     assert_eq!(bitmaps.len(), payload_bytes / 8);
     let mut f = BufWriter::new(File::create(path)?);
@@ -734,28 +734,28 @@ pub(crate) fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, u
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "TVBM")?;
+    let magic = read_magic(&mut f, "OVBM")?;
     if &magic != OVBM_MAGIC && &magic != TVBM_MAGIC {
         return Err(invalid("not an OVBM/TVBM (Bitmap) file: wrong magic"));
     }
-    read_version(&mut f, "TVBM")?;
-    let dim = read_u32_le(&mut f, "TVBM", "dim")? as usize;
+    read_version(&mut f, "OVBM")?;
+    let dim = read_u32_le(&mut f, "OVBM", "dim")? as usize;
     check_dim(dim)?;
     if !dim.is_multiple_of(64) {
-        return Err(invalid(format!("TVBM dim {dim} is not a multiple of 64")));
+        return Err(invalid(format!("OVBM dim {dim} is not a multiple of 64")));
     }
-    let n_top = read_u32_le(&mut f, "TVBM", "n_top")? as usize;
+    let n_top = read_u32_le(&mut f, "OVBM", "n_top")? as usize;
     if n_top == 0 || n_top >= dim {
         return Err(invalid(format!(
-            "TVBM n_top {n_top} must satisfy 0 < n_top < dim ({dim})"
+            "OVBM n_top {n_top} must satisfy 0 < n_top < dim ({dim})"
         )));
     }
-    let n_vectors = read_u32_le(&mut f, "TVBM", "n_vectors")? as usize;
+    let n_vectors = read_u32_le(&mut f, "OVBM", "n_vectors")? as usize;
     check_n_vectors(n_vectors)?;
     let qpv = dim / 64;
-    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "TVBM")?;
+    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVBM")?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(&mut f, "TVBM", file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, "OVBM", file_len, payload_bytes)?;
     // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.
@@ -770,26 +770,26 @@ pub(crate) fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, u
         let pop: u32 = row.iter().map(|w| w.count_ones()).sum();
         if pop as usize != n_top {
             return Err(invalid(format!(
-                "TVBM row {row_idx} has {pop} bits set, expected n_top = {n_top}"
+                "OVBM row {row_idx} has {pop} bits set, expected n_top = {n_top}"
             )));
         }
     }
     Ok((dim, n_top, n_vectors, bitmaps))
 }
 
-/// Persist a [`crate::SignBitmap`] payload to a `.tvsb` file.
+/// Persist a [`crate::SignBitmap`] payload to a `.ovsb` file.
 ///
 /// On-disk layout (little-endian throughout):
 ///
 /// | offset | bytes | field                       |
 /// |-------:|:-----:|-----------------------------|
-/// | 0      | 4     | magic = `TVSB`              |
+/// | 0      | 4     | magic = `OVSB`              |
 /// | 4      | 1     | version = 1                 |
 /// | 5      | 4     | `dim` (u32)                 |
 /// | 9      | 4     | `n_vectors` (u32)           |
 /// | 13     | …     | `n_vectors * dim/64` u64s   |
 ///
-/// 13-byte header — one u32 shorter than `TVBM` because SignBitmap
+/// 13-byte header — one u32 shorter than `OVBM` because SignBitmap
 /// has no `n_top` parameter (the threshold is fixed at zero).
 pub(crate) fn write_sign_bitmap(
     path: impl AsRef<Path>,
@@ -800,7 +800,7 @@ pub(crate) fn write_sign_bitmap(
     // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
     // depth; a rejected write must not truncate an existing file). Mirrors
     // load_sign_bitmap.
-    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "TVSB")?;
+    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVSB")?;
     check_payload_bytes(payload_bytes)?;
     assert_eq!(bitmaps.len(), payload_bytes / 8);
     let mut f = BufWriter::new(File::create(path)?);
@@ -815,7 +815,7 @@ pub(crate) fn write_sign_bitmap(
     Ok(())
 }
 
-/// Load a `.tvsb` file written by `write_sign_bitmap`.
+/// Load a `.ovsb` file written by `write_sign_bitmap`.
 ///
 /// Validates magic, version, dim (must be in
 /// `[64, MAX_SIGN_BITMAP_DIM]` and a multiple of 64), and `n_vectors`
@@ -839,18 +839,18 @@ pub(crate) fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usi
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "TVSB")?;
+    let magic = read_magic(&mut f, "OVSB")?;
     if &magic != OVSB_MAGIC && &magic != TVSB_MAGIC {
         return Err(invalid("not an OVSB/TVSB (SignBitmap) file: wrong magic"));
     }
-    read_version(&mut f, "TVSB")?;
-    let dim = read_u32_le(&mut f, "TVSB", "dim")? as usize;
+    read_version(&mut f, "OVSB")?;
+    let dim = read_u32_le(&mut f, "OVSB", "dim")? as usize;
     check_sign_bitmap_dim(dim)?;
-    let n_vectors = read_u32_le(&mut f, "TVSB", "n_vectors")? as usize;
+    let n_vectors = read_u32_le(&mut f, "OVSB", "n_vectors")? as usize;
     check_n_vectors(n_vectors)?;
-    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "TVSB")?;
+    let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVSB")?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(&mut f, "TVSB", file_len, payload_bytes)?;
+    check_payload_matches_file(&mut f, "OVSB", file_len, payload_bytes)?;
     // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.
@@ -1158,7 +1158,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
         assert!(
             err.to_string()
-                .contains("TVR1 header truncated while reading dim"),
+                .contains("OVR1 header truncated while reading dim"),
             "unexpected error: {err}"
         );
         std::fs::remove_file(&truncated).ok();
@@ -1166,7 +1166,7 @@ mod tests {
         let length_mismatch = forge("length_mismatch", &rank_header(8, 1));
         assert_err_contains(
             probe_index_metadata(&length_mismatch),
-            "TVR1 payload truncated",
+            "OVR1 payload truncated",
         );
         std::fs::remove_file(&length_mismatch).ok();
 
@@ -1196,12 +1196,12 @@ mod tests {
             (
                 "rank_version",
                 b"TVR1".to_vec(),
-                "TVR1 header truncated while reading version",
+                "OVR1 header truncated while reading version",
             ),
             (
                 "rankquant_bits",
                 b"TVRQ\x01".to_vec(),
-                "TVRQ header truncated while reading bits",
+                "OVRQ header truncated while reading bits",
             ),
             (
                 "bitmap_n_top",
@@ -1212,7 +1212,7 @@ mod tests {
                     v.extend_from_slice(&64u32.to_le_bytes());
                     v
                 },
-                "TVBM header truncated while reading n_top",
+                "OVBM header truncated while reading n_top",
             ),
             (
                 "sign_n_vectors",
@@ -1223,7 +1223,7 @@ mod tests {
                     v.extend_from_slice(&64u32.to_le_bytes());
                     v
                 },
-                "TVSB header truncated while reading n_vectors",
+                "OVSB header truncated while reading n_vectors",
             ),
         ];
         for (suffix, bytes, expected) in cases {
@@ -1236,24 +1236,24 @@ mod tests {
     #[test]
     fn probe_reports_distinct_payload_truncation_and_trailing_bytes_for_all_formats() {
         let cases: [(&str, Vec<u8>, Vec<u8>, &str); 4] = [
-            ("rank", rank_header(8, 1), rank_header(8, 0), "TVR1"),
+            ("rank", rank_header(8, 1), rank_header(8, 0), "OVR1"),
             (
                 "rankquant",
                 rankquant_header(2, 8, 1),
                 rankquant_header(2, 8, 0),
-                "TVRQ",
+                "OVRQ",
             ),
             (
                 "bitmap",
                 bitmap_header(64, 16, 1),
                 bitmap_header(64, 16, 0),
-                "TVBM",
+                "OVBM",
             ),
             (
                 "sign_bitmap",
                 sign_bitmap_header(64, 1),
                 sign_bitmap_header(64, 0),
-                "TVSB",
+                "OVSB",
             ),
         ];
 

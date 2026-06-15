@@ -98,7 +98,7 @@ fn load_rank_rejects_non_permutation_row() {
     // Positive control: the valid file round-trips.
     assert!(Rank::load(&p).is_ok(), "valid Rank file must load");
 
-    // TVR1 header is 13 bytes; payload is u16 LE ranks. Force ranks[1] ==
+    // OVR1 header is 13 bytes; payload is u16 LE ranks. Force ranks[1] ==
     // ranks[0] in row 0, turning the row into a non-permutation (a repeat).
     let mut bytes = read_bytes(&p);
     let (a, b) = (13usize, 15usize); // byte offsets of the first two u16 ranks
@@ -126,7 +126,7 @@ fn load_rankquant_rejects_skewed_composition() {
         "valid RankQuant file must load"
     );
 
-    // TVRQ header is 14 bytes. Zero the entire packed payload so every
+    // OVRQ header is 14 bytes. Zero the entire packed payload so every
     // coordinate decodes to bucket 0 — a maximally skewed composition that
     // violates the dim/2^bits-per-bucket invariant on the very first row.
     let mut bytes = read_bytes(&p);
@@ -153,7 +153,7 @@ fn load_bitmap_rejects_wrong_popcount_row() {
     idx.write(&p).unwrap();
     assert!(Bitmap::load(&p).is_ok(), "valid Bitmap file must load");
 
-    // TVBM header is 17 bytes; payload is u64 LE words, qpv = dim/64 per doc.
+    // OVBM header is 17 bytes; payload is u64 LE words, qpv = dim/64 per doc.
     // Zero the first document's whole row so its popcount becomes 0 != n_top.
     let qpv = D / 64;
     let mut bytes = read_bytes(&p);
@@ -183,7 +183,7 @@ fn load_sign_bitmap_accepts_any_bit_pattern() {
     let p = tmp("sb_any");
     idx.write(&p).unwrap();
 
-    // TVSB header is 13 bytes. Flip bits across the payload; the result is
+    // OVSB header is 13 bytes. Flip bits across the payload; the result is
     // still a structurally valid sign bitmap of the same shape.
     let mut bytes = read_bytes(&p);
     for byte in bytes.iter_mut().skip(13) {
@@ -208,29 +208,29 @@ fn public_loaders_report_stable_malformed_payload_context() {
     let bitmap = bitmap_payload_cases(64, 16);
     let sign_bitmap = sign_bitmap_payload_cases(64);
     let cases: [(&str, Vec<u8>, Vec<u8>, &str); 4] = [
-        ("rank", rank.0, rank.1, "TVR1"),
-        ("rankquant", rankquant.0, rankquant.1, "TVRQ"),
-        ("bitmap", bitmap.0, bitmap.1, "TVBM"),
-        ("sign_bitmap", sign_bitmap.0, sign_bitmap.1, "TVSB"),
+        ("rank", rank.0, rank.1, "OVR1"),
+        ("rankquant", rankquant.0, rankquant.1, "OVRQ"),
+        ("bitmap", bitmap.0, bitmap.1, "OVBM"),
+        ("sign_bitmap", sign_bitmap.0, sign_bitmap.1, "OVSB"),
     ];
 
     for (suffix, truncated_header, mut trailing_bytes, label) in cases {
         let truncated = tmp(&format!("{suffix}_truncated_context"));
         write_bytes(&truncated, &truncated_header);
         match label {
-            "TVR1" => assert_load_err_contains(
+            "OVR1" => assert_load_err_contains(
                 Rank::load(&truncated),
                 &format!("{label} payload truncated"),
             ),
-            "TVRQ" => assert_load_err_contains(
+            "OVRQ" => assert_load_err_contains(
                 RankQuant::load(&truncated),
                 &format!("{label} payload truncated"),
             ),
-            "TVBM" => assert_load_err_contains(
+            "OVBM" => assert_load_err_contains(
                 Bitmap::load(&truncated),
                 &format!("{label} payload truncated"),
             ),
-            "TVSB" => assert_load_err_contains(
+            "OVSB" => assert_load_err_contains(
                 SignBitmap::load(&truncated),
                 &format!("{label} payload truncated"),
             ),
@@ -242,19 +242,19 @@ fn public_loaders_report_stable_malformed_payload_context() {
         let trailing = tmp(&format!("{suffix}_trailing_context"));
         write_bytes(&trailing, &trailing_bytes);
         match label {
-            "TVR1" => assert_load_err_contains(
+            "OVR1" => assert_load_err_contains(
                 Rank::load(&trailing),
                 &format!("{label} payload has trailing bytes"),
             ),
-            "TVRQ" => assert_load_err_contains(
+            "OVRQ" => assert_load_err_contains(
                 RankQuant::load(&trailing),
                 &format!("{label} payload has trailing bytes"),
             ),
-            "TVBM" => assert_load_err_contains(
+            "OVBM" => assert_load_err_contains(
                 Bitmap::load(&trailing),
                 &format!("{label} payload has trailing bytes"),
             ),
-            "TVSB" => assert_load_err_contains(
+            "OVSB" => assert_load_err_contains(
                 SignBitmap::load(&trailing),
                 &format!("{label} payload has trailing bytes"),
             ),
