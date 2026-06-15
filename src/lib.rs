@@ -20,6 +20,14 @@
 //!   coordinate, set when the coordinate is positive) for sign-cosine
 //!   candidate generation.
 //!
+//! These four families are the retrieval surface. The `experimental`
+//! `MultiBucketBitmap` indexed contingency / projection API is a niche
+//! research/analysis substrate for the bilinear bucket-overlap decomposition —
+//! it is **not** a default single-score retrieval path and was never
+//! kernel-optimized for that role. For primary nearest-neighbour retrieval use
+//! [`RankQuant`], [`Bitmap`], or the two-stage candidate-generation → rerank
+//! flow instead.
+//!
 //! The [`Bitmap`] candidate score is the implementation surface with the
 //! strongest formal story: in the companion Lean formalization, literal
 //! constant-weight bitmap overlap is the query-preserving quotient statistic,
