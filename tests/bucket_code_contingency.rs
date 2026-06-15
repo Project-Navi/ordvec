@@ -1,42 +1,16 @@
 //! Cross-API integration: the codes [`BucketCode::from_vector`] produces are
-//! exactly what the stateless dense-code contingency surface (`Contingency::new`,
-//! issue #219) consumes.
+//! exactly what the stateless dense-code contingency surface
+//! ([`Contingency::new`], issue #219) consumes.
 //!
-//! `Contingency` lands in ordvec via the sibling #219 PR (it is not yet in this
-//! branch's tree). Rather than depend on an unmerged module, this test pins the
-//! *contract* `Contingency::new` enforces — every code is a valid bucket id
-//! `< nb`, and `Contingency::new(codes, codes, nb)` over a self-pair has full
-//! diagonal agreement (`diagonal_agreement() == dim`, off-diagonal cells empty).
-//! It reproduces the exact `O(dim)` histogram `Contingency::new` builds, so when
-//! #219 merges, swapping this reference for the real `Contingency::new` is a
-//! mechanical change. The acceptance property (#220 ⇄ #219) is the same:
-//! `from_vector` output is a valid, balanced contingency input.
+//! `from_vector` output is a valid, balanced contingency input: every code is a
+//! valid bucket id `< nb`, and a self-pair (`Contingency::new(codes, codes, nb)`)
+//! has full diagonal agreement (`diagonal_agreement() == dim`). This pins the
+//! `#220 ⇄ #219` acceptance property directly against the real `Contingency`.
 
 #![cfg(feature = "experimental")]
 
 use ordvec::bucket_code::BucketCode;
-
-/// Reference re-implementation of `Contingency::new`'s histogram pass and the
-/// `diagonal_agreement` projection (verbatim algebra from #219's
-/// `contingency.rs`). Returns `Err(bad_code)` on the first out-of-range code —
-/// exactly the rejection `Contingency::new` performs — else the trace of the
-/// `nb × nb` table.
-fn contingency_diagonal_agreement(q: &[u8], d: &[u8], nb: usize) -> Result<u32, u8> {
-    assert_eq!(q.len(), d.len(), "query and doc must share dim");
-    assert!(nb > 0, "nb must be > 0");
-    let cap = nb as u32;
-    let mut counts = vec![0u32; nb * nb];
-    for (&qb, &db) in q.iter().zip(d.iter()) {
-        if qb as u32 >= cap {
-            return Err(qb);
-        }
-        if db as u32 >= cap {
-            return Err(db);
-        }
-        counts[qb as usize * nb + db as usize] += 1;
-    }
-    Ok((0..nb).map(|b| counts[b * nb + b]).sum())
-}
+use ordvec::Contingency;
 
 #[test]
 fn from_vector_codes_feed_contingency_self_pair_full_diagonal() {
@@ -54,11 +28,13 @@ fn from_vector_codes_feed_contingency_self_pair_full_diagonal() {
     assert!(codes.iter().all(|&c| (c as usize) < nb));
     assert_eq!(codes.len(), dim);
 
-    // Self-pair: Contingency::new(codes, codes, nb) puts every coordinate on the
-    // diagonal, so diagonal_agreement == dim and nothing falls off-diagonal.
-    let diag = contingency_diagonal_agreement(codes, codes, nb).unwrap();
+    // Self-pair: `Contingency::new(codes, codes, nb)` puts every coordinate on
+    // the diagonal, so `diagonal_agreement() == dim`.
+    let cont = Contingency::new(codes, codes, nb)
+        .expect("from_vector codes must be a valid contingency input");
     assert_eq!(
-        diag as usize, dim,
+        cont.diagonal_agreement() as usize,
+        dim,
         "self-pair must agree on every coordinate"
     );
 }
@@ -70,13 +46,13 @@ fn from_vector_codes_are_in_range_for_all_supported_bits() {
     for bits in [1u8, 2, 4] {
         let nb = 1usize << bits;
         let code = BucketCode::from_vector(dim, bits, &v).unwrap();
-        // Cross-pair against a reversed copy: still a valid Contingency input
-        // (every code < nb), so the histogram build never hits the range guard.
+        // Cross-pair against a reversed copy: still a valid `Contingency` input
+        // (every code < nb), so `Contingency::new` never hits its range guard.
         let mut rev: Vec<u8> = code.codes().to_vec();
         rev.reverse();
-        let diag = contingency_diagonal_agreement(code.codes(), &rev, nb)
-            .expect("from_vector codes must be valid contingency input");
+        let cont = Contingency::new(code.codes(), &rev, nb)
+            .expect("from_vector codes must be a valid contingency input");
         // Diagonal agreement is bounded by dim and well-defined (sanity).
-        assert!((diag as usize) <= dim);
+        assert!((cont.diagonal_agreement() as usize) <= dim);
     }
 }
