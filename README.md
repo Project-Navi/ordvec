@@ -141,6 +141,49 @@ For the two-stage compressed-scan path (`Bitmap` / `SignBitmap` candidate
 generation → `RankQuant` rerank) and the full mode comparison, see
 [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
+### Caller-owned serial two-stage (DB / runtime integration)
+
+For runtimes that own their own parallelism — an embedded vector DB driving a
+bounded thread pool, or a binding releasing the GIL — ordvec exposes a
+**no-rayon** serial two-stage path so the *caller* schedules the work, with an
+**allocation-free rerank step** (`_into`, on the AVX-512/AVX2 path) for the
+steady-state hot loop:
+
+```rust
+use ordvec::{RankQuant, SignBitmap, SubsetScratch};
+// Shape sketch (not standalone): `rq: RankQuant` and `sign: SignBitmap` are
+// built and `add`-ed as in the Quickstart above; `queries` is your flat
+// `dim * nq` f32 batch, `m` the shortlist size, `k` the top-k.
+// Stage 1 — serial CSR candidate generation (never enters rayon):
+let cb = sign.top_m_candidates_batched_serial_csr(&queries, m); // CandidateBatch { offsets, candidates }
+// Stage 2 — rerank into CALLER-OWNED buffers with a reusable scratch:
+let nq = queries.len() / dim;
+let out_k = k.min(rq.len());
+let mut scratch = SubsetScratch::new();               // reuse across batches
+let mut out_scores = vec![f32::NEG_INFINITY; nq * out_k];
+let mut out_indices = vec![-1i64; nq * out_k];
+rq.search_asymmetric_subset_batched_serial_into(
+    &queries, &cb.offsets, &cb.candidates, k,
+    &mut scratch, &mut out_scores, &mut out_indices,
+);
+```
+
+Contract: candidates are **CSR** (`offsets.len() == nq + 1`; row `qi` is
+`candidates[offsets[qi]..offsets[qi+1]]`; rows need **not** be sorted). Output is
+**rectangular** `nq * out_k` and **sentinel-padded** (`-1` / `NEG_INFINITY`) for
+underfull rows — size both buffers to `nq * k.min(index.len())`. Scores, row ids,
+and the deterministic tie policy (`score desc, global row-id asc`) match the
+single-query `search_asymmetric_subset`. **Only the `_into` rerank step is
+allocation-free** — on the **AVX-512 / AVX2** SIMD path, and only on repeated
+calls of the *same* batch shape — reusing the warmed `SubsetScratch` and your
+output buffers (no per-row alloc, no whole-buffer preclear). The scalar fallback
+(no AVX2, e.g. aarch64) allocates a per-query scoring LUT. Stage 1
+(`top_m_candidates_batched_serial_csr`) also allocates a fresh `CandidateBatch`
+each call. Neither primitive enters rayon —
+partition the query batch and call `_into` once per worker range from your own
+pool. A focused decomposition benchmark lives in
+[`examples/two_stage_bench.rs`](examples/two_stage_bench.rs).
+
 ### Python
 
 The same `Rank` / `RankQuant` / `Bitmap` / `SignBitmap` API is available from

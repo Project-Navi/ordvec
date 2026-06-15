@@ -312,6 +312,33 @@ fn select_simd_tier(dim: usize, bits: u8) -> SimdTier {
     }
 }
 
+/// Test-only dispatch probe used by the crate's own SIMD-parity tests. Not a
+/// supported downstream API; gated behind the non-default `test-utils` feature
+/// and excluded from semver guarantees.
+///
+/// Returns `true` when the asymmetric subset rerank takes a SIMD kernel (vs the
+/// scalar LUT fallback) for a **constructor-valid** `(dim, bits)` on this CPU.
+/// The scalar fallback allocates a per-query LUT, so the allocation-free
+/// steady-state guarantee of
+/// [`RankQuant::search_asymmetric_subset_batched_serial_into`] holds exactly
+/// when this is `true`.
+///
+/// Returns `false` for any `(dim, bits)` that [`RankQuant::new`] would reject,
+/// so it answers "the rerank will take a SIMD kernel" rather than acting as a
+/// raw tier probe: a SIMD tier can be selected for a `(dim, bits)` that is not
+/// constructor-valid (e.g. `bits = 4` with `dim` a multiple of 8 but not of
+/// `2^bits = 16`).
+///
+/// It reads the same [`select_simd_tier`] the rerank dispatch reads, so it
+/// cannot drift from the actual dispatch.
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+#[must_use]
+pub fn subset_rerank_uses_simd(dim: usize, bits: u8) -> bool {
+    RankQuant::validate_params(dim, bits).is_ok()
+        && !matches!(select_simd_tier(dim, bits), SimdTier::None)
+}
+
 impl RankQuant {
     /// Validate `(dim, bits)` for **code validity** — the precondition for
     /// generating bucket codes, projections, and asymmetric scores.
@@ -1187,9 +1214,11 @@ impl RankQuant {
     }
 
     /// Serial (NO rayon) batched subset rerank into caller-owned buffers.
-    /// Allocation-free after `scratch` warmup. The integration contract for
-    /// runtimes that own their own parallelism (call this from a bounded pool,
-    /// with the GIL released, one row range per worker is the caller's choice).
+    /// Allocation-free after `scratch` warmup **on the SIMD rerank path
+    /// (AVX-512 / AVX2)**; the scalar fallback allocates a per-query scoring LUT.
+    /// The integration contract for runtimes that own their own parallelism
+    /// (call this from a bounded pool, with the GIL released, one row range per
+    /// worker is the caller's choice).
     ///
     /// `queries` is `nq * dim`. Candidates are CSR: `candidate_offsets.len()
     /// == nq + 1`, row `qi` is `candidates[candidate_offsets[qi]..candidate_offsets[qi+1]]`.
@@ -1206,6 +1235,36 @@ impl RankQuant {
     /// `nq + 1` long, not starting at `0`, non-monotonic, or not ending at
     /// `candidates.len()`), a row longer than `self.len()`, a candidate id
     /// `>= self.len()`, a non-finite query value, or a wrong output-buffer length.
+    ///
+    /// Buffer sizing differs from the single-query [`Self::search_asymmetric_subset`]
+    /// (which returns a short `Vec` of `min(k, row_len)`): here the output is a
+    /// rectangular `nq * out_k` grid, sentinel-padded — size both buffers to
+    /// `nq * k.min(self.len())`. A too-short buffer trips the fail-loud length
+    /// assert rather than under-writing; this is a common porting pitfall.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use ordvec::{RankQuant, SignBitmap, SubsetScratch};
+    /// # let (dim, k, m) = (1024usize, 10usize, 256usize);
+    /// let sign = SignBitmap::new(dim);
+    /// let rq = RankQuant::new(dim, 2);
+    /// # let queries = vec![0.0f32; dim * 64];
+    /// let nq = queries.len() / dim;
+    /// let out_k = k.min(rq.len());
+    /// // Allocate scratch + output buffers ONCE; reuse across batches.
+    /// let mut scratch = SubsetScratch::new();
+    /// let mut out_scores = vec![f32::NEG_INFINITY; nq * out_k];
+    /// let mut out_indices = vec![-1i64; nq * out_k];
+    /// let cb = sign.top_m_candidates_batched_serial_csr(&queries, m);
+    /// rq.search_asymmetric_subset_batched_serial_into(
+    ///     &queries, &cb.offsets, &cb.candidates, k,
+    ///     &mut scratch, &mut out_scores, &mut out_indices,
+    /// );
+    /// // Query qi's top-k is out_indices[qi*out_k..(qi+1)*out_k] (sentinel-padded).
+    /// // Reuse scratch + buffers for the next batch — no further allocation once
+    /// // scratch has warmed to this shape (NO internal rayon: drive this from
+    /// // your own pool, one query-range per worker).
+    /// ```
     #[allow(clippy::too_many_arguments)] // arity is intrinsic to the caller-owned buffered contract (CSR inputs + scratch + two output buffers)
     pub fn search_asymmetric_subset_batched_serial_into(
         &self,

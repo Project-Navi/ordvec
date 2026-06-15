@@ -87,6 +87,13 @@ pub use sign_bitmap::SignBitmap;
 #[doc(hidden)]
 pub use quant::search_asymmetric_byte_lut;
 
+// `subset_rerank_uses_simd` is a test-only dispatch probe used by the crate's
+// own SIMD-parity tests. Gated behind the non-default `test-utils` feature and
+// excluded from semver guarantees — not a supported downstream API.
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub use quant::subset_rerank_uses_simd;
+
 // `MultiBucketBitmap` underwrites the bilinear bucket-overlap
 // decomposition but is not the constant-weight top-bucket theorem surface and
 // is not stable public API. It is reachable only with the `experimental`
