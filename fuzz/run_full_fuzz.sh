@@ -9,12 +9,12 @@
 #
 # Requires: a nightly toolchain and cargo-fuzz (`cargo install cargo-fuzz`).
 #
-# HEAVY BY DEFAULT. The defaults are a long, many-core campaign (~3h x 8
-# targets ~= 24h total; FORKS = cores - 2; peak RAM ~= FORKS x RSS_LIMIT_MB)
+# HEAVY BY DEFAULT. The defaults are a long, many-core campaign (~3h x 9
+# targets ~= 27h total; FORKS = cores - 2; peak RAM ~= FORKS x RSS_LIMIT_MB)
 # tuned for a big workstation. On a laptop or smaller box, DIAL IT DOWN with the
 # env knobs below so you don't peg every core or exhaust RAM. A quick run:
 #
-#   SECS_PER_TARGET=120 FORKS=2 ./fuzz/run_full_fuzz.sh   # ~16 min on 2 cores
+#   SECS_PER_TARGET=120 FORKS=2 ./fuzz/run_full_fuzz.sh   # ~18 min on 2 cores
 #
 # The script prints the estimated total time + RAM up front and, when run
 # interactively, waits 5s so you can Ctrl-C and re-run with smaller knobs.
