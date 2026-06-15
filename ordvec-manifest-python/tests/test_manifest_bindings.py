@@ -114,13 +114,13 @@ def test_create_manifest_accepts_auxiliary_artifacts(tmp_path):
         "model",
         row_id_is_identity=True,
         auxiliary_artifacts=[
-            {"name": "ordinaldb.ids", "path": ids},
+            {"name": "app.ids", "path": ids},
             {"name": "optional.stats", "path": optional, "required": False},
         ],
     )
 
     assert manifest["row_identity"] == {"kind": "row_id_identity", "row_count": 2}
-    assert manifest["auxiliary_artifacts"][0]["name"] == "ordinaldb.ids"
+    assert manifest["auxiliary_artifacts"][0]["name"] == "app.ids"
     assert manifest["auxiliary_artifacts"][0]["path"] == "ids.bin"
     assert manifest["auxiliary_artifacts"][0].get("required", True) is True
     assert manifest["auxiliary_artifacts"][1]["name"] == "optional.stats"
@@ -129,6 +129,6 @@ def test_create_manifest_accepts_auxiliary_artifacts(tmp_path):
     optional.unlink()
     plan = ordvec_manifest.verify_for_load(manifest_path)
     auxiliary = {artifact["name"]: artifact for artifact in plan["auxiliary_artifacts"]}
-    assert auxiliary["ordinaldb.ids"]["state"] == "verified"
-    assert Path(auxiliary["ordinaldb.ids"]["path"]) == ids.resolve()
+    assert auxiliary["app.ids"]["state"] == "verified"
+    assert Path(auxiliary["app.ids"]["path"]) == ids.resolve()
     assert auxiliary["optional.stats"]["state"] == "optional_absent"

@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   VPOPCNTDQ scan kernels are active on the current CPU. The scan dispatch reads
   only this predicate (no per-dimension gate).
 
+### Changed
+
+- **Release-hardened the caller-owned serial two-stage primitives** (no API
+  change; added in 0.5.0). The trust model is now explicit and tested:
+  - Rejection-path regression tests for the full CSR/query/buffer validation set
+    on the rerank entry points — overlong row (the guard that bounds the unsafe
+    gather), non-monotonic / wrong-final / non-zero-first offsets, non-finite and
+    ragged queries, and wrong output-buffer length — so a malformed-but-accepted
+    input can never reach the SIMD scan.
+  - A counting-allocator test proving `search_asymmetric_subset_batched_serial_into`
+    performs **zero heap allocations** in steady state (warmed `SubsetScratch`,
+    reused caller buffers) **on the AVX-512/AVX2 rerank path** — the strong form of
+    the prior capacity-stability proxy. (The scalar fallback, e.g. aarch64,
+    allocates a per-query scoring LUT; the test skips the strict check there.)
+  - A focused `two_stage_bench` example decomposing stage-1 candidate-gen /
+    single-query rerank loop / batched `_into` / full two-stage at the
+    Harrier-1024 shape, with a committed reference capture
+    (`benchmarks/two_stage_caller_owned_dim1024.txt`, SYNTHETIC corpus).
+  - User-facing docs for the caller-owned / no-rayon / allocation-free contract
+    (README + rustdoc examples on the `_into` hot path and the CSR candidate-gen).
+
 ### Fixed
 
 - **`ordvec-manifest` crate and wheel now ship license text.** Both declared
@@ -53,8 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `RankQuant::search_asymmetric_subset_batched_serial(..) -> SearchResults` and
     `..._serial_into(.., &mut SubsetScratch, &mut out_scores, &mut out_indices)`
     — serial batched subset rerank; the `_into` form is allocation-free after
-    scratch warmup (the integration contract for runtimes that own their own
-    thread pool / GIL release).
+    scratch warmup on the AVX-512/AVX2 rerank path (the integration contract for
+    runtimes that own their own thread pool / GIL release).
   - New public types `CandidateBatch` (CSR candidate carrier) and `SubsetScratch`
     (reusable rerank scratch).
 - These primitives never enter rayon; the caller owns parallelism. No bundled

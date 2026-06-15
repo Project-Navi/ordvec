@@ -13,7 +13,14 @@
 //!   coordinate, `2 * dim` bytes per document).
 //! - [`RankQuant`] buckets each rank into `1 << bits` equal-width
 //!   bins and packs `bits` bits per coordinate (`dim * bits / 8` bytes
-//!   per document).
+//!   per document). `bits ∈ {1, 2, 4}` are the stable retrieval widths;
+//!   `b = 8` is a capability-gated evidence/refinement width — asymmetric
+//!   scoring and code/projection generation at any dim, *analytical-norm*
+//!   symmetric scoring (via [`RankQuant::search`]) only when
+//!   `dim % 256 == 0` (see [`RankQuant::new_asymmetric`]). The standalone
+//!   [`rankquant_eval_search`] computes its norm *empirically*, so it scores
+//!   any `bits ∈ 1..=8` at any dim (including `b = 8` off the 256 grid) and
+//!   carries no such restriction.
 //! - [`Bitmap`] stores a top-bucket bitmap per document (one bit
 //!   per coordinate) and scores via `popcount(Q AND D)`.
 //! - [`SignBitmap`] stores a sign bitmap per document (one bit per
@@ -66,7 +73,7 @@ mod util;
 
 pub use bitmap::Bitmap;
 pub use quant::SubsetScratch;
-pub use quant::{rankquant_eval_search, RankQuant, TwoStageCandidatePolicy};
+pub use quant::{rankquant_eval_search, RankQuant, RankQuantCapability, TwoStageCandidatePolicy};
 pub use rank::Rank;
 pub use rank_io::{probe_index_metadata, IndexKind, IndexMetadata, IndexParams};
 pub use sign_bitmap::CandidateBatch;
@@ -81,6 +88,13 @@ pub use sign_bitmap::SignBitmap;
 // every supported bit width to a non-panicking kernel.
 #[doc(hidden)]
 pub use quant::search_asymmetric_byte_lut;
+
+// `subset_rerank_uses_simd` is a test-only dispatch probe used by the crate's
+// own SIMD-parity tests. Gated behind the non-default `test-utils` feature and
+// excluded from semver guarantees — not a supported downstream API.
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub use quant::subset_rerank_uses_simd;
 
 // `MultiBucketBitmap` underwrites the bilinear bucket-overlap decomposition.
 //

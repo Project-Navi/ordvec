@@ -307,6 +307,20 @@ impl SignBitmap {
     /// [`Self::top_m_candidates`] (which materialises a per-query `n` Hamming
     /// row). A future release may replace the internals with streaming top-m
     /// behind this frozen signature; the CSR output contract will not change.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use ordvec::SignBitmap;
+    /// # let (dim, m) = (1024usize, 256usize);
+    /// let sign = SignBitmap::new(dim);
+    /// # let queries = vec![0.0f32; dim * 64];
+    /// let cb = sign.top_m_candidates_batched_serial_csr(&queries, m);
+    /// // CSR: query qi's candidate row is
+    /// // `cb.candidates[cb.offsets[qi]..cb.offsets[qi + 1]]`. Pass `cb.offsets`
+    /// // and `cb.candidates` straight into
+    /// // `RankQuant::search_asymmetric_subset_batched_serial_into`.
+    /// let _row0 = &cb.candidates[cb.offsets[0]..cb.offsets[1]];
+    /// ```
     #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates_batched_serial_csr(&self, queries: &[f32], m: usize) -> CandidateBatch {
         let dim = self.dim;

@@ -104,9 +104,9 @@ present or absent, and whether any declared member failed path, size, or digest
 checks or exceeded the configured auxiliary artifact byte limit. Callers should
 load sidecars only after the relevant declaration is verified.
 
-OrdinalDB v0.1 should use `row_id_identity` for the ordvec vector row count and
-declare `ids.bin` as required auxiliary artifact name `ordinaldb.ids`. The
-OrdinalDB `u64` IDs remain caller-owned sidecar bytes. Do not model `ids.bin`
+A consuming database can use `row_id_identity` for the ordvec vector row count
+and declare its ID sidecar file as a required auxiliary artifact (e.g. `app.ids`).
+The `u64` IDs remain caller-owned sidecar bytes. Do not model the ID sidecar
 as JSONL row identity: v1 JSONL row identity is UUID-only, and generic row-map
 ID formats are deferred until there is a separate schema contract for them. The
 reserved `row_identity.db` block is rejected in v1 because it is not byte-bound
