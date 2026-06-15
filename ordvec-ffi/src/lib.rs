@@ -364,15 +364,16 @@ fn info_for_handle(handle: &IndexHandle) -> ordvec_index_info_t {
 
 fn info_for_metadata(meta: &IndexMetadata) -> Result<ordvec_index_info_t, FfiError> {
     let mut info = default_info();
-    info.kind =
-        match meta.kind {
-            IndexKind::RankQuant => ORDVEC_INDEX_KIND_RANK_QUANT,
-            IndexKind::Bitmap => ORDVEC_INDEX_KIND_BITMAP,
-            IndexKind::Rank | IndexKind::SignBitmap => return Err(FfiError::new(
+    info.kind = match meta.kind {
+        IndexKind::RankQuant => ORDVEC_INDEX_KIND_RANK_QUANT,
+        IndexKind::Bitmap => ORDVEC_INDEX_KIND_BITMAP,
+        IndexKind::Rank | IndexKind::SignBitmap => {
+            return Err(FfiError::new(
                 ORDVEC_STATUS_UNSUPPORTED_FORMAT,
                 "ABI v1 supports metadata probes only for RankQuant and Bitmap indexes",
-            )),
-        };
+            ))
+        }
+    };
     info.format_version = u32::from(meta.format_version);
     info.dim = meta.dim as u64;
     info.vector_count = meta.vector_count as u64;
