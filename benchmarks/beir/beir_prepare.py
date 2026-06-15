@@ -291,7 +291,17 @@ def _download_beir(dataset: str, cache_dir: pathlib.Path) -> pathlib.Path:
             for chunk in r.iter_content(chunk_size=1 << 16):
                 f.write(chunk)
                 bar.update(len(chunk))
+    # Extract with Zip Slip protection: reject any member whose resolved path
+    # escapes raw_dir (path traversal / absolute paths), rather than trusting the
+    # remote archive with a blanket extractall().
+    raw_root = raw_dir.resolve()
     with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.namelist():
+            dest = (raw_dir / member).resolve()
+            if dest != raw_root and raw_root not in dest.parents:
+                raise ValueError(
+                    f"unsafe path in {dataset}.zip (Zip Slip): {member!r}"
+                )
         zf.extractall(raw_dir)
     zip_path.unlink(missing_ok=True)
     if not (data_path / "corpus.jsonl").exists():
