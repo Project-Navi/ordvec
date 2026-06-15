@@ -367,6 +367,19 @@ pub fn probe_index_metadata(path: impl AsRef<Path>) -> io::Result<IndexMetadata>
         OVRQ_MAGIC | TVRQ_MAGIC => probe_rankquant_metadata(&mut f, file_size_bytes),
         OVBM_MAGIC | TVBM_MAGIC => probe_bitmap_metadata(&mut f, file_size_bytes),
         OVSB_MAGIC | TVSB_MAGIC => probe_sign_bitmap_metadata(&mut f, file_size_bytes),
+        // `OVFS` (RankQuantFastscan) is a recognized magic, but metadata probing
+        // is intentionally NOT wired up here yet: surfacing it would need a new
+        // `IndexKind` variant, and `IndexKind` is not `#[non_exhaustive]`, so
+        // adding one is a breaking change — deferred to the 0.8.0 API
+        // re-architecture (#232). `.ovfs` files still round-trip via
+        // `RankQuantFastscan::{write,load}`; only this metadata-probe path is
+        // pending. Return a specific, actionable error rather than letting it
+        // fall through to the generic unknown-magic case (which would be
+        // misleading, since the magic *is* known).
+        OVFS_MAGIC => Err(invalid(
+            "OVFS (RankQuantFastscan) metadata probing is not supported in this \
+             version; load the index with RankQuantFastscan::load (tracked in #232)",
+        )),
         _ => Err(invalid("unknown ordvec index magic")),
     }
 }
@@ -1601,5 +1614,31 @@ mod tests {
         let e = write_fastscan(&p3, dim, n, &payload[..100]).unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
         assert!(!p3.exists(), "rejected write must not create a file");
+    }
+
+    // Probing a valid `.ovfs` file returns a specific, actionable error — NOT the
+    // generic "unknown ordvec index magic" (which would be misleading, since the
+    // magic *is* recognized). Metadata-probe support for OVFS is deferred to #232;
+    // this pins the deferral contract so it can't silently regress to the generic
+    // case. See `probe_index_metadata`'s `OVFS_MAGIC` arm.
+    #[test]
+    fn probe_rejects_ovfs_with_specific_unsupported_error() {
+        use super::{probe_index_metadata, write_fastscan};
+        let (dim, n) = (8usize, 4usize);
+        let payload = vec![0u8; 128];
+        let p = temp_index_path("ovfs_probe");
+        write_fastscan(&p, dim, n, &payload).unwrap();
+        let err = probe_index_metadata(&p);
+        assert_err_contains(
+            err,
+            "OVFS (RankQuantFastscan) metadata probing is not supported",
+        );
+        // It must NOT be reported as an unknown magic.
+        let again = probe_index_metadata(&p).unwrap_err().to_string();
+        assert!(
+            !again.contains("unknown ordvec index magic"),
+            "OVFS is a recognized magic; probe must not report it as unknown, got {again:?}"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 }
