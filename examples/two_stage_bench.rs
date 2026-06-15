@@ -1,6 +1,6 @@
 //! Focused benchmark + integration example for the **caller-owned serial**
 //! two-stage path (the integration contract for DBs / runtimes that own their
-//! own parallelism, e.g. OrdinalDB). SYNTHETIC corpus — these numbers are a
+//! own parallelism). SYNTHETIC corpus — these numbers are a
 //! relative decomposition of the serial path on random data, NOT a retrieval-
 //! quality or real-corpus claim, and the dim=1024 result is its own mechanism
 //! (do not conflate it with the SignBitmap AVX-tail dim=768 result).
