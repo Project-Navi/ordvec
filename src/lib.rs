@@ -58,6 +58,8 @@
 use std::fmt;
 
 mod bitmap;
+#[cfg(feature = "experimental")]
+mod contingency;
 mod fastscan;
 #[cfg(feature = "experimental")]
 mod multi_bucket;
@@ -94,12 +96,37 @@ pub use quant::search_asymmetric_byte_lut;
 #[doc(hidden)]
 pub use quant::subset_rerank_uses_simd;
 
-// `MultiBucketBitmap` underwrites the bilinear bucket-overlap
-// decomposition but is not the constant-weight top-bucket theorem surface and
-// is not stable public API. It is reachable only with the `experimental`
-// feature; the default surface excludes it.
+// `MultiBucketBitmap` underwrites the bilinear bucket-overlap decomposition.
+//
+// **`MultiBucketBitmap` is NOT the default retrieval surface.** It is a
+// research/analysis primitive for the full bilinear `nb × nb` weight-matrix
+// decomposition, not the constant-weight top-bucket theorem surface implemented
+// by [`Bitmap`]. Its per-document storage is 2–4× larger than the corresponding
+// `RankQuant` encoding; the full outer-product path does not outperform the
+// equivalent per-coord scalar form and exists to expose the decomposition
+// empirically and serve as a reference for truncated weight matrices.
+//
+// `MultiBucketBitmap` is gated behind the **non-default `experimental` cargo
+// feature**, is excluded from semver guarantees, and may change or be removed
+// without a major-version bump. It is not part of the stable public surface.
 #[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmap;
+
+// `Contingency` / `Projection` are the **stable** stateless dense-code
+// contingency-table surface added in this release (issue #219): the full
+// `nb × nb` bucket-overlap table for two `&[u8]` code slices, plus its named
+// projections (diagonal agreement, band agreement, top-bucket overlap, L1
+// distance, etc.). This is a research/analysis primitive — it is *not* a
+// retrieval index and is never wired into any search path.
+//
+// Although `Contingency` and `Projection` are gated behind the same
+// `experimental` feature as `MultiBucketBitmap` (they complement the bilinear
+// decomposition that surface exposes), they are the **stable** side of the
+// `experimental` gate: the stateless dense API is the intended long-term
+// surface and is covered by semver guarantees from this release forward.
+// `MultiBucketBitmap` is the unstable counterpart — see the note above.
+#[cfg(feature = "experimental")]
+pub use contingency::{Contingency, Projection};
 
 // `RankQuantFastscan` is an optional FastScan b=2 scan path. It is
 // re-exported `#[doc(hidden)]` at the crate root — reachable as
