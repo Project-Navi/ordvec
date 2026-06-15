@@ -39,3 +39,8 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# BEIR benchmark harness — embedding cache and result files.
+/.cache/ordvec-beir/
+/results/beir/*
+!/results/beir/.gitkeep

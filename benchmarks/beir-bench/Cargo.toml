@@ -1,0 +1,33 @@
+# All-Rust BEIR comparison harness. Lives as a workspace member (NOT in the core
+# `ordvec` crate's dependencies) so that pulling `hnsw_rs` here never touches the
+# `-p ordvec`-scoped deps gate or the published crate. `publish = false`.
+[package]
+name = "beir-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "beir-bench"
+path = "src/main.rs"
+
+[dependencies]
+ordvec = { path = "../.." }
+# Pure-Rust HNSW (Malkov–Yashunin); no system/C++ deps. The faithful portable
+# stand-in for the C++ hnswlib (no maintained Rust binding to that exists).
+hnsw_rs = "0.3"
+rayon = "1.10"
+# Pure-Rust SIMD GEMM (runtime AVX/NEON dispatch, no BLAS/system deps) — gives
+# the exact-inner-product `flat` baseline a competitive kernel so it isn't
+# unfairly slow vs ordvec's SIMD paths. Default single-threaded (our rayon pool
+# owns parallelism); we never enable its `threading` feature.
+matrixmultiply = "0.3"
+# Pure-Rust SHA-256 (manifest provenance digest) + robust JSON read/write, so the
+# harness never shells out for hashing and never emits invalid JSON on IDs that
+# contain quotes/backslashes/unicode escapes. Both are already workspace deps.
+sha2 = "0.11"
+serde_json = "1"
+
+# Release profile is inherited from the workspace root (lto, codegen-units=1,
+# opt-level=3); a member-level [profile] would be ignored with a warning.

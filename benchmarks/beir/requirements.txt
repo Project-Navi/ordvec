@@ -1,0 +1,39 @@
+# ordvec-beir benchmark — Python dependencies
+#
+# The canonical encoder lane is `llamacpp` (GGUF Q8_0 via llama-cpp-python,
+# CUDA). `make bench-beir-setup` installs this file, then builds
+# llama-cpp-python against the host CUDA toolkit (CMAKE_ARGS="-DGGML_CUDA=on")
+# — it is intentionally NOT listed here so `pip install -r requirements.txt`
+# never produces a throwaway CPU-only build.
+#
+# We deliberately do NOT depend on the `beir` package: it pulls the `pytrec_eval`
+# sdist, which fails to build on modern gcc. The BEIR dataset loader is vendored
+# in beir_prepare.py and evaluation uses the prebuilt `pytrec-eval-terrier`
+# wheel instead.
+
+# --- core ---
+numpy
+scipy
+requests
+tqdm
+pandas
+tabulate
+
+# --- model download for the canonical llamacpp lane ---
+huggingface-hub
+
+# --- retrieval baselines (comparison references, NOT ground truth) ---
+faiss-cpu
+hnswlib
+
+# --- evaluation: trec_eval bindings (prebuilt wheel, no C compile) ---
+pytrec-eval-terrier
+
+# --- README benchmark graphics ---
+matplotlib
+
+# --- optional: sentence-transformers lane (`--provider st`) ---
+# Heavy (pulls torch). Uncomment to enable the fp32 ST encoder lane:
+# sentence-transformers
+# torch
+# transformers
