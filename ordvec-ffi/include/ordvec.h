@@ -192,8 +192,8 @@ ordvec_status_t ordvec_index_load(const char *path, uint64_t flags, ordvec_index
 
 /**
  * Probe on-disk metadata for a `.ovrq` RankQuant or `.ovbm` Bitmap index
- * (legacy `.tvrq` / `.tvbm` also accepted) without loading payload rows into an
- * index handle.
+ * (legacy `.tv*` also accepted) without loading payload rows into an index
+ * handle.
  *
  * This validates the fixed header, declared dimensions, payload byte count,
  * and exact file length. Full row-invariant validation remains the job of

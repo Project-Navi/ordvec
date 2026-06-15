@@ -889,12 +889,26 @@ pub(crate) fn write_fastscan(
     n_vectors: usize,
     packed_fs: &[u8],
 ) -> io::Result<()> {
-    // Enforce the loaders' MAX_PAYLOAD cap *before* File::create so a rejected
-    // oversized write never truncates an existing file. Defense-in-depth; the
-    // round-trip guarantee is type-level (see module docs). Mirrors load_fastscan.
+    // Validate every header parameter *before* File::create, so a now-public
+    // persistence API never (a) silently truncates `dim`/`n_vectors` through the
+    // `as u32` casts below, (b) writes a corrupt/oversized file (the loaders'
+    // MAX_PAYLOAD cap; a rejected write never truncates an existing file), or
+    // (c) panics from a `Result`-returning fn. Mirrors load_fastscan's contract.
+    check_dim(dim)?;
+    if !dim.is_multiple_of(4) {
+        return Err(invalid(format!(
+            "OVFS dim {dim} is not a multiple of 4 (FastScan b=2 constant composition)"
+        )));
+    }
+    check_n_vectors(n_vectors)?;
     let payload_bytes = fastscan_payload_bytes(dim, n_vectors)?;
     check_payload_bytes(payload_bytes)?;
-    assert_eq!(packed_fs.len(), payload_bytes);
+    if packed_fs.len() != payload_bytes {
+        return Err(invalid(format!(
+            "OVFS packed buffer is {} bytes but dim={dim}/n_vectors={n_vectors} implies {payload_bytes}",
+            packed_fs.len()
+        )));
+    }
     let mut f = BufWriter::new(File::create(path)?);
     f.write_all(OVFS_MAGIC)?;
     f.write_all(&[VERSION])?;
@@ -1556,5 +1570,34 @@ mod tests {
         for p in [pr, prq, pbm, psb, keep] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    // OVFS (FastScan) write path: valid round-trip, and fail-loud (io::Error, not
+    // a panic) on invalid `dim`/`n_vectors`/payload — the now-public persistence
+    // API must never abort the caller or silently truncate the header.
+    #[test]
+    fn write_fastscan_validates_and_never_panics() {
+        use super::{load_fastscan, write_fastscan};
+        // dim=8 (multiple of 4), 4 vectors -> ceil(4/32)*(8/2)*32 = 128-byte payload.
+        let (dim, n) = (8usize, 4usize);
+        let payload = vec![0u8; 128];
+        let p = temp_index_path("ovfs_ok");
+        write_fastscan(&p, dim, n, &payload).unwrap();
+        let (ld, ln, lbytes) = load_fastscan(&p).unwrap();
+        assert_eq!((ld, ln), (dim, n));
+        assert_eq!(lbytes, payload, "OVFS round-trip altered the payload");
+        let _ = std::fs::remove_file(&p);
+
+        // dim not a multiple of 4 -> rejected before File::create (no panic, no file).
+        let p2 = temp_index_path("ovfs_baddim");
+        let e = write_fastscan(&p2, 6, n, &payload).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!p2.exists(), "rejected write must not create a file");
+
+        // packed buffer inconsistent with dim/n_vectors -> rejected, not panic.
+        let p3 = temp_index_path("ovfs_badlen");
+        let e = write_fastscan(&p3, dim, n, &payload[..100]).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!p3.exists(), "rejected write must not create a file");
     }
 }
