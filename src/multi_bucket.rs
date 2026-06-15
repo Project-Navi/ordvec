@@ -9,6 +9,17 @@
 //! `Contingency` / `Projection` API; reach for this indexed path only when you
 //! have explicitly opted into `experimental`.
 //!
+//! **Positioning — not a primary retrieval path.** `MultiBucketBitmap` is a
+//! niche research/analysis substrate for the bilinear bucket-overlap
+//! decomposition; it is **not** the default single-score retrieval path and was
+//! never kernel-optimized for that role. For primary nearest-neighbour
+//! retrieval, use the headline paths instead — [`crate::RankQuant`] (symmetric
+//! and asymmetric float-query scoring), [`crate::Bitmap`] (top-bucket
+//! `popcount(Q AND D)` candidate scoring), and the two-stage
+//! candidate-generation → rerank flow. Reach for this indexed contingency /
+//! projection surface only to *analyze* bucket-overlap structure, never as a
+//! primary retrieval index.
+//!
 //! Represents the constant-composition bucket assignment of each
 //! document explicitly as a set of `2^bits` disjoint bitmaps over the
 //! `dim` coordinates. The bilinear bucket-overlap score
