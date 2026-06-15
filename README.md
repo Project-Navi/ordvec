@@ -306,7 +306,11 @@ make benchmark-beir        # quality (nDCG) + scaling sweep + graphics
 
 nDCG@10 is computed against the human-annotated qrels (not against `flat`).
 `Δ vs flat` is the paired-bootstrap mean delta; `*` marks a 95% CI that straddles
-0 (i.e. within noise of exact).
+0 (i.e. within noise of exact). `flat` and the ordvec rows are **deterministic**
+(byte-identical run to run); the `hnsw` row is **approximate** — its graph is
+built in parallel, so its nDCG and latency vary slightly between runs (≈±0.003
+nDCG here, within the same noise band). The numbers below are one representative
+run; regenerate your own with `make benchmark-beir`.
 
 | Dataset | Method | Bytes/vec | nDCG@10 | Δ vs flat (95% CI) |
 |---|---|--:|--:|---|
