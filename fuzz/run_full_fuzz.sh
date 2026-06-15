@@ -29,7 +29,7 @@
 #   SECS_PER_TARGET   per-target wall-clock budget   (default 10800 = 3h)
 #   FORKS             concurrent fork workers        (default = nproc - 2)
 #   RSS_LIMIT_MB      per-process RSS cap            (default 3072)
-#   TARGETS           space-separated target list    (default = all eight)
+#   TARGETS           space-separated target list    (default = all nine)
 #
 # Examples:
 #   SECS_PER_TARGET=43200 ./fuzz/run_full_fuzz.sh          # 12h per target
@@ -53,7 +53,7 @@ SECS_PER_TARGET="${SECS_PER_TARGET:-10800}"
 NCPU="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
 FORKS="${FORKS:-$(( NCPU > 2 ? NCPU - 2 : 1 ))}"
 RSS_LIMIT_MB="${RSS_LIMIT_MB:-3072}"
-TARGETS="${TARGETS:-load_rank load_rankquant load_bitmap load_sign_bitmap roundtrip_rankquant search_rankquant fastscan_b2 signbitmap_rankquant_twostage}"
+TARGETS="${TARGETS:-load_rank load_rankquant load_bitmap load_sign_bitmap load_fastscan roundtrip_rankquant search_rankquant fastscan_b2 signbitmap_rankquant_twostage}"
 
 read -ra _targets <<<"${TARGETS}"
 n_targets=${#_targets[@]}
