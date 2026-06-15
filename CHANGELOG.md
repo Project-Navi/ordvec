@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+
+- **Cleared OSV / OpenSSF-Scorecard advisories on the dev-only BEIR benchmark
+  tooling** (introduced with the benchmark harness; none reach the published
+  `ordvec` crate or the `ordvec` PyPI wheel). The `benchmarks/beir/requirements.txt`
+  deps were unpinned, so OSV flagged each against its full historical CVE list;
+  they are now lower-bound-pinned at the first patched release (`requests>=2.32.4`,
+  `hnswlib>=0.8.0`, `numpy>=1.26`, plus safe floors for the rest). `bincode` 1.x
+  (RUSTSEC-2025-0141, *unmaintained* — not a vulnerability) enters only
+  transitively via `hnsw_rs` in `benchmarks/beir-bench` and is absent from
+  `cargo tree -p ordvec`; it is triaged with a documented `deny.toml` ignore.
+
 ### Added
 
 - **Reproducible BEIR benchmark harness** (`make benchmark-beir`; dev-only,
