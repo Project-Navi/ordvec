@@ -396,7 +396,7 @@ fn probe_rankquant_metadata<R: Read + Seek>(
     let bits = read_u8_field(reader, "OVRQ", "bits")?;
     if !matches!(bits, 1 | 2 | 4) {
         return Err(invalid(format!(
-            "unsupported TVRQ bits: {bits} (expected 1, 2, or 4)"
+            "unsupported OVRQ bits: {bits} (expected 1, 2, or 4)"
         )));
     }
     let dim = read_u32_le(reader, "OVRQ", "dim")? as usize;
@@ -625,7 +625,7 @@ pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, u
     let bits = read_u8_field(&mut f, "OVRQ", "bits")?;
     if !matches!(bits, 1 | 2 | 4) {
         return Err(invalid(format!(
-            "unsupported TVRQ bits: {bits} (expected 1, 2, or 4)"
+            "unsupported OVRQ bits: {bits} (expected 1, 2, or 4)"
         )));
     }
     let dim = read_u32_le(&mut f, "OVRQ", "dim")? as usize;
@@ -778,13 +778,13 @@ pub(crate) fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, u
 ///
 /// | offset | bytes | field                       |
 /// |-------:|:-----:|-----------------------------|
-/// | 0      | 4     | magic = `TVSB`              |
+/// | 0      | 4     | magic = `OVSB`              |
 /// | 4      | 1     | version = 1                 |
 /// | 5      | 4     | `dim` (u32)                 |
 /// | 9      | 4     | `n_vectors` (u32)           |
 /// | 13     | …     | `n_vectors * dim/64` u64s   |
 ///
-/// 13-byte header — one u32 shorter than `TVBM` because SignBitmap
+/// 13-byte header — one u32 shorter than `OVBM` because SignBitmap
 /// has no `n_top` parameter (the threshold is fixed at zero).
 pub(crate) fn write_sign_bitmap(
     path: impl AsRef<Path>,
