@@ -69,6 +69,9 @@ mod bitmap;
 /// Index-free, fixed-composition ordinal bucket codes (issue #220).
 #[cfg(feature = "experimental")]
 pub mod bucket_code;
+/// Constant-weight bitmap overlap + the finite constant-weight null (issue #222).
+#[cfg(feature = "experimental")]
+pub mod const_weight_bitmap;
 #[cfg(feature = "experimental")]
 mod contingency;
 mod fastscan;
@@ -146,6 +149,18 @@ pub use contingency::{Contingency, Projection};
 // deliberate later decision.
 #[cfg(feature = "experimental")]
 pub use bucket_code::{BucketCode, CompositionSpec, CompositionViolation, RankQuantSpec};
+
+// Constant-weight bitmap overlap + the finite constant-weight null (issue #222).
+// The ordinal-kernel evidence surface built on the #220 bucket codes: the
+// top-bucket / top-group constant-weight bitmaps, their popcount overlap (routed
+// through the crate's shared `util::and_popcount` primitive), and the idealized
+// uniform constant-weight null that turns an observed overlap into an exact
+// finite tail probability. Behind the `experimental` feature; whether it
+// graduates to the stable surface is a deliberate later decision.
+#[cfg(feature = "experimental")]
+pub use const_weight_bitmap::{
+    choose, top_group_overlap_vector, BitmapNull, ConstantWeightBitmap, PackedConstantWeightBitmap,
+};
 
 // `RankQuantFastscan` is an optional FastScan b=2 scan path. It is
 // re-exported `#[doc(hidden)]` at the crate root — reachable as
