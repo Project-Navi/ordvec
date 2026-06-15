@@ -21,6 +21,7 @@ exclude = [
     ".github/",
     ".gitignore",
     ".playwright-mcp/",
+    "benchmarks/",
     "CLAUDE.md",
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
@@ -92,7 +93,7 @@ opt-level = 3
 # `Cargo.lock` carries their transitive dependencies.
 [workspace]
 resolver = "2"
-members = ["ordvec-python", "ordvec-ffi", "ordvec-manifest", "ordvec-manifest-python"]
+members = ["ordvec-python", "ordvec-ffi", "ordvec-manifest", "ordvec-manifest-python", "benchmarks/beir-bench"]
 default-members = ["."]
 # fuzz/ is a cargo-fuzz crate built only via `cargo +nightly fuzz`. Keep it out of
 # the workspace so it stays a standalone crate (its own Cargo.lock) and `cargo fuzz`

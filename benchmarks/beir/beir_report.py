@@ -52,10 +52,11 @@ REQUIRED_CLAIM_REPRODUCIBILITY = (
 )
 
 REQUIRED_CLAIM_FAISS_NOT_GROUND_TRUTH = (
-    "**FAISS FlatIP is a full-float dense retrieval baseline used for comparison "
-    "purposes — it is NOT ground truth.  nDCG@10 is computed against the official "
-    "BEIR qrels (human-annotated relevance judgements), not against FAISS "
-    "results.  ANN-recall-vs-FAISS (fraction of FAISS top-k recovered by an ANN "
+    "**The `flat` baseline is an exact full-float inner-product search (identical "
+    "retrieval to FAISS `IndexFlatIP`) used for comparison purposes — it is NOT "
+    "ground truth.  nDCG@10 is computed against the official BEIR qrels "
+    "(human-annotated relevance judgements), not against the `flat` results.  "
+    "Recall-vs-`flat` (fraction of the exact top-k recovered by an approximate "
     "method) is an optional diagnostic metric only; it does not substitute for "
     "qrel-based evaluation.**"
 )
@@ -192,7 +193,7 @@ def render_main_table(summary: dict[str, Any]) -> str:
         "Encoder (provider / model)",
         "Method",
         "nDCG@10",
-        "Δ vs FAISS",
+        f"Δ vs {baseline}",
         "95% CI",
         "MAP@10",
         "Recall@100",
@@ -261,7 +262,7 @@ def render_rollup_table(summary: dict[str, Any]) -> str:
     headers = [
         "Method",
         "Mean nDCG@10",
-        "Mean Δ vs FAISS",
+        f"Mean Δ vs {baseline}",
         "Datasets within CI",
         "Mean Recall@100",
         "Bytes/vec",

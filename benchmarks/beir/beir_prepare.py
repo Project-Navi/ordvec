@@ -255,6 +255,155 @@ def _write_npy(path: pathlib.Path, arr: np.ndarray) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Vendored BEIR reader (no `beir` package dependency)
+# ---------------------------------------------------------------------------
+
+def _download_beir(dataset: str, cache_dir: pathlib.Path) -> pathlib.Path:
+    """Download + unzip a BEIR dataset to ``<cache>/raw/<dataset>/`` (cached).
+
+    Uses the public BEIR zip and stdlib ``zipfile`` so the harness does not
+    depend on the ``beir`` package (which transitively pulls the unbuildable
+    ``pytrec_eval``) — keeping ``pip install -r requirements.txt`` clean.
+    """
+    import zipfile
+
+    from tqdm import tqdm
+
+    data_path = cache_dir / "raw" / dataset
+    if (data_path / "corpus.jsonl").exists():
+        print(f"[prepare] Using cached raw data at {data_path}", flush=True)
+        return data_path
+
+    raw_dir = cache_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    url = (
+        "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/"
+        f"{dataset}.zip"
+    )
+    print(f"[prepare] Downloading BEIR dataset: {url}", flush=True)
+    zip_path = raw_dir / f"{dataset}.zip"
+    with requests.get(url, stream=True, timeout=300) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        with open(zip_path, "wb") as f, tqdm(
+            total=total, unit="iB", unit_scale=True, desc=f"{dataset}.zip"
+        ) as bar:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+                bar.update(len(chunk))
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(raw_dir)
+    zip_path.unlink(missing_ok=True)
+    if not (data_path / "corpus.jsonl").exists():
+        raise FileNotFoundError(
+            f"BEIR archive for {dataset!r} did not unzip to {data_path}"
+        )
+    return data_path
+
+
+def _load_beir(
+    data_path: pathlib.Path, split: str
+) -> tuple[dict[str, dict[str, str]], dict[str, str], dict[str, dict[str, int]]]:
+    """Parse a BEIR dataset folder, mirroring ``beir.GenericDataLoader``:
+
+    ``corpus = {cid: {"title", "text"}}``, ``queries = {qid: text}``,
+    ``qrels = {qid: {cid: relevance}}``.
+    """
+    corpus: dict[str, dict[str, str]] = {}
+    with open(data_path / "corpus.jsonl", encoding="utf-8") as f:
+        for line in f:
+            d = json.loads(line)
+            corpus[str(d["_id"])] = {
+                "title": d.get("title", "") or "",
+                "text": d.get("text", "") or "",
+            }
+    queries: dict[str, str] = {}
+    with open(data_path / "queries.jsonl", encoding="utf-8") as f:
+        for line in f:
+            d = json.loads(line)
+            queries[str(d["_id"])] = d["text"]
+    qrels: dict[str, dict[str, int]] = {}
+    with open(data_path / "qrels" / f"{split}.tsv", encoding="utf-8") as f:
+        header = f.readline()
+        if "query-id" not in header:  # no header row → first line is data
+            f.seek(0)
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 3:
+                continue
+            qid, cid, score = parts[0], parts[1], parts[2]
+            qrels.setdefault(qid, {})[cid] = int(score)
+    return corpus, queries, qrels
+
+
+# ---------------------------------------------------------------------------
+# llama.cpp GGUF embedder (exact Q8_0 weights, same llama.cpp as OrdinalDB)
+# ---------------------------------------------------------------------------
+
+def _embed_llamacpp(
+    corpus_texts: list[str],
+    query_texts: list[str],
+    gguf_repo: str,
+    gguf_file: str,
+    n_gpu_layers: int,
+    n_ctx: int,
+    batch_size: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Embed with the Q8_0 GGUF via llama-cpp-python (same llama.cpp + weights a
+    native-Rust llama.cpp encoder uses), last-token pooled and L2-normalised.
+    Returns ``(corpus_emb, query_emb, meta)``.
+    """
+    import llama_cpp
+    from llama_cpp import Llama
+
+    llm = Llama.from_pretrained(
+        repo_id=gguf_repo,
+        filename=gguf_file,
+        embedding=True,
+        n_gpu_layers=n_gpu_layers,
+        n_ctx=n_ctx,
+        n_batch=n_ctx,  # embeddings need the whole sequence in one batch
+        n_ubatch=n_ctx,
+        pooling_type=llama_cpp.LLAMA_POOLING_TYPE_LAST,
+        verbose=False,
+    )
+
+    def _embed_all(texts: list[str]) -> np.ndarray:
+        vecs: list[np.ndarray] = []
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i : i + batch_size]
+            for e in llm.embed(chunk):
+                arr = np.asarray(e, dtype=np.float32)
+                if arr.ndim == 2:  # per-token (no pooling) → take last token
+                    arr = arr[-1]
+                vecs.append(arr)
+        return np.vstack(vecs).astype(np.float32)
+
+    prefixed_queries = [QUERY_PROMPT + q for q in query_texts]
+    corpus_emb = _embed_all(corpus_texts)
+    query_emb = _embed_all(prefixed_queries)
+
+    def _l2(a: np.ndarray) -> np.ndarray:
+        n = np.linalg.norm(a, axis=1, keepdims=True)
+        n = np.where(n == 0, 1.0, n)
+        return np.ascontiguousarray(a / n, dtype=np.float32)
+
+    corpus_emb = _l2(corpus_emb)
+    query_emb = _l2(query_emb)
+
+    meta: dict[str, Any] = {
+        "gguf_repo": gguf_repo,
+        "gguf_file": gguf_file,
+        "gguf_quant": "Q8_0",
+        "llama_cpp_python_version": getattr(llama_cpp, "__version__", "unknown"),
+        "n_gpu_layers": n_gpu_layers,
+        "n_ctx": n_ctx,
+        "canonical": True,
+    }
+    return corpus_emb, query_emb, meta
+
+
+# ---------------------------------------------------------------------------
 # Main prepare routine
 # ---------------------------------------------------------------------------
 
@@ -268,30 +417,40 @@ def prepare_dataset(
     batch_size: int,
     ollama_url: str,
     cache_dir: pathlib.Path,
+    gguf_file: str = "*Q8_0.gguf",
+    n_gpu_layers: int = -1,
+    n_ctx: int = 2048,
+    force: bool = False,
 ) -> None:
     """Run the full prepare pipeline for one dataset."""
-    from beir import util as beir_util
-    from beir.datasets.data_loader import GenericDataLoader
+    # 0. Skip if this exact encoder's artefacts are already cached. Re-embedding
+    #    a large corpus (e.g. trec-covid's 171K docs) is expensive, and several
+    #    benchmark targets touch the same dataset; `--force` re-embeds.
+    slug_revision = gguf_file if provider == "llamacpp" else revision
+    slug = encoder_slug(provider, model, slug_revision)
+    enc_dir = dataset_cache_dir(cache_dir, dataset, split, slug)
+    required = [
+        "corpus.f32.npy",
+        "queries.f32.npy",
+        "qrels.json",
+        "corpus_ids.json",
+        "query_ids.json",
+        "embeddings.manifest.json",
+        "sha256s.json",
+    ]
+    if not force and all((enc_dir / f).exists() for f in required):
+        print(
+            f"[prepare] {dataset}/{split}: cached encoder at {enc_dir} "
+            "(use --force to re-embed); skipping",
+            flush=True,
+        )
+        return
 
-    # ------------------------------------------------------------------ #
-    # 1. Download dataset if absent                                        #
-    # ------------------------------------------------------------------ #
-    data_path = cache_dir / "raw" / dataset
-    if not data_path.exists():
-        print(f"[prepare] Downloading BEIR dataset: {dataset}", flush=True)
-        url = f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{dataset}.zip"
-        data_path.parent.mkdir(parents=True, exist_ok=True)
-        out_dir = beir_util.download_and_unzip(str(url), str(data_path.parent))
-        data_path = pathlib.Path(out_dir)
-    else:
-        print(f"[prepare] Using cached raw data at {data_path}", flush=True)
-
-    # ------------------------------------------------------------------ #
-    # 2. Load                                                              #
-    # ------------------------------------------------------------------ #
-    corpus, queries, qrels = GenericDataLoader(data_folder=str(data_path)).load(
-        split=split
-    )
+    # 1. Download + 2. Load via the vendored BEIR reader (no `beir` package
+    #    dependency, so `pip install -r requirements.txt` stays clean on a fresh
+    #    machine — `beir` would otherwise pull the unbuildable `pytrec_eval`).
+    data_path = _download_beir(dataset, cache_dir)
+    corpus, queries, qrels = _load_beir(data_path, split)
 
     # ------------------------------------------------------------------ #
     # 3. Stable ordering                                                   #
@@ -315,9 +474,7 @@ def prepare_dataset(
     # ------------------------------------------------------------------ #
     # 5. Embed                                                             #
     # ------------------------------------------------------------------ #
-    slug = encoder_slug(provider, model, revision)
-    enc_dir = dataset_cache_dir(cache_dir, dataset, split, slug)
-
+    # (slug / enc_dir computed above for the cache-skip check.)
     t0 = time.time()
     if provider == "st":
         corpus_emb, query_emb, enc_meta = _embed_st(
@@ -334,6 +491,16 @@ def prepare_dataset(
             query_texts,
             model=model,
             ollama_url=ollama_url,
+            batch_size=batch_size,
+        )
+    elif provider == "llamacpp":
+        corpus_emb, query_emb, enc_meta = _embed_llamacpp(
+            corpus_texts,
+            query_texts,
+            gguf_repo=model,
+            gguf_file=gguf_file,
+            n_gpu_layers=n_gpu_layers,
+            n_ctx=n_ctx,
             batch_size=batch_size,
         )
     else:
@@ -406,6 +573,32 @@ def prepare_dataset(
             "transformers_version": enc_meta["transformers_version"],
             "torch_version": enc_meta["torch_version"],
         }
+    elif provider == "llamacpp":
+        embeddings_manifest = {
+            "encoder_provider": "llama-cpp-python",
+            "encoder_model": model,
+            "encoder_revision": enc_meta["gguf_file"],
+            "encoder_slug": slug,
+            "embedding_dim": dim,
+            "dtype": "float32",
+            "normalize_embeddings": True,
+            "query_prompt_name": None,
+            "query_prompt_text": QUERY_PROMPT,
+            "document_prompt_text": None,
+            "n_corpus": n_docs,
+            "n_queries": n_queries,
+            "corpus_sha256": corpus_sha256,
+            "query_sha256": query_sha256,
+            "embed_seconds": embed_seconds,
+            "gguf_repo": enc_meta["gguf_repo"],
+            "gguf_file": enc_meta["gguf_file"],
+            "gguf_quant": enc_meta["gguf_quant"],
+            "llama_cpp_python_version": enc_meta["llama_cpp_python_version"],
+            "n_gpu_layers": enc_meta["n_gpu_layers"],
+            "n_ctx": enc_meta["n_ctx"],
+            "pooling": "last_token",
+            "canonical": enc_meta["canonical"],
+        }
     else:  # ollama
         embeddings_manifest = {
             "encoder_provider": "ollama",
@@ -463,14 +656,47 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--provider",
-        choices=["st", "ollama"],
-        default="st",
-        help="Encoder provider: 'st' (sentence-transformers) or 'ollama'.",
+        choices=["st", "ollama", "llamacpp"],
+        default="llamacpp",
+        help=(
+            "Encoder provider: 'llamacpp' (GGUF via llama-cpp-python, CUDA — the "
+            "canonical lane), 'st' (sentence-transformers), or 'ollama'."
+        ),
     )
     p.add_argument(
         "--model",
-        default="microsoft/harrier-oss-v1-0.6b",
-        help="Model name / HuggingFace path (for 'st') or Ollama model tag.",
+        default="mradermacher/harrier-oss-v1-0.6b-GGUF",
+        help=(
+            "Encoder identity: HuggingFace repo path. For 'llamacpp' this is the "
+            "GGUF repo (paired with --gguf-file); for 'st' the model path; for "
+            "'ollama' the model tag."
+        ),
+    )
+    p.add_argument(
+        "--gguf-file",
+        default="*Q8_0.gguf",
+        dest="gguf_file",
+        help=(
+            "GGUF filename (glob ok) within --model's repo for the 'llamacpp' "
+            "lane (default: *Q8_0.gguf)."
+        ),
+    )
+    p.add_argument(
+        "--n-gpu-layers",
+        type=int,
+        default=-1,
+        dest="n_gpu_layers",
+        help=(
+            "Layers to offload to GPU for the 'llamacpp' lane; -1 = all "
+            "(default: -1)."
+        ),
+    )
+    p.add_argument(
+        "--n-ctx",
+        type=int,
+        default=2048,
+        dest="n_ctx",
+        help="Context window for the 'llamacpp' lane (default: 2048).",
     )
     p.add_argument(
         "--revision",
@@ -510,6 +736,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=42,
         help="Random seed (default: 42).",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-embed even if cached encoder artefacts already exist.",
+    )
     return p
 
 
@@ -543,6 +774,10 @@ def main(argv: list[str] | None = None) -> None:
                 batch_size=args.batch_size,
                 ollama_url=args.ollama_url,
                 cache_dir=cache_dir,
+                gguf_file=args.gguf_file,
+                n_gpu_layers=args.n_gpu_layers,
+                n_ctx=args.n_ctx,
+                force=args.force,
             )
         except Exception as exc:  # noqa: BLE001
             print(

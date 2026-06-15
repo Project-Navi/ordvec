@@ -516,11 +516,30 @@ def write_csv(
 #: Static family / implementation / search-type metadata for the matrix.
 #: Keyed by the method-name *stem* (params stripped).
 _METHOD_FAMILY: dict[str, dict[str, str]] = {
+    "flat": {
+        "family": "dense (float)",
+        "implementation": "Exact inner product (== FAISS FlatIP math)",
+        "search_type": "exact brute-force (SIMD GEMM)",
+        "headline_role": "baseline (comparison, not ground truth)",
+    },
+    "hnsw": {
+        "family": "dense (float) ANN",
+        "implementation": "HNSW M=32 (pure-Rust hnsw_rs)",
+        "search_type": "graph ANN (approximate)",
+        "headline_role": "candidate",
+    },
+    # Back-compat: the older Python-baselines lane used these slugs.
     "faiss-flat": {
         "family": "dense (float)",
         "implementation": "FAISS FlatIP",
         "search_type": "exact brute-force",
         "headline_role": "baseline (comparison, not ground truth)",
+    },
+    "hnswlib": {
+        "family": "dense (float) ANN",
+        "implementation": "hnswlib M=32",
+        "search_type": "graph ANN (approximate)",
+        "headline_role": "candidate",
     },
     "ordvec-rq2": {
         "family": "ordvec rank-quant",
