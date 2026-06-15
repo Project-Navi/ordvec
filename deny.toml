@@ -14,9 +14,15 @@ all-features = true
 
 [advisories]
 # Default behaviour: error on any RUSTSEC advisory (vulnerability) or
-# unmaintained crate in the tree. No advisories are currently ignored; add
-# entries with an explicit `reason` only when triaged.
-ignore = []
+# unmaintained crate in the tree. Triaged ignores carry an explicit reason.
+#
+# RUSTSEC-2025-0141 — bincode 1.x is UNMAINTAINED (an informational advisory,
+# NOT a vulnerability). It enters the graph only transitively via `hnsw_rs`,
+# itself a dependency of the dev-only `benchmarks/beir-bench` harness. It is NOT
+# in the published `ordvec` crate (`cargo tree -p ordvec` is clean of bincode),
+# so it does not reach any shipped artifact or crate consumer. Revisit if a
+# maintained HNSW crate that does not pull bincode 1.x is adopted.
+ignore = ["RUSTSEC-2025-0141"]
 
 [licenses]
 # Allow-list only. cargo-deny denies any license not listed here.

@@ -1,0 +1,45 @@
+# ordvec-beir benchmark — Python dependencies
+#
+# The canonical encoder lane is `llamacpp` (GGUF Q8_0 via llama-cpp-python,
+# CUDA). `make bench-beir-setup` installs this file, then builds
+# llama-cpp-python against the host CUDA toolkit (CMAKE_ARGS="-DGGML_CUDA=on")
+# — it is intentionally NOT listed here so `pip install -r requirements.txt`
+# never produces a throwaway CPU-only build.
+#
+# We deliberately do NOT depend on the `beir` package: it pulls the `pytrec_eval`
+# sdist, which fails to build on modern gcc. The BEIR dataset loader is vendored
+# in beir_prepare.py and evaluation uses the prebuilt `pytrec-eval-terrier`
+# wheel instead.
+#
+# Versions are LOWER-BOUND-PINNED at the first patched release for every package
+# with a known advisory, so this dev-only harness stays clean under OSV /
+# OpenSSF-Scorecard scanning (an UNPINNED dep is flagged against the package's
+# entire historical CVE list). `>=` keeps installs on the latest compatible wheel
+# (incl. recent CPython) while excluding all known-vulnerable versions.
+
+# --- core ---
+numpy>=1.26.0
+scipy>=1.11.0
+requests>=2.32.4          # GHSA-9hjg-9r4m-mvj7 (.netrc leak) + all older requests CVEs
+tqdm>=4.66.3              # CVE-2024-34062
+pandas>=2.2.0
+tabulate>=0.9.0
+
+# --- model download for the canonical llamacpp lane ---
+huggingface-hub>=0.24.0
+
+# --- retrieval baselines (comparison references, NOT ground truth) ---
+faiss-cpu>=1.8.0
+hnswlib>=0.8.0            # GHSA-xwc8-rf6m-xr86 (double free)
+
+# --- evaluation: trec_eval bindings (prebuilt wheel, no C compile) ---
+pytrec-eval-terrier>=0.5.6
+
+# --- README benchmark graphics ---
+matplotlib>=3.8.0
+
+# --- optional: sentence-transformers lane (`--provider st`) ---
+# Heavy (pulls torch). Uncomment to enable the fp32 ST encoder lane:
+# sentence-transformers>=3.0.0
+# torch>=2.2.0
+# transformers>=4.44.0
