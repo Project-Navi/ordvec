@@ -13,7 +13,14 @@
 //!   coordinate, `2 * dim` bytes per document).
 //! - [`RankQuant`] buckets each rank into `1 << bits` equal-width
 //!   bins and packs `bits` bits per coordinate (`dim * bits / 8` bytes
-//!   per document).
+//!   per document). `bits ∈ {1, 2, 4}` are the stable retrieval widths;
+//!   `b = 8` is a capability-gated evidence/refinement width — asymmetric
+//!   scoring and code/projection generation at any dim, *analytical-norm*
+//!   symmetric scoring (via [`RankQuant::search`]) only when
+//!   `dim % 256 == 0` (see [`RankQuant::new_asymmetric`]). The standalone
+//!   [`rankquant_eval_search`] computes its norm *empirically*, so it scores
+//!   any `bits ∈ 1..=8` at any dim (including `b = 8` off the 256 grid) and
+//!   carries no such restriction.
 //! - [`Bitmap`] stores a top-bucket bitmap per document (one bit
 //!   per coordinate) and scores via `popcount(Q AND D)`.
 //! - [`SignBitmap`] stores a sign bitmap per document (one bit per
@@ -54,6 +61,8 @@ mod bitmap;
 /// Index-free, fixed-composition ordinal bucket codes (issue #220).
 #[cfg(feature = "experimental")]
 pub mod bucket_code;
+#[cfg(feature = "experimental")]
+mod contingency;
 mod fastscan;
 #[cfg(feature = "experimental")]
 mod multi_bucket;
@@ -66,9 +75,11 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
-pub use quant::{rankquant_eval_search, RankQuant, TwoStageCandidatePolicy};
+pub use quant::SubsetScratch;
+pub use quant::{rankquant_eval_search, RankQuant, RankQuantCapability, TwoStageCandidatePolicy};
 pub use rank::Rank;
 pub use rank_io::{probe_index_metadata, IndexKind, IndexMetadata, IndexParams};
+pub use sign_bitmap::CandidateBatch;
 pub use sign_bitmap::SignBitmap;
 
 // `search_asymmetric_byte_lut` is a bench-only scoring reference: it
@@ -81,12 +92,44 @@ pub use sign_bitmap::SignBitmap;
 #[doc(hidden)]
 pub use quant::search_asymmetric_byte_lut;
 
-// `MultiBucketBitmap` underwrites the bilinear bucket-overlap
-// decomposition but is not the constant-weight top-bucket theorem surface and
-// is not stable public API. It is reachable only with the `experimental`
-// feature; the default surface excludes it.
+// `subset_rerank_uses_simd` is a test-only dispatch probe used by the crate's
+// own SIMD-parity tests. Gated behind the non-default `test-utils` feature and
+// excluded from semver guarantees — not a supported downstream API.
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub use quant::subset_rerank_uses_simd;
+
+// `MultiBucketBitmap` underwrites the bilinear bucket-overlap decomposition.
+//
+// **`MultiBucketBitmap` is NOT the default retrieval surface.** It is a
+// research/analysis primitive for the full bilinear `nb × nb` weight-matrix
+// decomposition, not the constant-weight top-bucket theorem surface implemented
+// by [`Bitmap`]. Its per-document storage is 2–4× larger than the corresponding
+// `RankQuant` encoding; the full outer-product path does not outperform the
+// equivalent per-coord scalar form and exists to expose the decomposition
+// empirically and serve as a reference for truncated weight matrices.
+//
+// `MultiBucketBitmap` is gated behind the **non-default `experimental` cargo
+// feature**, is excluded from semver guarantees, and may change or be removed
+// without a major-version bump. It is not part of the stable public surface.
 #[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmap;
+
+// `Contingency` / `Projection` are the **stable** stateless dense-code
+// contingency-table surface added in this release (issue #219): the full
+// `nb × nb` bucket-overlap table for two `&[u8]` code slices, plus its named
+// projections (diagonal agreement, band agreement, top-bucket overlap, L1
+// distance, etc.). This is a research/analysis primitive — it is *not* a
+// retrieval index and is never wired into any search path.
+//
+// Although `Contingency` and `Projection` are gated behind the same
+// `experimental` feature as `MultiBucketBitmap` (they complement the bilinear
+// decomposition that surface exposes), they are the **stable** side of the
+// `experimental` gate: the stateless dense API is the intended long-term
+// surface and is covered by semver guarantees from this release forward.
+// `MultiBucketBitmap` is the unstable counterpart — see the note above.
+#[cfg(feature = "experimental")]
+pub use contingency::{Contingency, Projection};
 
 // Index-free, fixed-composition ordinal bucket codes (issue #220). The reusable
 // bucket-code surface — derive/validate per-coordinate bucket codes from a
@@ -102,6 +145,28 @@ pub use bucket_code::{BucketCode, CompositionSpec, CompositionViolation, RankQua
 // advertised alongside the headline index types above.
 #[doc(hidden)]
 pub use fastscan::RankQuantFastscan;
+
+/// Whether the AVX-512 VPOPCNTDQ bitmap/sign scan kernels are active on this
+/// CPU. `#[doc(hidden)]` — a diagnostic for tests and downstream probes, not a
+/// stability surface.
+///
+/// The scan dispatch ([`SignBitmap`] and [`Bitmap`]) consults this and
+/// **nothing else** — it takes no dimension. So once VPOPCNTDQ is present,
+/// *every* `dim` (a multiple of 64) runs the kernel, including dims whose
+/// 64-bit word count is not a multiple of 8 (e.g. 384, 768): those are handled
+/// by a masked tail, not by falling back to the scalar path.
+#[doc(hidden)]
+#[must_use]
+pub fn avx512vpop_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
 
 // Pre-0.2 names (the `Index` suffix was dropped in the OrdVec ontology
 // rebrand). Retained as deprecated type aliases for back-compat; remove

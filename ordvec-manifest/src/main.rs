@@ -108,8 +108,8 @@ mod tests {
 
     #[test]
     fn auxiliary_artifact_arg_trims_name_and_path() {
-        let parsed = parse_auxiliary_artifact_arg(" ordinaldb.ids = ids.bin ").unwrap();
-        assert_eq!(parsed.name, "ordinaldb.ids");
+        let parsed = parse_auxiliary_artifact_arg(" app.ids = ids.bin ").unwrap();
+        assert_eq!(parsed.name, "app.ids");
         assert_eq!(parsed.path, PathBuf::from("ids.bin"));
     }
 }

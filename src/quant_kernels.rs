@@ -40,6 +40,7 @@ pub(crate) fn scan_via_lut_scalar(
         1 => scan_b1_to_topk(packed, n, dim, &lut, scale, top),
         2 => scan_b2_to_topk(packed, n, dim, &lut, scale, top),
         4 => scan_b4_to_topk(packed, n, dim, &lut, scale, top),
+        8 => scan_b8_to_topk(packed, n, dim, &lut, scale, top),
         _ => unreachable!("bits validated in new()"),
     }
 }
@@ -122,6 +123,57 @@ pub(crate) fn scan_b4_to_topk(
             let base = (g * 2) * 16;
             acc += lut[base + (((byte >> 4) & 0xF) as usize)];
             acc += lut[base + 16 + ((byte & 0xF) as usize)];
+        }
+        top.maybe_insert(acc * scale, di);
+    }
+}
+
+/// Build the `dim * 256` per-coordinate asymmetric LUT for `b=8`:
+/// `lut[d * 256 + code] = q_unit[d] * bucket_centre(code, 8)`. This is the
+/// shared input to both the scalar [`scan_b8_to_topk`] reference and the
+/// AVX-512 [`scan_b8_asym_avx512_gather`] kernel, so they score-parity.
+///
+/// `bucket_centre(code, 8) = code - 127.5`, so each row is the query
+/// coordinate scaled across the 256 centred bucket values.
+pub(crate) fn build_b8_asym_lut(q_unit: &[f32]) -> Vec<f32> {
+    let dim = q_unit.len();
+    let mut lut = vec![0.0f32; dim * 256];
+    for d in 0..dim {
+        let qd = q_unit[d];
+        let row = &mut lut[d * 256..(d + 1) * 256];
+        for (code, slot) in row.iter_mut().enumerate() {
+            *slot = qd * bucket_centre(code as u8, 8);
+        }
+    }
+    lut
+}
+
+/// 8-bit scan. 1 code per byte; n_buckets = 256. The degenerate
+/// one-code-per-byte case: `doc[d]` is the code at coordinate `d`, so the
+/// inner loop is a single LUT lookup per byte against the `dim * 256`
+/// per-coord LUT. Used by both the symmetric path (`bucket_centre` LUT)
+/// and the asymmetric scalar LUT path (`q_unit[d] * bucket_centre(b)`).
+///
+/// This is also the **portable scalar reference** for the `b=8` asymmetric
+/// gather: it sums in strict coordinate order, one lookup + add per byte,
+/// so it is the bit-exact baseline the AVX-512 gather kernel is parity-
+/// tested against (within the crate's 1e-4 cross-backend tolerance).
+pub(crate) fn scan_b8_to_topk(
+    packed: &[u8],
+    n: usize,
+    dim: usize,
+    lut: &[f32],
+    scale: f32,
+    top: &mut TopK,
+) {
+    let bytes_per_vec = dim; // 1 byte per coordinate
+    for di in 0..n {
+        let doc = &packed[di * bytes_per_vec..(di + 1) * bytes_per_vec];
+        let mut acc = 0.0f32;
+        for (d, &code) in doc.iter().enumerate() {
+            // LUT row `d` has 256 entries (one per code value); the code is
+            // already the bucket index for b=8.
+            acc += lut[d * 256 + code as usize];
         }
         top.maybe_insert(acc * scale, di);
     }
@@ -496,6 +548,412 @@ pub(crate) unsafe fn scan_b4_asym_avx512(
             let total = _mm512_add_ps(s01, s23);
             let raw = _mm512_reduce_add_ps(total);
             top.maybe_insert(raw * scale, di);
+        }
+    }
+}
+
+/// Single entry point for the `b=8` asymmetric scan.
+///
+/// Builds the shared `dim * 256` per-coordinate LUT once
+/// ([`build_b8_asym_lut`]), then dispatches to the AVX-512 gather kernel
+/// ([`scan_b8_asym_avx512_gather`]) when `avx512f` + `avx512bw` are detected at
+/// runtime and `dim % 16 == 0`, falling back to the portable scalar reference
+/// ([`scan_b8_to_topk`]) on every other target / CPU / dim. Centralising
+/// the dispatch here keeps the `unsafe` SIMD reach in one place and out of
+/// `quant.rs`.
+pub(crate) fn scan_b8_asym(
+    packed: &[u8],
+    n: usize,
+    dim: usize,
+    q_unit: &[f32],
+    scale: f32,
+    top: &mut TopK,
+) {
+    let lut = build_b8_asym_lut(q_unit);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && dim.is_multiple_of(16)
+        {
+            // SAFETY: `avx512f`+`avx512bw` are confirmed by the runtime detection above
+            // and `dim % 16 == 0` satisfies the kernel's lane invariant;
+            // `packed.len() == n * dim` and `lut.len() == dim * 256` hold by
+            // construction (b=8 packs one byte/coord; the LUT is built just
+            // above). The explicit block is required by
+            // `#![deny(unsafe_op_in_unsafe_fn)]`.
+            unsafe {
+                scan_b8_asym_avx512_gather(packed, n, dim, &lut, scale, top);
+            }
+            return;
+        }
+    }
+    scan_b8_to_topk(packed, n, dim, &lut, scale, top);
+}
+
+// -------------------------------------------------------------------
+// AVX-512 gather kernel for the b=8 asymmetric path.
+//
+// Unlike b ∈ {2, 4} — whose tiny per-byte arithmetic (shift/mask/cvt/FMA)
+// beats any memory indirection — b=8 carries a large per-coordinate
+// 256-entry float LUT (`lut[d * 256 + code]`), so the score is an honest
+// gather: `Σ_d lut[d * 256 + doc_code[d]]`. The dominant cost is the
+// gather, which `vgatherdps` (`_mm512_i32gather_ps`) issues 16-wide in a
+// single instruction.
+//
+// Per 16-coordinate chunk:
+//   * load 16 doc bytes, zero-extend to i32 lanes (`_mm512_cvtepu8_epi32`);
+//   * add the per-position row-base vector `[d*256, (d+1)*256, …]` so lane
+//     `j` indexes `lut[(d+j) * 256 + code[d+j]]`;
+//   * `_mm512_i32gather_ps(idx, lut_ptr, 4)` gathers all 16 contributions;
+//   * accumulate (plain add — the LUT already encodes `q · centre`).
+// Four independent accumulators break the add dependency chain, matching
+// the b=2/b=4 AVX-512 kernels. Unlike those, b=8 needs no centre-drop
+// trick: the asymmetric LUT bakes the per-coordinate query weight in, so
+// there is no per-query constant offset to reapply at finalize.
+//
+// Caller must verify `is_x86_feature_detected!("avx512f") && ..("avx512bw")`
+// once. `avx512bw` is gated alongside `avx512f` to match the rest of the
+// crate's AVX-512 kernels (which require `avx512dq`) and to keep the byte
+// widening (`_mm512_cvtepu8_epi32`) conservatively gated — the F-without-BW
+// CPUs (KNL/KNM) are already excluded by the crate's `dq` requirement, so this
+// adds no real exclusion. The LUT is the same `dim * 256` f32 layout the scalar
+// `scan_b8_to_topk` consumes, so the two paths are score-parity (modulo f32
+// summation order, within the crate's 1e-4 cross-backend tolerance).
+// -------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+pub(crate) unsafe fn scan_b8_asym_avx512_gather(
+    packed: &[u8],
+    n: usize,
+    dim: usize,
+    lut: &[f32],
+    scale: f32,
+    top: &mut TopK,
+) {
+    use std::arch::x86_64::*;
+
+    // SAFETY: a `pub(crate) unsafe fn` reachable only via `quant.rs`'s
+    // runtime-detected dispatch, which upholds the invariants the raw doc
+    // reads (`packed.as_ptr().add(di * dim + base)`), the LUT gather
+    // (`_mm512_i32gather_ps` off `lut.as_ptr()`), and the chunk loop depend
+    // on:
+    //   * `packed.len() == n * dim` (b=8 stores one byte per coordinate),
+    //   * `lut.len() == dim * 256` (one 256-entry row per coordinate),
+    //   * `dim % 16 == 0` (asserted immediately below) so the 16-lane chunk
+    //     loop tiles each doc exactly with no tail.
+    // Every gather index `(d + j) * 256 + code` is `< dim * 256` because
+    // `d + j < dim` and `code <= 255`, so each gathered f32 is in-bounds.
+    // `RankQuant::{new_asymmetric,add}` pack exactly `dim` bytes/doc and the
+    // dispatch builds a `dim * 256` LUT, so this holds on every path here.
+    // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
+    unsafe {
+        // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
+        // loudly in release, not silently drop the trailing chunk.
+        assert_eq!(dim % 16, 0, "b=8 AVX-512 gather path needs dim % 16 == 0");
+        debug_assert_eq!(lut.len(), dim * 256, "b=8 LUT must be dim * 256 entries");
+        let bytes_per_vec = dim; // one byte per coordinate
+        let lut_ptr = lut.as_ptr();
+
+        // Per-position row bases for one 16-lane chunk: lane j contributes
+        // `j * 256`. The chunk's coordinate offset `c * 16 * 256` is folded
+        // into the doc-byte indices below.
+        let lane_row_base = _mm512_setr_epi32(
+            0, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584,
+            3840,
+        );
+        let chunks_per_vec = bytes_per_vec / 16;
+
+        for di in 0..n {
+            let doc = packed.as_ptr().add(di * bytes_per_vec);
+            let mut acc0 = _mm512_setzero_ps();
+            let mut acc1 = _mm512_setzero_ps();
+            let mut acc2 = _mm512_setzero_ps();
+            let mut acc3 = _mm512_setzero_ps();
+
+            // Round chunks down to a multiple of 4 for the unrolled body;
+            // a `dim % 64 != 0` (but `% 16 == 0`) dim leaves a ≤3-chunk tail
+            // handled by the single-accumulator loop after.
+            let unrolled = chunks_per_vec & !3;
+
+            let mut c = 0usize;
+            while c < unrolled {
+                macro_rules! step {
+                    ($cc:expr, $acc:expr) => {{
+                        // Coordinate base for this chunk: `cc * 16 * 256`.
+                        let chunk_base = _mm512_set1_epi32(($cc * 16 * 256) as i32);
+                        // Load 16 doc bytes, zero-extend to 16 i32 lanes.
+                        let bytes = _mm_loadu_si128(doc.add($cc * 16) as *const __m128i);
+                        let codes = _mm512_cvtepu8_epi32(bytes);
+                        // idx[j] = chunk_base + (j * 256) + code[j]
+                        //        = (cc*16 + j) * 256 + code[cc*16 + j]
+                        let idx =
+                            _mm512_add_epi32(_mm512_add_epi32(chunk_base, lane_row_base), codes);
+                        // Gather 16 LUT contributions (scale = 4 bytes/f32).
+                        let vals = _mm512_i32gather_ps::<4>(idx, lut_ptr);
+                        $acc = _mm512_add_ps($acc, vals);
+                    }};
+                }
+                step!(c, acc0);
+                step!(c + 1, acc1);
+                step!(c + 2, acc2);
+                step!(c + 3, acc3);
+                c += 4;
+            }
+
+            // Tail: remaining (< 4) chunks fold into acc0.
+            while c < chunks_per_vec {
+                let chunk_base = _mm512_set1_epi32((c * 16 * 256) as i32);
+                let bytes = _mm_loadu_si128(doc.add(c * 16) as *const __m128i);
+                let codes = _mm512_cvtepu8_epi32(bytes);
+                let idx = _mm512_add_epi32(_mm512_add_epi32(chunk_base, lane_row_base), codes);
+                let vals = _mm512_i32gather_ps::<4>(idx, lut_ptr);
+                acc0 = _mm512_add_ps(acc0, vals);
+                c += 1;
+            }
+
+            let s01 = _mm512_add_ps(acc0, acc1);
+            let s23 = _mm512_add_ps(acc2, acc3);
+            let total = _mm512_add_ps(s01, s23);
+            let raw = _mm512_reduce_add_ps(total);
+            top.maybe_insert(raw * scale, di);
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod b8_gather_tests {
+    use super::{build_b8_asym_lut, scan_b8_asym_avx512_gather, scan_b8_to_topk};
+    use crate::util::TopK;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    /// Drain a `k`-slot `TopK` into a flat `(score, idx)` vec sorted by the
+    /// collector's own composite key, so the two kernels are compared on the
+    /// exact tuples a caller would receive.
+    fn drain(top: &TopK, k: usize) -> (Vec<f32>, Vec<i64>) {
+        let mut scores = vec![f32::NEG_INFINITY; k];
+        let mut idxs = vec![-1i64; k];
+        top.finalize_into(&mut scores, &mut idxs);
+        (scores, idxs)
+    }
+
+    /// The AVX-512 `vgatherdps` b=8 kernel must match the scalar LUT
+    /// reference within the crate's 1e-4 cross-backend score tolerance,
+    /// across the headline embedding dims (all `% 16 == 0`, so the gather
+    /// path is actually exercised). 768/1536 are `% 64 == 0` (full
+    /// 4-way-unrolled body); to also cover the ≤3-chunk tail path we add
+    /// dim=400 (`400 % 16 == 0`, `400 % 64 == 16`).
+    #[test]
+    fn b8_gather_matches_scalar_reference() {
+        if !(is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")) {
+            eprintln!("skipping b8 gather parity: no avx512f+avx512bw on this host");
+            return;
+        }
+        for &dim in &[384usize, 400, 768, 1024, 1536] {
+            assert_eq!(dim % 16, 0, "test dims must be % 16 for the gather path");
+            let n = 64;
+            let k = 10;
+            let mut rng = ChaCha8Rng::seed_from_u64(0x00B8_0000 + dim as u64);
+
+            // Random doc codes (any byte 0..=255) and a random unit-ish query.
+            let packed: Vec<u8> = (0..n * dim).map(|_| rng.random::<u8>()).collect();
+            let q: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let qn: f32 = q.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let q_unit: Vec<f32> = q.iter().map(|x| x / qn).collect();
+            let scale = 1.0f32 / 137.0; // arbitrary inv_norm-like scale
+
+            let lut = build_b8_asym_lut(&q_unit);
+
+            let mut top_scalar = TopK::new(k);
+            scan_b8_to_topk(&packed, n, dim, &lut, scale, &mut top_scalar);
+            let (s_scalar, i_scalar) = drain(&top_scalar, k);
+
+            let mut top_gather = TopK::new(k);
+            // SAFETY: avx512f+avx512bw confirmed above; dim % 16 == 0; packed has
+            // n*dim bytes and lut has dim*256 entries by construction.
+            unsafe {
+                scan_b8_asym_avx512_gather(&packed, n, dim, &lut, scale, &mut top_gather);
+            }
+            let (s_gather, i_gather) = drain(&top_gather, k);
+
+            for slot in 0..k {
+                assert!(
+                    (s_scalar[slot] - s_gather[slot]).abs() < 1e-4,
+                    "dim={dim} slot={slot}: scalar {} vs gather {}",
+                    s_scalar[slot],
+                    s_gather[slot],
+                );
+            }
+            // With well-separated random scores the top-k id sets agree too.
+            assert_eq!(
+                i_scalar, i_gather,
+                "dim={dim}: top-{k} id ordering diverged between scalar and gather"
+            );
+        }
+    }
+
+    /// The gather kernel's per-doc raw score equals the brute-force
+    /// `Σ_d lut[d*256 + code[d]]` (before the `scale` multiply), confirming
+    /// the index math `idx[j] = (c*16 + j) * 256 + code` is exact.
+    ///
+    /// This compares the *unscaled* sum, whose magnitude (~10² for centred
+    /// b=8 codes up to ±127.5 over `dim` terms) is far larger than the
+    /// `inv_norm`-scaled score a caller sees. The SIMD kernel's 4-way
+    /// parallel accumulation rounds in a different order from the strict
+    /// sequential brute-force, so the check is *relative* (~1e-5): the
+    /// production 1e-4 *absolute* tolerance applies to the small final
+    /// scaled scores, which the parity test above covers.
+    #[test]
+    fn b8_gather_raw_score_is_exact_gather_sum() {
+        if !(is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")) {
+            return;
+        }
+        let dim = 256usize;
+        let n = 8;
+        let k = n;
+        let mut rng = ChaCha8Rng::seed_from_u64(0x00B8_FACE);
+        let packed: Vec<u8> = (0..n * dim).map(|_| rng.random::<u8>()).collect();
+        let q_unit: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let lut = build_b8_asym_lut(&q_unit);
+
+        let mut top = TopK::new(k);
+        // SAFETY: avx512f+avx512bw confirmed; dim % 16 == 0; shapes match.
+        unsafe {
+            scan_b8_asym_avx512_gather(&packed, n, dim, &lut, 1.0, &mut top);
+        }
+        let (scores, idxs) = drain(&top, k);
+
+        // Brute-force reference, indexed by returned doc id.
+        let want: Vec<f32> = (0..n)
+            .map(|di| {
+                let doc = &packed[di * dim..(di + 1) * dim];
+                doc.iter()
+                    .enumerate()
+                    .map(|(d, &code)| lut[d * 256 + code as usize])
+                    .sum::<f32>()
+            })
+            .collect();
+        for slot in 0..k {
+            let di = idxs[slot] as usize;
+            let rel = (scores[slot] - want[di]).abs() / want[di].abs().max(1.0);
+            assert!(
+                rel < 1e-4,
+                "doc {di}: gather {} vs brute {} (rel {rel})",
+                scores[slot],
+                want[di]
+            );
+        }
+    }
+
+    /// Honest, kernel-isolated micro-benchmark: b=8 scalar LUT vs b=8
+    /// AVX-512 gather vs the b=4 AVX-512 asym kernel, on the same N×dim
+    /// corpus. `#[ignore]` so it does not run in the default gate — invoke
+    /// with:
+    ///
+    /// ```text
+    /// cargo test --release --lib b8_kernel_microbench -- --ignored --nocapture
+    /// ```
+    ///
+    /// It times the inner scan only (LUT build + scan), so the scalar-vs-SIMD
+    /// decision is measured directly rather than inferred. Per-iteration
+    /// wall time is reported in ms and as ns/doc/dim so the cost is
+    /// comparable across widths. Numbers are wall-clock and vary run-to-run;
+    /// the parity tests above are the correctness gate.
+    #[test]
+    #[ignore = "perf micro-bench; run explicitly with --ignored --nocapture --release"]
+    fn b8_kernel_microbench() {
+        use crate::quant_kernels::{scan_b4_asym_avx512, scan_b8_asym_avx512_gather};
+        use std::time::Instant;
+
+        let have_avx512 = is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512dq")
+            && is_x86_feature_detected!("avx512bw"); // b=4 path needs dq, b=8 gather needs bw
+        let dim = 1024usize; // % 64 == 0 → valid for both b=4 and b=8 SIMD
+        let n = 50_000usize;
+        let k = 10usize;
+        let iters = 20usize;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0x00B8_4BE4);
+        let q: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let qn: f32 = q.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let q_unit: Vec<f32> = q.iter().map(|x| x / qn).collect();
+        let scale = 1.0f32 / 137.0;
+
+        // b=8 corpus: one byte per coord.
+        let packed8: Vec<u8> = (0..n * dim).map(|_| rng.random::<u8>()).collect();
+        // b=4 corpus: two codes per byte → dim/2 bytes per doc.
+        let packed4: Vec<u8> = (0..n * dim / 2).map(|_| rng.random::<u8>()).collect();
+
+        let lut8 = build_b8_asym_lut(&q_unit);
+
+        let bench = |label: &str, mut f: Box<dyn FnMut()>| {
+            f(); // warmup
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                f();
+            }
+            let per = t0.elapsed().as_secs_f64() / iters as f64;
+            let ns_per_doc_dim = per * 1e9 / (n as f64 * dim as f64);
+            let gdocs = n as f64 / per / 1e9;
+            println!(
+                "  {label:<26} {:>8.3} ms/scan  {:>7.3} ns/doc/dim  {:>7.3} Gdoc/s",
+                per * 1e3,
+                ns_per_doc_dim,
+                gdocs,
+            );
+        };
+
+        println!(
+            "\nb=8 asymmetric kernel micro-bench (dim={dim}, n={n}, k={k}, iters={iters}, avx512={have_avx512})"
+        );
+
+        {
+            let packed8 = packed8.clone();
+            let lut8 = lut8.clone();
+            bench(
+                "b=8 scalar LUT",
+                Box::new(move || {
+                    let mut top = TopK::new(k);
+                    scan_b8_to_topk(&packed8, n, dim, &lut8, scale, &mut top);
+                    std::hint::black_box(&top);
+                }),
+            );
+        }
+
+        if have_avx512 {
+            let packed8 = packed8.clone();
+            let lut8 = lut8.clone();
+            bench(
+                "b=8 AVX-512 gather",
+                Box::new(move || {
+                    let mut top = TopK::new(k);
+                    // SAFETY: avx512f+avx512bw confirmed; dim % 16 == 0; shapes match.
+                    unsafe {
+                        scan_b8_asym_avx512_gather(&packed8, n, dim, &lut8, scale, &mut top);
+                    }
+                    std::hint::black_box(&top);
+                }),
+            );
+
+            // b=4 AVX-512 asym for cross-width context (raw codes, no LUT;
+            // dim % 64 == 0 satisfies its lane invariant).
+            let packed4 = packed4.clone();
+            let q_unit4 = q_unit.clone();
+            bench(
+                "b=4 AVX-512 asym (context)",
+                Box::new(move || {
+                    let mut top = TopK::new(k);
+                    // SAFETY: avx512f+dq confirmed; dim % 64 == 0; shapes match.
+                    unsafe {
+                        scan_b4_asym_avx512(&packed4, n, dim, &q_unit4, scale, &mut top);
+                    }
+                    std::hint::black_box(&top);
+                }),
+            );
+        } else {
+            println!("  (avx512 unavailable — SIMD rows skipped)");
         }
     }
 }

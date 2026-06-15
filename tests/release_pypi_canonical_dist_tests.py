@@ -6,8 +6,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import tarfile
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -33,6 +35,160 @@ def write_complete_release_dist(directory: Path, project: str = "ordvec") -> dic
         f"{project}-0.3.0-cp310-abi3-win_amd64.whl": b"windows amd64",
     }
     return {name: write(directory / name, data) for name, data in files.items()}
+
+
+def make_wheel(
+    path: Path,
+    project: str = "ordvec_manifest",
+    version: str = "0.5.0",
+    license_members: tuple[str, ...] = ("LICENSE-MIT", "LICENSE-APACHE-2.0"),
+    *,
+    nested_only: bool = False,
+) -> None:
+    """Write a minimal wheel (zip) whose license text lives under
+    `<dist>.dist-info/licenses/`, matching the layout maturin produces. With
+    `nested_only`, the license is written somewhere other than that canonical
+    location so the matcher must treat it as absent."""
+    dist_info = f"{project}-{version}.dist-info"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(f"{project}/__init__.py", b"")
+        archive.writestr(f"{dist_info}/METADATA", b"Metadata-Version: 2.4\n")
+        archive.writestr(f"{dist_info}/RECORD", b"")
+        for member in license_members:
+            location = (
+                f"{project}/vendor/{member}"
+                if nested_only
+                else f"{dist_info}/licenses/{member}"
+            )
+            archive.writestr(location, b"license text\n")
+
+
+def make_sdist(
+    path: Path,
+    project: str = "ordvec_manifest",
+    version: str = "0.5.0",
+    license_members: tuple[str, ...] = ("LICENSE-MIT", "LICENSE-APACHE-2.0"),
+    *,
+    nested_only: bool = False,
+) -> None:
+    """Write a minimal sdist (tar.gz) whose license text lives at the archive
+    root `<root>/<name>`. With `nested_only`, the license is only placed inside a
+    vendored subdirectory so the matcher must treat the root as missing it."""
+    root = f"{project}-{version}"
+
+    def add_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    with tarfile.open(path, "w:gz") as archive:
+        add_bytes(archive, f"{root}/PKG-INFO", b"Metadata-Version: 2.4\n")
+        add_bytes(archive, f"{root}/pyproject.toml", b"[project]\n")
+        for member in license_members:
+            location = (
+                f"{root}/vendored-crate/{member}"
+                if nested_only
+                else f"{root}/{member}"
+            )
+            add_bytes(archive, location, b"license text\n")
+
+
+class LicenseMemberTests(unittest.TestCase):
+    REQUIRED = ("LICENSE-MIT", "LICENSE-APACHE-2.0")
+
+    def test_wheel_license_basenames_read_from_dist_info_licenses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel = Path(tmp) / "ordvec_manifest-0.5.0-cp310-abi3-win_amd64.whl"
+            make_wheel(wheel)
+            # The `.dist-info/licenses/` dir holds only license files.
+            self.assertEqual(
+                canonical.canonical_license_basenames(wheel),
+                {"LICENSE-MIT", "LICENSE-APACHE-2.0"},
+            )
+
+    def test_sdist_license_basenames_read_from_archive_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sdist = Path(tmp) / "ordvec_manifest-0.5.0.tar.gz"
+            make_sdist(sdist)
+            # The sdist root holds the licenses plus PKG-INFO/pyproject; the
+            # licenses must be present among the root members.
+            found = canonical.canonical_license_basenames(sdist)
+            self.assertTrue({"LICENSE-MIT", "LICENSE-APACHE-2.0"} <= found)
+
+    def test_check_license_members_passes_for_compliant_dist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wheel = root / "ordvec_manifest-0.5.0-cp310-abi3-win_amd64.whl"
+            sdist = root / "ordvec_manifest-0.5.0.tar.gz"
+            make_wheel(wheel)
+            make_sdist(sdist)
+            # Must not raise.
+            canonical.check_license_members(
+                {wheel.name: wheel, sdist.name: sdist}, self.REQUIRED
+            )
+
+    def test_check_license_members_rejects_wheel_missing_license(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel = Path(tmp) / "ordvec_manifest-0.5.0-cp310-abi3-win_amd64.whl"
+            make_wheel(wheel, license_members=("LICENSE-MIT",))
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                canonical.check_license_members({wheel.name: wheel}, self.REQUIRED)
+
+    def test_check_license_members_rejects_sdist_missing_license(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sdist = Path(tmp) / "ordvec_manifest-0.5.0.tar.gz"
+            make_sdist(sdist, license_members=("LICENSE-APACHE-2.0",))
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                canonical.check_license_members({sdist.name: sdist}, self.REQUIRED)
+
+    def test_check_license_members_rejects_nested_only_copies(self) -> None:
+        # A license buried in a vendored subdirectory does NOT satisfy the
+        # canonical-location requirement — this is the exact regression class.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wheel = root / "ordvec_manifest-0.5.0-cp310-abi3-win_amd64.whl"
+            sdist = root / "ordvec_manifest-0.5.0.tar.gz"
+            make_wheel(wheel, nested_only=True)
+            make_sdist(sdist, nested_only=True)
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                canonical.check_license_members({wheel.name: wheel}, self.REQUIRED)
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                canonical.check_license_members({sdist.name: sdist}, self.REQUIRED)
+
+    def test_check_license_members_noop_when_no_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel = Path(tmp) / "ordvec_manifest-0.5.0-cp310-abi3-win_amd64.whl"
+            make_wheel(wheel, license_members=())
+            # No required license files → no inspection, no failure.
+            canonical.check_license_members({wheel.name: wheel}, ())
+
+    def test_canonicalize_rejects_built_dist_without_license(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            built = root / "built"
+            out = root / "out"
+            built.mkdir()
+            make_sdist(built / "ordvec_manifest-0.5.0.tar.gz")
+            make_wheel(
+                built / "ordvec_manifest-0.5.0-cp310-abi3-win_amd64.whl",
+                license_members=("LICENSE-MIT",),
+            )
+
+            old_fetch = canonical.fetch_pypi_payload
+            canonical.fetch_pypi_payload = lambda project, version: self.fail(
+                "license check must fail before any PyPI fetch"
+            )
+            try:
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    canonical.canonicalize(
+                        "ordvec-manifest",
+                        "0.5.0",
+                        built,
+                        out,
+                        required_license_files=("LICENSE-MIT", "LICENSE-APACHE-2.0"),
+                    )
+            finally:
+                canonical.fetch_pypi_payload = old_fetch
 
 
 class CanonicalPyPIDistTests(unittest.TestCase):

@@ -2,6 +2,8 @@ use ordvec::{
     validate_candidate_ids, validate_flat_vectors_len, Bitmap, OrdvecError, RankQuant, SignBitmap,
     TwoStageCandidatePolicy,
 };
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 use crate::{make_corpus, D, N};
 
@@ -280,4 +282,753 @@ fn sign_rankquant_subset_orders_visible_ties_after_centre_offset() {
     assert_eq!(ids.len(), n_vectors);
     assert!(scores.iter().all(|score| score.is_finite()));
     assert_score_then_id_order(&scores, &ids);
+}
+
+#[test]
+fn serial_csr_matches_looped_single_query_and_invariants() {
+    let corpus = make_corpus(20_001);
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    let nq = 5usize;
+    let queries = make_corpus(99)[..nq * D].to_vec();
+    let m = 12usize;
+
+    let cb = sign.top_m_candidates_batched_serial_csr(&queries, m);
+
+    // CSR invariants.
+    assert_eq!(cb.offsets.len(), nq + 1);
+    assert_eq!(cb.offsets[0], 0);
+    assert_eq!(*cb.offsets.last().unwrap(), cb.candidates.len());
+    assert!(cb.offsets.windows(2).all(|w| w[1] >= w[0]));
+    assert_eq!(cb.query_count(), nq);
+
+    // Row-for-row parity with looped single-query top_m_candidates.
+    for qi in 0..nq {
+        let q = &queries[qi * D..(qi + 1) * D];
+        let expected = sign.top_m_candidates(q, m);
+        assert_eq!(
+            cb.candidates_for_query(qi).unwrap(),
+            &expected[..],
+            "row {qi}"
+        );
+        assert_eq!(expected.len(), m.min(N));
+    }
+}
+
+#[test]
+fn serial_csr_edges() {
+    let corpus = make_corpus(20_002);
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    // nq == 0
+    let cb0 = sign.top_m_candidates_batched_serial_csr(&[], 8);
+    assert_eq!(cb0.query_count(), 0);
+    assert!(cb0.is_empty());
+    assert_eq!(cb0.offsets, vec![0]);
+    // m == 0 → every row empty, but 2 queries → not empty
+    let q2 = make_corpus(7)[..2 * D].to_vec();
+    let cb = sign.top_m_candidates_batched_serial_csr(&q2, 0);
+    assert_eq!(cb.query_count(), 2);
+    assert!(cb.has_no_candidates());
+    assert_eq!(cb.offsets, vec![0, 0, 0]);
+    // m > n clamps to n
+    let cb_big = sign.top_m_candidates_batched_serial_csr(&q2, N + 100);
+    assert_eq!(cb_big.candidates_for_query(0).unwrap().len(), N);
+}
+
+#[test]
+#[should_panic]
+fn serial_csr_rejects_ragged_queries() {
+    let mut sign = SignBitmap::new(D);
+    sign.add(&make_corpus(20_003));
+    let ragged = vec![0.0f32; D + 1]; // not a multiple of D
+    let _ = sign.top_m_candidates_batched_serial_csr(&ragged, 4);
+}
+
+#[test]
+fn single_query_subset_unchanged_after_refactor() {
+    let (sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(31)[..D].to_vec();
+    let cands = sign.top_m_candidates(&q, 20);
+    let (scores, ids) = rq.search_asymmetric_subset(&q, &cands, 7);
+    assert_eq!(scores.len(), 7);
+    assert_eq!(ids.len(), 7);
+    assert_score_then_id_order(&scores, &ids);
+    // Fewer candidates than k → returns exactly k.min(m) entries (no padding).
+    let (s2, i2) = rq.search_asymmetric_subset(&q, &cands[..3], 7);
+    assert_eq!(s2.len(), 3);
+    assert_eq!(i2.len(), 3);
+}
+
+fn flatten_to_csr(rows: &[Vec<u32>]) -> (Vec<u32>, Vec<usize>) {
+    let mut candidates = Vec::new();
+    let mut offsets = vec![0usize];
+    for r in rows {
+        candidates.extend_from_slice(r);
+        offsets.push(candidates.len());
+    }
+    (candidates, offsets)
+}
+
+#[test]
+fn batched_into_matches_looped_single_query() {
+    for bits in [1u8, 2, 4] {
+        let (sign, rq, _corpus) = build_two_stage(bits);
+        let nq = 6usize;
+        let queries = make_corpus(40_000 + bits as u64)[..nq * D].to_vec();
+        let k = 5usize;
+        // Per-query candidate rows of varying length.
+        let rows: Vec<Vec<u32>> = (0..nq)
+            .map(|qi| sign.top_m_candidates(&queries[qi * D..(qi + 1) * D], 10 + qi))
+            .collect();
+        let (cand, off) = flatten_to_csr(&rows);
+
+        let out_k = k.min(N);
+        let mut scores = vec![0.0f32; nq * out_k];
+        let mut indices = vec![0i64; nq * out_k];
+        let mut scratch = ordvec::SubsetScratch::new();
+        rq.search_asymmetric_subset_batched_serial_into(
+            &queries,
+            &off,
+            &cand,
+            k,
+            &mut scratch,
+            &mut scores,
+            &mut indices,
+        );
+
+        for qi in 0..nq {
+            let (es, ei) =
+                rq.search_asymmetric_subset(&queries[qi * D..(qi + 1) * D], &rows[qi], k);
+            // Row qi: first es.len() slots equal the single-query result; rest padded.
+            for slot in 0..out_k {
+                if slot < ei.len() {
+                    assert_eq!(
+                        indices[qi * out_k + slot],
+                        ei[slot],
+                        "bits={bits} q{qi} slot{slot} id"
+                    );
+                    assert_eq!(
+                        scores[qi * out_k + slot],
+                        es[slot],
+                        "bits={bits} q{qi} slot{slot} score"
+                    );
+                } else {
+                    assert_eq!(indices[qi * out_k + slot], -1);
+                    assert_eq!(scores[qi * out_k + slot], f32::NEG_INFINITY);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn batched_into_preserves_duplicate_candidates() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(55)[..D].to_vec();
+    let row = vec![7u32, 7, 3, 7];
+    let (cand, off) = flatten_to_csr(std::slice::from_ref(&row));
+    let k = 4usize;
+    let out_k = k.min(N);
+    let mut scores = vec![0.0f32; out_k];
+    let mut indices = vec![0i64; out_k];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &off,
+        &cand,
+        k,
+        &mut scratch,
+        &mut scores,
+        &mut indices,
+    );
+    let (es, ei) = rq.search_asymmetric_subset(&q, &row, k);
+    assert_eq!(
+        &indices[..ei.len()],
+        &ei[..],
+        "duplicate ids/order must match single-query"
+    );
+    assert_eq!(&scores[..es.len()], &es[..]);
+    assert_score_then_id_order(&scores[..ei.len()], &indices[..ei.len()]);
+}
+
+#[test]
+fn batched_into_is_order_independent_for_unsorted_candidate_rows() {
+    // Contract (doc'd on `search_asymmetric_subset_batched_serial_into`):
+    // candidate ids within a row need NOT be sorted, and input order has no
+    // effect on results — output is fully determined by the tie policy
+    // (score desc, then global doc-id asc). Pin it: feed the same candidate
+    // set in two different orders and require byte-identical output. bits=1
+    // exercises the tie-break path directly (coarse quantization ties scores,
+    // so ordering is decided by doc-id, not input position).
+    for bits in [1u8, 2, 4] {
+        let (sign, rq, _corpus) = build_two_stage(bits);
+        let q = make_corpus(73_000 + bits as u64)[..D].to_vec();
+        let k = 6usize;
+        let out_k = k.min(N);
+
+        // A real candidate shortlist (probe order)...
+        let row = sign.top_m_candidates(&q, 12);
+        assert!(row.len() >= 2, "need a non-trivial row to permute");
+        // ...and a non-identity permutation of the SAME ids.
+        let mut shuffled = row.clone();
+        shuffled.reverse();
+        assert_ne!(row, shuffled, "reversed row must differ from original");
+
+        let run = |cand_row: &[u32]| {
+            let rows = vec![cand_row.to_vec()];
+            let (cand, off) = flatten_to_csr(&rows);
+            let mut scores = vec![0.0f32; out_k];
+            let mut indices = vec![0i64; out_k];
+            let mut scratch = ordvec::SubsetScratch::new();
+            rq.search_asymmetric_subset_batched_serial_into(
+                &q,
+                &off,
+                &cand,
+                k,
+                &mut scratch,
+                &mut scores,
+                &mut indices,
+            );
+            (scores, indices)
+        };
+
+        let (s0, i0) = run(&row);
+        let (s1, i1) = run(&shuffled);
+
+        assert_eq!(
+            i0, i1,
+            "bits={bits}: output ids must not depend on input order"
+        );
+        assert_eq!(
+            s0, s1,
+            "bits={bits}: output scores must not depend on input order"
+        );
+        assert_score_then_id_order(&s0, &i0);
+
+        // ...and matches the single-query reference (sorted output regardless).
+        let (es, ei) = rq.search_asymmetric_subset(&q, &row, k);
+        assert_eq!(
+            &i0[..ei.len()],
+            &ei[..],
+            "bits={bits}: must match single-query"
+        );
+        assert_eq!(&s0[..es.len()], &es[..]);
+    }
+}
+
+#[test]
+fn batched_into_edges() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let mut scratch = ordvec::SubsetScratch::new();
+    // nq == 0
+    let mut s0: Vec<f32> = vec![];
+    let mut i0: Vec<i64> = vec![];
+    rq.search_asymmetric_subset_batched_serial_into(
+        &[],
+        &[0],
+        &[],
+        5,
+        &mut scratch,
+        &mut s0,
+        &mut i0,
+    );
+    // k == 0 → out_k 0 → buffers length 0
+    let q = make_corpus(8)[..2 * D].to_vec();
+    let mut s: Vec<f32> = vec![];
+    let mut i: Vec<i64> = vec![];
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 0, 0],
+        &[],
+        0,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+    // empty rows for 2 queries, k=3 → all sentinel
+    let out_k = 3usize.min(N);
+    let mut s2 = vec![0.0f32; 2 * out_k];
+    let mut i2 = vec![0i64; 2 * out_k];
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 0, 0],
+        &[],
+        3,
+        &mut scratch,
+        &mut s2,
+        &mut i2,
+    );
+    assert!(s2.iter().all(|&x| x == f32::NEG_INFINITY));
+    assert!(i2.iter().all(|&x| x == -1));
+}
+
+#[test]
+#[should_panic(expected = "candidate_offsets length")]
+fn batched_into_rejects_bad_offsets_len() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(9)[..2 * D].to_vec();
+    let mut s = vec![0.0f32; 2 * 3];
+    let mut i = vec![0i64; 2 * 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    // offsets len 2 but nq is 2 → needs len 3
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 0],
+        &[],
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic(expected = "out of range")]
+fn batched_into_rejects_oob_candidate() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(10)[..D].to_vec();
+    let mut s = vec![0.0f32; 3];
+    let mut i = vec![0i64; 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 1],
+        &[N as u32 + 5],
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+fn batched_into_is_allocation_free_after_warmup() {
+    let (sign, rq, _corpus) = build_two_stage(2);
+    let nq = 4usize;
+    let queries = make_corpus(61)[..nq * D].to_vec();
+    let rows: Vec<Vec<u32>> = (0..nq)
+        .map(|qi| sign.top_m_candidates(&queries[qi * D..(qi + 1) * D], 16))
+        .collect();
+    let (cand, off) = flatten_to_csr(&rows);
+    let out_k = 5usize.min(N);
+    let mut scores = vec![0.0f32; nq * out_k];
+    let mut indices = vec![0i64; nq * out_k];
+    let mut scratch = ordvec::SubsetScratch::new();
+    // Warmup.
+    rq.search_asymmetric_subset_batched_serial_into(
+        &queries,
+        &off,
+        &cand,
+        5,
+        &mut scratch,
+        &mut scores,
+        &mut indices,
+    );
+    // Second identical call must not grow scratch (capacity-stability proxy for
+    // allocation-free; covers scan + finalize buffers). See spec §B for the
+    // optional allocator-counter strengthening.
+    let caps = scratch.capacities_for_test();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &queries,
+        &off,
+        &cand,
+        5,
+        &mut scratch,
+        &mut scores,
+        &mut indices,
+    );
+    assert_eq!(
+        scratch.capacities_for_test(),
+        caps,
+        "scratch must reuse capacity (allocation-free)"
+    );
+}
+
+#[test]
+fn batched_serial_wrapper_matches_into_and_full_set_matches_search_asymmetric() {
+    let (sign, rq, _corpus) = build_two_stage(2);
+    let nq = 4usize;
+    let queries = make_corpus(70_001)[..nq * D].to_vec();
+    let k = 6usize;
+    let rows: Vec<Vec<u32>> = (0..nq)
+        .map(|qi| sign.top_m_candidates(&queries[qi * D..(qi + 1) * D], 25))
+        .collect();
+    let (cand, off) = flatten_to_csr(&rows);
+
+    let res = rq.search_asymmetric_subset_batched_serial(&queries, &off, &cand, k);
+    let out_k = k.min(N);
+    assert_eq!(res.nq, nq);
+    assert_eq!(res.k, out_k);
+
+    // == *_into
+    let mut s = vec![0.0f32; nq * out_k];
+    let mut i = vec![0i64; nq * out_k];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &queries,
+        &off,
+        &cand,
+        k,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+    assert_eq!(res.scores, s);
+    assert_eq!(res.indices, i);
+
+    // Full candidate set per row (0..N) == search_asymmetric.
+    let full: Vec<u32> = (0..N as u32).collect();
+    let full_rows: Vec<Vec<u32>> = (0..nq).map(|_| full.clone()).collect();
+    let (fc, fo) = flatten_to_csr(&full_rows);
+    let res_full = rq.search_asymmetric_subset_batched_serial(&queries, &fo, &fc, k);
+    let asym = rq.search_asymmetric(&queries, k);
+    assert_eq!(
+        res_full.indices, asym.indices,
+        "full-set batched subset must equal search_asymmetric"
+    );
+    assert_eq!(res_full.scores, asym.scores);
+}
+
+/// Cross-tier: batched subset rerank's top-k SET + order must match the scalar
+/// byte-LUT reference (`search_asymmetric_byte_lut`) across dims that route to
+/// different kernels (dim%64 → AVX-512; %16-not-%64 b=2 → AVX2; non-%16 → scalar).
+/// Scores compared within the existing kernel parity tolerance, NOT byte-identical
+/// across tiers. (Same convention as redteam_beta + determinism_contract.)
+#[test]
+fn batched_subset_rerank_matches_scalar_reference_across_tiers() {
+    use ordvec::search_asymmetric_byte_lut;
+    for dim in [64usize, 80, 128] {
+        // 64 → AVX-512-eligible; 80 → %16 (AVX2 b=2) not %64; 128 → AVX-512.
+        let n = 64usize;
+        let mut rng = ChaCha8Rng::seed_from_u64(0xA11C + dim as u64);
+        let corpus: Vec<f32> = (0..n * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let mut rq = RankQuant::new(dim, 2);
+        rq.add(&corpus);
+        let query: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let k = 8usize;
+        let full: Vec<u32> = (0..n as u32).collect();
+        let off = vec![0usize, full.len()];
+        let res = rq.search_asymmetric_subset_batched_serial(&query, &off, &full, k);
+        let reference = search_asymmetric_byte_lut(&rq, &query, k);
+
+        use std::collections::HashSet;
+        let got: HashSet<i64> = res.indices.iter().copied().filter(|&x| x >= 0).collect();
+        let want: HashSet<i64> = reference
+            .indices
+            .iter()
+            .copied()
+            .filter(|&x| x >= 0)
+            .collect();
+        assert_eq!(
+            got, want,
+            "dim={dim}: top-k set diverged from scalar reference"
+        );
+        // Tie/order policy: scores non-increasing, ids ascending within equal scores.
+        assert_score_then_id_order(&res.scores, &res.indices);
+        // Scores within tolerance (NOT byte-identical across tiers).
+        for slot in 0..k {
+            let a = res.scores[slot];
+            // find matching id in reference to compare its score
+            if res.indices[slot] >= 0 {
+                let rpos = reference
+                    .indices
+                    .iter()
+                    .position(|&x| x == res.indices[slot]);
+                if let Some(p) = rpos {
+                    let b = reference.scores[p];
+                    assert!(
+                        (a - b).abs() <= 1e-4,
+                        "dim={dim} slot{slot}: score {a} vs ref {b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rejection-path regression net for the caller-owned batched rerank.
+//
+// validate_csr_batch + the _into query/buffer asserts run BEFORE any unsafe
+// gather (see the memory-safety contract on
+// search_asymmetric_subset_batched_serial_into). These pin that every guard
+// fires, so a malformed-but-accepted CSR/query can never reach the SIMD scan.
+// (batched_into_rejects_bad_offsets_len + batched_into_rejects_oob_candidate
+// above already cover the offsets-length and candidate-id guards.)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "exceeds n_vectors")]
+fn batched_into_rejects_overlong_row() {
+    // A row longer than the corpus would over-size the gather scratch; this is
+    // the guard that bounds the unsafe gather. One row of N+1 in-range ids.
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_101)[..D].to_vec();
+    let candidates = vec![0u32; N + 1];
+    let offsets = vec![0usize, N + 1];
+    let mut s = vec![0.0f32; 3];
+    let mut i = vec![0i64; 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &offsets,
+        &candidates,
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic(expected = "monotonic")]
+fn batched_into_rejects_nonmonotonic_offsets() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_102)[..2 * D].to_vec();
+    let candidates = vec![0u32; 3]; // last offset (3) == candidates.len()
+    let offsets = vec![0usize, 5, 3]; // window [5,3] is non-monotonic
+    let mut s = vec![0.0f32; 2 * 3];
+    let mut i = vec![0i64; 2 * 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &offsets,
+        &candidates,
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic(expected = "must equal candidates.len()")]
+fn batched_into_rejects_wrong_final_offset() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_103)[..D].to_vec();
+    let candidates = vec![0u32; 2]; // len 2, but final offset says 3
+    let offsets = vec![0usize, 3];
+    let mut s = vec![0.0f32; 3];
+    let mut i = vec![0i64; 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &offsets,
+        &candidates,
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic(expected = "must be 0")]
+fn batched_into_rejects_nonzero_first_offset() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_104)[..D].to_vec();
+    let candidates: Vec<u32> = Vec::new();
+    let offsets = vec![1usize, 1]; // offsets[0] != 0
+    let mut s = vec![0.0f32; 3];
+    let mut i = vec![0i64; 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &offsets,
+        &candidates,
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic]
+fn batched_into_rejects_nonfinite_query() {
+    // A non-finite query value is rejected before the SIMD scan it would feed.
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let mut q = make_corpus(8_105)[..D].to_vec();
+    q[0] = f32::NAN;
+    let mut s = vec![0.0f32; 3];
+    let mut i = vec![0i64; 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 1],
+        &[0u32],
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic]
+fn serial_csr_rejects_nonfinite_query() {
+    let (sign, _rq, _corpus) = build_two_stage(2);
+    let mut q = make_corpus(8_106)[..D].to_vec();
+    q[1] = f32::INFINITY;
+    let _ = sign.top_m_candidates_batched_serial_csr(&q, 16);
+}
+
+#[test]
+#[should_panic(expected = "must be a multiple of dim")]
+fn batched_into_rejects_ragged_query() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_107)[..D + 1].to_vec(); // not a multiple of dim
+    let mut s = vec![0.0f32; 3];
+    let mut i = vec![0i64; 3];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 0],
+        &[],
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic(expected = "must be a multiple of dim")]
+fn batched_serial_wrapper_rejects_ragged_query() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_108)[..D + 1].to_vec();
+    let _ = rq.search_asymmetric_subset_batched_serial(&q, &[0, 0], &[], 3);
+}
+
+#[test]
+#[should_panic(expected = "out_scores length")]
+fn batched_into_rejects_short_out_scores() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_109)[..D].to_vec();
+    let out_k = 3usize.min(N);
+    let mut s = vec![0.0f32; out_k - 1]; // one short
+    let mut i = vec![0i64; out_k];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 1],
+        &[0u32],
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+#[should_panic(expected = "out_indices length")]
+fn batched_into_rejects_short_out_indices() {
+    let (_sign, rq, _corpus) = build_two_stage(2);
+    let q = make_corpus(8_110)[..D].to_vec();
+    let out_k = 3usize.min(N);
+    let mut s = vec![0.0f32; out_k];
+    let mut i = vec![0i64; out_k - 1]; // one short
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &q,
+        &[0, 1],
+        &[0u32],
+        3,
+        &mut scratch,
+        &mut s,
+        &mut i,
+    );
+}
+
+#[test]
+fn batched_into_pads_mixed_full_and_underfull_rows() {
+    // One batch mixing a full row (len > k), an underfull row (0 < len < k),
+    // and an empty row. Each row's filled slots must equal the single-query
+    // reference; trailing slots are sentinel-padded (-1 / NEG_INFINITY).
+    let (sign, rq, _corpus) = build_two_stage(2);
+    let k = 5usize;
+    let out_k = k.min(N);
+    let queries = make_corpus(8_200)[..3 * D].to_vec();
+    let q0 = &queries[0..D];
+    let q1 = &queries[D..2 * D];
+    let full_row = sign.top_m_candidates(q0, k + 4); // > k
+    let underfull_row: Vec<u32> = sign.top_m_candidates(q1, 2); // 0 < len < k
+    let empty_row: Vec<u32> = Vec::new();
+    let rows = vec![full_row, underfull_row, empty_row];
+    let (cand, off) = flatten_to_csr(&rows);
+
+    let mut scores = vec![0.0f32; 3 * out_k];
+    let mut indices = vec![0i64; 3 * out_k];
+    let mut scratch = ordvec::SubsetScratch::new();
+    rq.search_asymmetric_subset_batched_serial_into(
+        &queries,
+        &off,
+        &cand,
+        k,
+        &mut scratch,
+        &mut scores,
+        &mut indices,
+    );
+
+    for qi in 0..3 {
+        let (es, ei) = rq.search_asymmetric_subset(&queries[qi * D..(qi + 1) * D], &rows[qi], k);
+        for slot in 0..out_k {
+            if slot < ei.len() {
+                assert_eq!(
+                    indices[qi * out_k + slot],
+                    ei[slot],
+                    "row{qi} slot{slot} id"
+                );
+                assert_eq!(
+                    scores[qi * out_k + slot],
+                    es[slot],
+                    "row{qi} slot{slot} score"
+                );
+            } else {
+                assert_eq!(
+                    indices[qi * out_k + slot],
+                    -1,
+                    "row{qi} slot{slot} sentinel id"
+                );
+                assert_eq!(
+                    scores[qi * out_k + slot],
+                    f32::NEG_INFINITY,
+                    "row{qi} slot{slot} sentinel score"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+#[test]
+fn subset_rerank_uses_simd_is_false_for_constructor_invalid_params() {
+    // The dispatch probe must answer "the rerank will take a SIMD kernel" only
+    // for `(dim, bits)` that `RankQuant::new` accepts. A SIMD tier can be
+    // selected for params the constructor rejects — `bits = 4` needs
+    // `dim % 2^bits == 0`, but the AVX2 b=4 lane invariant is only
+    // `dim % 8 == 0` — so the probe must not claim SIMD for an index you
+    // cannot even build.
+    for &(dim, bits) in &[(8usize, 4u8), (24, 4), (3, 1), (6, 4)] {
+        assert!(
+            RankQuant::validate_params(dim, bits).is_err(),
+            "fixture ({dim},{bits}) must be constructor-invalid"
+        );
+        assert!(
+            !ordvec::subset_rerank_uses_simd(dim, bits),
+            "probe must be false for constructor-invalid ({dim},{bits})"
+        );
+    }
+    // Invariant: wherever the probe claims SIMD, the params must be buildable.
+    for dim in 2..=130usize {
+        for bits in [1u8, 2, 4] {
+            if ordvec::subset_rerank_uses_simd(dim, bits) {
+                assert!(
+                    RankQuant::validate_params(dim, bits).is_ok(),
+                    "probe claimed SIMD for constructor-invalid ({dim},{bits})"
+                );
+            }
+        }
+    }
 }

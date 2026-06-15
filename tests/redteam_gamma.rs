@@ -22,8 +22,9 @@ fn rank_to_bucket_large_bits_panics() {
     // Signature is `rank_to_bucket(rank, d, bits)`, so this is rank=3, d=8,
     // bits=200 — the `bits` value is what's under test. `bits >= 32` makes
     // `1u32 << bits` overflow (silently-wrong bucket in release), so the
-    // function guards with `assert!(bits <= 7, "bits too large")`. bits=200
-    // trips that guard; the panic must fire in release as well as debug.
+    // function guards with `assert!(bits <= 8, "bits too large")` (b=8 is the
+    // widest RankQuant width whose codes still fit a u8). bits=200 trips that
+    // guard; the panic must fire in release as well as debug.
     let _ = rank_to_bucket(3, 8, 200);
 }
 

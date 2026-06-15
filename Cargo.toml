@@ -1,6 +1,6 @@
 [package]
 name = "ordvec"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; also clears the 1.87 floor from u64::is_multiple_of
 description = "Training-free ordinal & sign quantization for vector retrieval"
@@ -73,6 +73,10 @@ rand_chacha = "0.10"
 # target takes the scalar fallback. `experimental` exposes MultiBucketBitmap
 # (research scaffold), kept off the stable surface.
 experimental = []
+# `test-utils` exposes internal dispatch probes used by the crate's own integration
+# tests (e.g. the allocation-free guarantee check). Gated off the default surface
+# because these helpers are not part of the public API and carry no semver guarantee.
+test-utils = []
 
 [profile.release]
 lto = true
