@@ -433,6 +433,9 @@ jobs:
         if: steps.sde.outputs.sde-available == 'true'
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ steps.sde.outputs.sde-path }} -spr --
+          # Cause any AVX-512 test that would silently skip on a non-AVX-512 host
+          # to panic loudly here, so this job genuinely enforces the kernels.
+          ORDVEC_REQUIRE_AVX512: "1"
         run: |
           set -euo pipefail
           cargo test
