@@ -33,6 +33,7 @@ mod rank;
 #[cfg(feature = "experimental")]
 mod multi_bucket;
 mod quant;
+mod quant_b8;
 mod two_stage;
 
 pub const D: usize = 128;

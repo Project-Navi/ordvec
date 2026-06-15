@@ -336,7 +336,7 @@ fn create_manifest_declares_auxiliary_artifacts_for_load_plan_lookup() {
         CreateManifestOptions {
             auxiliary_artifacts: vec![
                 CreateAuxiliaryArtifact {
-                    name: " ordinaldb.ids ".to_string(),
+                    name: " app.ids ".to_string(),
                     path: ids.clone(),
                     required: true,
                 },
@@ -352,7 +352,7 @@ fn create_manifest_declares_auxiliary_artifacts_for_load_plan_lookup() {
     .unwrap();
 
     assert_eq!(manifest.auxiliary_artifacts.len(), 2);
-    assert_eq!(manifest.auxiliary_artifacts[0].name, "ordinaldb.ids");
+    assert_eq!(manifest.auxiliary_artifacts[0].name, "app.ids");
     assert_eq!(manifest.auxiliary_artifacts[0].path, "ids.bin");
     assert_eq!(manifest.auxiliary_artifacts[0].sha256, ids_hash.sha256);
     assert_eq!(
@@ -374,11 +374,11 @@ fn create_manifest_declares_auxiliary_artifacts_for_load_plan_lookup() {
 
     let plan = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap();
     assert_eq!(
-        plan.require_auxiliary("ordinaldb.ids").unwrap(),
+        plan.require_auxiliary("app.ids").unwrap(),
         fs::canonicalize(&ids).unwrap().as_path()
     );
     assert_eq!(
-        plan.require_auxiliary(" ordinaldb.ids ").unwrap(),
+        plan.require_auxiliary(" app.ids ").unwrap(),
         fs::canonicalize(&ids).unwrap().as_path()
     );
     assert_eq!(
@@ -2794,7 +2794,7 @@ fn cli_create_verify_and_exit_codes() {
     let optional = temp.path().join("optional.json");
     fs::write(&ids, 7u64.to_le_bytes()).unwrap();
     fs::write(&optional, br#"{"optional":true}"#).unwrap();
-    let aux_arg = format!("ordinaldb.ids={}", ids.display());
+    let aux_arg = format!("app.ids={}", ids.display());
     let optional_aux_arg = format!("optional.stats={}", optional.display());
     let manifest = temp.path().join("manifest.json");
     let bin = env!("CARGO_BIN_EXE_ordvec-manifest");

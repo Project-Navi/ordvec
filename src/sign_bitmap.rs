@@ -26,6 +26,17 @@
 //! only material difference is `_mm512_xor_si512` in place of
 //! `_mm512_and_si512` and an ascending tie-broken composite-key
 //! selection on Hamming distance.
+//!
+//! # Dimensions and the AVX-512 kernel
+//!
+//! `dim` must be a multiple of 64. On a host with AVX-512 VPOPCNTDQ **every**
+//! such `dim` runs the vectorized scan: the kernel processes whole 512-bit
+//! (8 × u64) groups, then handles any trailing `(dim / 64) % 8` words with a
+//! single masked load (`_mm512_maskz_loadu_epi64`). Dimensions whose 64-bit
+//! word count is a multiple of 8 — 512, 1024, 1536, … — have no tail; others
+//! (e.g. **384, 768**, the common BGE/MiniLM widths) pay **one extra masked
+//! chunk** — a few percent, so 768 ≈ 1024 — instead of falling back to the
+//! scalar path. See [`crate::avx512vpop_supported`].
 
 use rayon::prelude::*;
 
@@ -296,6 +307,20 @@ impl SignBitmap {
     /// [`Self::top_m_candidates`] (which materialises a per-query `n` Hamming
     /// row). A future release may replace the internals with streaming top-m
     /// behind this frozen signature; the CSR output contract will not change.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use ordvec::SignBitmap;
+    /// # let (dim, m) = (1024usize, 256usize);
+    /// let sign = SignBitmap::new(dim);
+    /// # let queries = vec![0.0f32; dim * 64];
+    /// let cb = sign.top_m_candidates_batched_serial_csr(&queries, m);
+    /// // CSR: query qi's candidate row is
+    /// // `cb.candidates[cb.offsets[qi]..cb.offsets[qi + 1]]`. Pass `cb.offsets`
+    /// // and `cb.candidates` straight into
+    /// // `RankQuant::search_asymmetric_subset_batched_serial_into`.
+    /// let _row0 = &cb.candidates[cb.offsets[0]..cb.offsets[1]];
+    /// ```
     #[must_use = "this scans the corpus per query to generate candidates; dropping the result discards that work"]
     pub fn top_m_candidates_batched_serial_csr(&self, queries: &[f32], m: usize) -> CandidateBatch {
         let dim = self.dim;
@@ -485,12 +510,7 @@ fn sign_scan_collect(bitmaps: &[u64], n: usize, qpv: usize, q: &[u64], scores: &
     debug_assert_eq!(scores.len(), n);
     debug_assert_eq!(q.len(), qpv);
 
-    #[cfg(target_arch = "x86_64")]
-    let use_avx512vpop = is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv.is_multiple_of(8);
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx512vpop = false;
+    let use_avx512vpop = crate::avx512vpop_supported();
 
     if use_avx512vpop {
         #[cfg(target_arch = "x86_64")]
@@ -516,30 +536,50 @@ unsafe fn sign_scan_collect_avx512vpop(
     scores: &mut [u32],
 ) {
     use std::arch::x86_64::*;
-    // SAFETY: mirrors `bitmap_scan_collect_avx512vpop` — the caller
-    // (`sign_scan_collect`) gates dispatch on `qpv.is_multiple_of(8)`,
-    // `q.len() == qpv`, and `bitmaps.len() == n * qpv`, bounding all raw loads.
-    // AVX-512 F/VPOPCNTDQ confirmed by `#[target_feature]` + runtime detection.
-    // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
+    // SAFETY: mirrors `bitmap_scan_collect_avx512vpop`. The caller
+    // (`sign_scan_collect`) guarantees `q.len() == qpv` and
+    // `bitmaps.len() == n * qpv`. Full 8-word groups use `loadu`; the trailing
+    // `rem = qpv % 8` words use `maskz_loadu`, which only accesses the `rem`
+    // valid low lanes (fault-suppressed), so loads never over-read the qpv
+    // slice or the buffer end. AVX-512 F/VPOPCNTDQ confirmed by
+    // `#[target_feature]` + runtime detection. The explicit block is required
+    // by `#![deny(unsafe_op_in_unsafe_fn)]`.
     unsafe {
-        debug_assert_eq!(qpv % 8, 0);
+        debug_assert!(qpv > 0);
         let lanes = qpv / 8;
+        let rem = qpv % 8;
+        let tail_mask: __mmask8 = if rem != 0 { (1u8 << rem) - 1 } else { 0 };
         let mut q_zmms: Vec<__m512i> = Vec::with_capacity(lanes);
         #[allow(clippy::needless_range_loop)]
         // indexed access is clearer / matches the kernel layout
         for l in 0..lanes {
             q_zmms.push(_mm512_loadu_si512(q.as_ptr().add(l * 8) as *const __m512i));
         }
+        // Trailing `rem` query words, masked (high lanes read as 0).
+        let q_tail = if rem != 0 {
+            _mm512_maskz_loadu_epi64(tail_mask, q.as_ptr().add(lanes * 8) as *const i64)
+        } else {
+            _mm512_setzero_si512()
+        };
         #[allow(clippy::needless_range_loop)]
         // indexed access is clearer / matches the kernel layout
         for di in 0..n {
-            let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+            let doc_base = bitmaps.as_ptr().add(di * qpv);
+            let doc_ptr = doc_base as *const __m512i;
             let mut acc_zmm = _mm512_setzero_si512();
             for l in 0..lanes {
                 let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
                 let xor_zmm = _mm512_xor_si512(d_zmm, q_zmms[l]);
                 let pop_zmm = _mm512_popcnt_epi64(xor_zmm);
                 acc_zmm = _mm512_add_epi64(acc_zmm, pop_zmm);
+            }
+            if rem != 0 {
+                // Masked tail: masked-off lanes are not loaded and XOR/popcnt to
+                // 0, so they leave the Hamming sum unchanged.
+                let d_tail =
+                    _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                let xor_zmm = _mm512_xor_si512(d_tail, q_tail);
+                acc_zmm = _mm512_add_epi64(acc_zmm, _mm512_popcnt_epi64(xor_zmm));
             }
             let acc_sum: i64 = _mm512_reduce_add_epi64(acc_zmm);
             scores[di] = acc_sum as u32;
@@ -563,12 +603,7 @@ fn sign_scan_collect_batched(
     batch: usize,
     scores: &mut [u32],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    let use_avx512vpop = is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512vpopcntdq")
-        && qpv.is_multiple_of(8);
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx512vpop = false;
+    let use_avx512vpop = crate::avx512vpop_supported();
 
     if use_avx512vpop {
         #[cfg(target_arch = "x86_64")]
@@ -598,17 +633,21 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
     scores: &mut [u32],
 ) {
     use std::arch::x86_64::*;
-    // SAFETY: mirrors `bitmap_scan_collect_batched_avx512vpop` — the caller
-    // (`sign_scan_collect_batched`) gates dispatch on `qpv.is_multiple_of(8)`,
-    // `q_batch.len() == batch * qpv`, `bitmaps.len() == n * qpv`, and
-    // `scores.len() == batch * n`, bounding all raw loads and `scores[…]` writes.
-    // AVX-512 F/VPOPCNTDQ confirmed by `#[target_feature]` + runtime detection.
-    // The explicit block is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
+    // SAFETY: mirrors `bitmap_scan_collect_batched_avx512vpop`. The caller
+    // (`sign_scan_collect_batched`) guarantees `q_batch.len() == batch * qpv`,
+    // `bitmaps.len() == n * qpv`, and `scores.len() == batch * n`. Full 8-word
+    // groups use `loadu`; the trailing `rem = qpv % 8` words use `maskz_loadu`,
+    // which only accesses the `rem` valid low lanes (fault-suppressed), so loads
+    // never over-read a per-vector slice or the buffer end. AVX-512 F/VPOPCNTDQ
+    // confirmed by `#[target_feature]` + runtime detection. The explicit block
+    // is required by `#![deny(unsafe_op_in_unsafe_fn)]`.
     unsafe {
-        debug_assert_eq!(qpv % 8, 0);
+        debug_assert!(qpv > 0);
         debug_assert_eq!(q_batch.len(), batch * qpv);
         debug_assert_eq!(scores.len(), batch * n);
         let lanes = qpv / 8;
+        let rem = qpv % 8;
+        let tail_mask: __mmask8 = if rem != 0 { (1u8 << rem) - 1 } else { 0 };
         const CHUNK: usize = BATCHED_AVX512_CHUNK;
 
         let mut q_zmms: Vec<__m512i> = Vec::with_capacity(batch * lanes);
@@ -619,6 +658,16 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
                 ));
             }
         }
+        // Per-query masked tail (trailing `rem` words); empty when qpv % 8 == 0.
+        let mut q_tails: Vec<__m512i> = Vec::with_capacity(if rem != 0 { batch } else { 0 });
+        if rem != 0 {
+            for bi in 0..batch {
+                q_tails.push(_mm512_maskz_loadu_epi64(
+                    tail_mask,
+                    q_batch.as_ptr().add(bi * qpv + lanes * 8) as *const i64,
+                ));
+            }
+        }
 
         // Hot path: CHUNK-sized groups; const-bounded inner bi loop so
         // LLVM unrolls and promotes the accs array to ZMM registers.
@@ -626,7 +675,8 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
         while chunk_start + CHUNK <= batch {
             for di in 0..n {
                 let mut accs: [__m512i; CHUNK] = [_mm512_setzero_si512(); CHUNK];
-                let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+                let doc_base = bitmaps.as_ptr().add(di * qpv);
+                let doc_ptr = doc_base as *const __m512i;
                 for l in 0..lanes {
                     let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
                     for bi in 0..CHUNK {
@@ -636,6 +686,14 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
                         accs[bi] = _mm512_add_epi64(accs[bi], pop_zmm);
                     }
                 }
+                if rem != 0 {
+                    let d_tail =
+                        _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                    for bi in 0..CHUNK {
+                        let xor_zmm = _mm512_xor_si512(d_tail, q_tails[chunk_start + bi]);
+                        accs[bi] = _mm512_add_epi64(accs[bi], _mm512_popcnt_epi64(xor_zmm));
+                    }
+                }
                 for bi in 0..CHUNK {
                     let acc_sum: i64 = _mm512_reduce_add_epi64(accs[bi]);
                     scores[(chunk_start + bi) * n + di] = acc_sum as u32;
@@ -643,12 +701,13 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
             }
             chunk_start += CHUNK;
         }
-        // Tail.
+        // Tail over the query batch.
         let tail = batch - chunk_start;
         if tail > 0 {
             for di in 0..n {
                 let mut accs: [__m512i; CHUNK] = [_mm512_setzero_si512(); CHUNK];
-                let doc_ptr = bitmaps.as_ptr().add(di * qpv) as *const __m512i;
+                let doc_base = bitmaps.as_ptr().add(di * qpv);
+                let doc_ptr = doc_base as *const __m512i;
                 for l in 0..lanes {
                     let d_zmm = _mm512_loadu_si512(doc_ptr.add(l));
                     for bi in 0..tail {
@@ -656,6 +715,14 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
                         let xor_zmm = _mm512_xor_si512(d_zmm, q_zmm);
                         let pop_zmm = _mm512_popcnt_epi64(xor_zmm);
                         accs[bi] = _mm512_add_epi64(accs[bi], pop_zmm);
+                    }
+                }
+                if rem != 0 {
+                    let d_tail =
+                        _mm512_maskz_loadu_epi64(tail_mask, doc_base.add(lanes * 8) as *const i64);
+                    for bi in 0..tail {
+                        let xor_zmm = _mm512_xor_si512(d_tail, q_tails[chunk_start + bi]);
+                        accs[bi] = _mm512_add_epi64(accs[bi], _mm512_popcnt_epi64(xor_zmm));
                     }
                 }
                 for bi in 0..tail {
@@ -685,6 +752,34 @@ mod tests {
             .zip(d.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum()
+    }
+
+    /// Returns `true` if the host supports AVX-512 VPOPCNTDQ and the test should
+    /// proceed. When AVX-512 is absent:
+    ///
+    /// - If `ORDVEC_REQUIRE_AVX512` is set to `"1"` or `"true"` (used by the
+    ///   Intel SDE CI job), this panics so the job fails loudly instead of
+    ///   silently treating a skipped test as green coverage.
+    /// - Otherwise it emits a skip notice to stderr and returns `false`; the
+    ///   caller should return immediately.
+    fn require_avx512_or_skip(test_name: &str) -> bool {
+        if crate::avx512vpop_supported() {
+            return true;
+        }
+        let required = std::env::var("ORDVEC_REQUIRE_AVX512")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        if required {
+            panic!(
+                "SKIP {test_name}: host lacks AVX-512 VPOPCNTDQ but \
+                 ORDVEC_REQUIRE_AVX512 is set — AVX-512 kernels are not enforced"
+            );
+        }
+        eprintln!(
+            "SKIP {test_name}: host lacks AVX-512 VPOPCNTDQ; \
+             set ORDVEC_REQUIRE_AVX512=1 to enforce"
+        );
+        false
     }
 
     #[test]
@@ -965,6 +1060,9 @@ mod tests {
 
     #[test]
     fn avx512_path_matches_scalar_at_production_dim() {
+        if !require_avx512_or_skip("avx512_path_matches_scalar_at_production_dim") {
+            return;
+        }
         const PROD_D: usize = 1024;
         let n = 256;
         let mut rng = ChaCha8Rng::seed_from_u64(31);
@@ -994,6 +1092,63 @@ mod tests {
                 batched[bi], reference,
                 "AVX-512 batched diverged from scalar at batch idx {bi}",
             );
+        }
+    }
+
+    #[test]
+    fn avx512_path_matches_scalar_across_residues_and_common_dims() {
+        if !require_avx512_or_skip("avx512_path_matches_scalar_across_residues_and_common_dims") {
+            return;
+        }
+        // Covers every qpv tail residue (qpv % 8 ∈ 0..=7), the lanes==0 all-tail
+        // cases (qpv < 8: 64/384/448), and the common embedding dims
+        // 384/512/768/1024/1536. The AVX-512 path (masked tail for non-multiples
+        // of 8) must stay byte-identical to a scalar Hamming reference.
+        for &dim in &[
+            64usize, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536,
+        ] {
+            let n = 200usize;
+            let m = 32usize;
+            let nq = 5usize;
+            let mut rng = ChaCha8Rng::seed_from_u64(7000 + dim as u64);
+            let corpus: Vec<f32> = (0..n * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+            let mut idx = SignBitmap::new(dim);
+            idx.add(&corpus);
+            let queries: Vec<f32> = (0..nq * dim).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+            let qpv = idx.qwords_per_vec;
+            let dimu = dim as u32;
+            let batched = idx.top_m_candidates_batched(&queries, m);
+            let scores_flat = idx.score_all_batched_flat(&queries);
+            for qi in 0..nq {
+                let q = &queries[qi * dim..(qi + 1) * dim];
+                let qbm = idx.build_query_bitmap(q);
+                let single_scores = idx.score_all(q);
+                let mut ref_pairs: Vec<(u32, u32)> = Vec::with_capacity(n);
+                for di in 0..n {
+                    let off = di * qpv;
+                    let ham = scalar_hamming(&qbm, &idx.bitmaps[off..off + qpv]);
+                    let agree = dimu - ham;
+                    assert_eq!(
+                        single_scores[di], agree,
+                        "score_all dim={dim} qi={qi} di={di}"
+                    );
+                    assert_eq!(
+                        scores_flat[qi * n + di],
+                        agree,
+                        "score_all_batched_flat dim={dim} qi={qi} di={di}"
+                    );
+                    ref_pairs.push((ham, di as u32));
+                }
+                ref_pairs.sort_by_key(|&(h, did)| (h, did));
+                let reference: Vec<u32> = ref_pairs.iter().take(m).map(|&(_, did)| did).collect();
+                assert_eq!(
+                    idx.top_m_candidates(q, m),
+                    reference,
+                    "single dim={dim} qi={qi}"
+                );
+                assert_eq!(batched[qi], reference, "batched dim={dim} qi={qi}");
+            }
         }
     }
 }

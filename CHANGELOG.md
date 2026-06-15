@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Performance
+
+- **AVX-512 VPOPCNTDQ scan kernels now cover every `dim` (a multiple of 64), not
+  just multiples of 512 bits.** Previously the `SignBitmap` and `Bitmap` scan
+  kernels took the AVX-512 path only when the per-vector 64-bit word count was a
+  multiple of 8 (`dim` a multiple of 512), silently falling back to the scalar
+  loop otherwise — so common embedding widths like **768 (BGE) and 384
+  (bge-small / MiniLM)** ran the entire stage-1 candidate scan scalar. The
+  kernels now process the trailing `(dim / 64) % 8` words with a masked load
+  (`_mm512_maskz_loadu_epi64`), so any supported `dim` uses VPOPCNTDQ. Measured
+  **~4× faster** stage-1 scan at dim=768 on a Zen5 / AVX-512 host (609 → 153
+  µs/query, n=100k; see `examples/bge_kernel_bench`); 1024/1536 unchanged.
+  Results are byte-identical to the scalar path — parity tests cover qpv tail
+  residues 0..7 plus 384/512/768/1024/1536 for all six SignBitmap/Bitmap scan
+  kernels. This is stage-1 scan-kernel throughput, not a whole-pipeline figure.
+
+### Added
+
+- `avx512vpop_supported()` (`#[doc(hidden)]`) — reports whether the AVX-512
+  VPOPCNTDQ scan kernels are active on the current CPU. The scan dispatch reads
+  only this predicate (no per-dimension gate).
+
+### Changed
+
+- **Release-hardened the caller-owned serial two-stage primitives** (no API
+  change; added in 0.5.0). The trust model is now explicit and tested:
+  - Rejection-path regression tests for the full CSR/query/buffer validation set
+    on the rerank entry points — overlong row (the guard that bounds the unsafe
+    gather), non-monotonic / wrong-final / non-zero-first offsets, non-finite and
+    ragged queries, and wrong output-buffer length — so a malformed-but-accepted
+    input can never reach the SIMD scan.
+  - A counting-allocator test proving `search_asymmetric_subset_batched_serial_into`
+    performs **zero heap allocations** in steady state (warmed `SubsetScratch`,
+    reused caller buffers) **on the AVX-512/AVX2 rerank path** — the strong form of
+    the prior capacity-stability proxy. (The scalar fallback, e.g. aarch64,
+    allocates a per-query scoring LUT; the test skips the strict check there.)
+  - A focused `two_stage_bench` example decomposing stage-1 candidate-gen /
+    single-query rerank loop / batched `_into` / full two-stage at the
+    Harrier-1024 shape, with a committed reference capture
+    (`benchmarks/two_stage_caller_owned_dim1024.txt`, SYNTHETIC corpus).
+  - User-facing docs for the caller-owned / no-rayon / allocation-free contract
+    (README + rustdoc examples on the `_into` hot path and the CSR candidate-gen).
+
 ### Fixed
 
 - **`ordvec-manifest` crate and wheel now ship license text.** Both declared
@@ -31,8 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `RankQuant::search_asymmetric_subset_batched_serial(..) -> SearchResults` and
     `..._serial_into(.., &mut SubsetScratch, &mut out_scores, &mut out_indices)`
     — serial batched subset rerank; the `_into` form is allocation-free after
-    scratch warmup (the integration contract for runtimes that own their own
-    thread pool / GIL release).
+    scratch warmup on the AVX-512/AVX2 rerank path (the integration contract for
+    runtimes that own their own thread pool / GIL release).
   - New public types `CandidateBatch` (CSR candidate carrier) and `SubsetScratch`
     (reusable rerank scratch).
 - These primitives never enter rayon; the caller owns parallelism. No bundled
