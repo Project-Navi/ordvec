@@ -103,6 +103,20 @@ pub(crate) fn l2_normalise(v: &[f32]) -> Vec<f32> {
     }
 }
 
+/// Allocation-free counterpart of [`l2_normalise`]: writes the L2-normalised
+/// vector into `out`, reusing its capacity. Same semantics as `l2_normalise`
+/// (a near-zero-norm input yields all zeros of the same length).
+pub(crate) fn l2_normalise_into(out: &mut Vec<f32>, v: &[f32]) {
+    out.clear();
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm <= 1e-12 {
+        out.resize(v.len(), 0.0);
+    } else {
+        let inv = 1.0 / norm;
+        out.extend(v.iter().map(|&x| x * inv));
+    }
+}
+
 /// Assert that every element of `v` is finite (no `NaN`, no `±Inf`).
 ///
 /// ordvec's public `add` / `search` entry points reject non-finite
@@ -404,9 +418,11 @@ impl TopK {
     /// Construct a top-k collector whose emitted indices are local scan
     /// positions but whose score ties are broken by caller-supplied keys.
     ///
-    /// This is used by subset scans: SIMD kernels still emit local candidate
-    /// positions into the gathered scratch buffer, while ties must follow the
-    /// public global row-id policy.
+    /// Subset scans now reuse a long-lived `TopK` via
+    /// [`Self::reset_with_tie_keys`]; this fresh-allocation constructor is
+    /// retained as the reference path the reuse tests compare against (hence
+    /// `#[allow(dead_code)]` for non-test builds).
+    #[allow(dead_code)]
     pub(crate) fn new_with_tie_keys(k: usize, tie_key_by_index: &[u32]) -> Self {
         let mut top = Self::new(k);
         top.tie_key_by_index = Some(tie_key_by_index.iter().map(|&id| i64::from(id)).collect());
@@ -496,11 +512,44 @@ impl TopK {
         self.worst_pos = wp;
     }
 
+    /// Reset to an empty top-k collector of capacity `k` whose score ties are
+    /// broken by caller-supplied global keys (subset scans), reusing buffers —
+    /// including the inner tie-key Vec's capacity (allocation-free after warmup).
+    pub(crate) fn reset_with_tie_keys(&mut self, k: usize, tie_key_by_index: &[u32]) {
+        self.k = k;
+        self.scores.clear();
+        self.scores.resize(k, f32::NEG_INFINITY);
+        self.indices.clear();
+        self.indices.resize(k, -1);
+        self.tie_keys.clear();
+        self.tie_keys.resize(k, i64::MAX);
+        let buf = self.tie_key_by_index.get_or_insert_with(Vec::new);
+        buf.clear();
+        buf.extend(tie_key_by_index.iter().map(|&id| i64::from(id)));
+        self.score_offset = 0.0;
+        self.filled = 0;
+        self.worst_pos = 0;
+        self.worst_val = f32::INFINITY;
+        self.worst_tie_key = i64::MAX;
+    }
+
     /// Drain into `out_scores` / `out_indices` sorted by the composite
     /// key `(score desc, tie_key asc)`. `out_scores.len()` is the
     /// user-requested `k`; positions beyond `self.filled` are left as
     /// sentinels.
     pub(crate) fn finalize_into(&self, out_scores: &mut [f32], out_indices: &mut [i64]) {
+        let mut order_buf = Vec::new();
+        self.finalize_into_with_scratch(&mut order_buf, out_scores, out_indices);
+    }
+
+    /// Allocation-free [`Self::finalize_into`]: reuses the caller-owned
+    /// `order_buf` for the final sort instead of allocating a fresh `Vec`.
+    pub(crate) fn finalize_into_with_scratch(
+        &self,
+        order_buf: &mut Vec<(f32, i64, i64, usize)>,
+        out_scores: &mut [f32],
+        out_indices: &mut [i64],
+    ) {
         debug_assert_eq!(out_scores.len(), out_indices.len());
         for s in out_scores.iter_mut() {
             *s = f32::NEG_INFINITY;
@@ -508,21 +557,22 @@ impl TopK {
         for i in out_indices.iter_mut() {
             *i = -1;
         }
-        let mut pairs: Vec<(f32, i64, i64, usize)> = self
-            .scores
-            .iter()
-            .zip(self.indices.iter())
-            .zip(self.tie_keys.iter())
-            .enumerate()
-            .take(self.filled)
-            .map(|(slot, ((&s, &i), &tie_key))| (s, i, tie_key, slot))
-            .collect();
+        order_buf.clear();
+        order_buf.extend(
+            self.scores
+                .iter()
+                .zip(self.indices.iter())
+                .zip(self.tie_keys.iter())
+                .enumerate()
+                .take(self.filled)
+                .map(|(slot, ((&s, &i), &tie_key))| (s, i, tie_key, slot)),
+        );
         // Composite key: score descending, then tie key ascending. The kept
         // slot is only a final deterministic tie-break when duplicate
         // candidate entries are otherwise indistinguishable. For full-index
         // scans the tie key is the doc_id; for subset scans it is the global
         // row id associated with the emitted local index.
-        pairs.sort_unstable_by(|a, b| {
+        order_buf.sort_unstable_by(|a, b| {
             // `total_cmp` is a true total order (IEEE-754 `totalOrder`), so the
             // sort stays well-defined even if a non-finite score ever slipped
             // past the finite-input guards — `partial_cmp(..).unwrap_or(Equal)`
@@ -533,13 +583,18 @@ impl TopK {
                 .then_with(|| a.2.cmp(&b.2))
                 .then_with(|| a.3.cmp(&b.3))
         });
-        for (slot, (s, i, _, _)) in pairs.into_iter().enumerate() {
+        for (slot, &(s, i, _, _)) in order_buf.iter().enumerate() {
             if slot >= out_scores.len() {
                 break;
             }
             out_scores[slot] = s;
             out_indices[slot] = i;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scores_capacity_for_test(&self) -> usize {
+        self.scores.capacity()
     }
 }
 
@@ -662,5 +717,72 @@ mod tests {
         // Count is within MAX_VECTORS, but new_n * elems_per_vec overflows
         // usize — the 32-bit (wasm32) hazard the `resize` in `add` would hit.
         let _ = checked_new_len(0, 2, usize::MAX);
+    }
+
+    #[test]
+    fn topk_reset_and_finalize_with_scratch_match_fresh() {
+        use super::TopK;
+        // Build via fresh new_with_tie_keys + finalize_into (reference).
+        let tie = [10u32, 20, 30, 40];
+        let mut a = TopK::new_with_tie_keys(2, &tie);
+        a.maybe_insert(1.0, 0);
+        a.maybe_insert(3.0, 1);
+        a.maybe_insert(2.0, 2);
+        let mut s_ref = vec![f32::NEG_INFINITY; 2];
+        let mut i_ref = vec![-1i64; 2];
+        a.finalize_into(&mut s_ref, &mut i_ref);
+
+        // Build via reset_with_tie_keys + finalize_into_with_scratch (reuse path).
+        let mut b = TopK::new(0);
+        b.reset_with_tie_keys(2, &tie);
+        b.maybe_insert(1.0, 0);
+        b.maybe_insert(3.0, 1);
+        b.maybe_insert(2.0, 2);
+        let mut order_buf = Vec::new();
+        let mut s = vec![f32::NEG_INFINITY; 2];
+        let mut i = vec![-1i64; 2];
+        b.finalize_into_with_scratch(&mut order_buf, &mut s, &mut i);
+        assert_eq!(s, s_ref);
+        assert_eq!(i, i_ref);
+
+        // Reuse: a second reset+finalize on the same TopK + order_buf grows nothing.
+        let cap_top = b.scores_capacity_for_test();
+        let cap_buf = order_buf.capacity();
+        b.reset_with_tie_keys(2, &tie);
+        b.maybe_insert(5.0, 3);
+        b.maybe_insert(1.0, 0);
+        b.finalize_into_with_scratch(&mut order_buf, &mut s, &mut i);
+        assert_eq!(
+            b.scores_capacity_for_test(),
+            cap_top,
+            "TopK reset must reuse capacity"
+        );
+        assert_eq!(
+            order_buf.capacity(),
+            cap_buf,
+            "finalize order_buf must reuse capacity"
+        );
+        assert_eq!(i, vec![3, 0]); // score 5.0 (id 40) then 1.0 (id 10)
+    }
+
+    #[test]
+    fn l2_normalise_into_matches_l2_normalise_and_reuses_capacity() {
+        use super::{l2_normalise, l2_normalise_into};
+        let v = vec![3.0f32, 0.0, 4.0, 0.0]; // norm 5
+        let expected = l2_normalise(&v);
+        let mut out: Vec<f32> = Vec::new();
+        l2_normalise_into(&mut out, &v);
+        assert_eq!(out, expected);
+        // zero vector → zeros, same length
+        let z = vec![0.0f32; 4];
+        l2_normalise_into(&mut out, &z);
+        assert_eq!(out, vec![0.0f32; 4]);
+        // reuse: second identical call does not grow capacity
+        let cap = {
+            l2_normalise_into(&mut out, &v);
+            out.capacity()
+        };
+        l2_normalise_into(&mut out, &v);
+        assert_eq!(out.capacity(), cap, "l2_normalise_into must reuse capacity");
     }
 }

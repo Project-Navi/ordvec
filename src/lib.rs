@@ -65,9 +65,11 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
+pub use quant::SubsetScratch;
 pub use quant::{rankquant_eval_search, RankQuant, TwoStageCandidatePolicy};
 pub use rank::Rank;
 pub use rank_io::{probe_index_metadata, IndexKind, IndexMetadata, IndexParams};
+pub use sign_bitmap::CandidateBatch;
 pub use sign_bitmap::SignBitmap;
 
 // `search_asymmetric_byte_lut` is a bench-only scoring reference: it

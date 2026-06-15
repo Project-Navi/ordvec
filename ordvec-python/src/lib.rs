@@ -731,8 +731,14 @@ impl RankQuant {
     /// Asymmetric scoring restricted to a candidate subset (e.g. the top-M
     /// shortlist from a [`Bitmap`] or [`SignBitmap`] probe). Returns
     /// ``(scores, global_ids)`` where ``global_ids`` are the original doc
-    /// indices (mapped from the local candidate slot). ``k`` is capped to the
-    /// candidate-list length; the subset path does not add sentinel padding.
+    /// indices (mapped from the local candidate slot).
+    ///
+    /// Both returned arrays have length ``min(k, len(candidates))`` — **not**
+    /// ``k``. When ``k > len(candidates)`` the result is silently capped to the
+    /// candidate count; the subset path does not pad with sentinel rows. A
+    /// caller assembling a fixed-width ``(n_q, k)`` buffer must therefore size
+    /// each row by its candidate count, not by ``k``.
+    ///
     /// Uses the same AVX-512 → AVX2 → scalar dispatch as ``search_asymmetric``.
     ///
     /// ``candidates`` may be unsorted and may contain duplicates. Duplicate

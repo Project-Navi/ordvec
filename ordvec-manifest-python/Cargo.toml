@@ -1,6 +1,6 @@
 [package]
 name = "ordvec-manifest-python"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Python bindings for ordvec-manifest index provenance verification"
@@ -15,6 +15,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ordvec_manifest_core = { package = "ordvec-manifest", path = "../ordvec-manifest", default-features = false }
-pyo3 = { version = "0.27.0", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py310"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

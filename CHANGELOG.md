@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- **`ordvec-manifest` crate and wheel now ship license text.** Both declared
+  `MIT OR Apache-2.0` but packaged no `LICENSE-*` files (a pre-0.5.0 defect);
+  added `LICENSE-MIT` + `LICENSE-APACHE-2.0` (copied from the workspace root) to
+  `ordvec-manifest/` and `ordvec-manifest-python/`, and made the release-publish
+  invariant gate require them for the manifest crate. The PyPI canonical-dist
+  helper now also inspects the built `ordvec-manifest` wheel and sdist and fails
+  the release unless both license files are present in the archive's canonical
+  license location (`*.dist-info/licenses/` for the wheel, the archive root for
+  the sdist) — closing the regression class at the published-bytes layer, not
+  only at `cargo package`.
+
+## 0.5.0 - 2026-06-13
+
+### Added
+
+- **Caller-owned serial batched/buffered two-stage primitives** (additive):
+  - `SignBitmap::top_m_candidates_batched_serial_csr(&self, queries, m) -> CandidateBatch`
+    — serial (no rayon) CSR candidate generation; pair with the rerank below to
+    run a fully caller-scheduled two-stage search.
+  - `RankQuant::search_asymmetric_subset_batched_serial(..) -> SearchResults` and
+    `..._serial_into(.., &mut SubsetScratch, &mut out_scores, &mut out_indices)`
+    — serial batched subset rerank; the `_into` form is allocation-free after
+    scratch warmup (the integration contract for runtimes that own their own
+    thread pool / GIL release).
+  - New public types `CandidateBatch` (CSR candidate carrier) and `SubsetScratch`
+    (reusable rerank scratch).
+- These primitives never enter rayon; the caller owns parallelism. No bundled
+  rayon convenience wrapper ships in this release — partition the query batch and
+  drive the serial `_into` primitive from your own pool. The existing
+  internally-parallel `top_m_candidates_batched` and `search_asymmetric*` are
+  unchanged.
+
+### Notes
+
+- The serial CSR candidate-gen is a correctness-first implementation; a future
+  release optimizes its internals behind the same signature.
+
 ## 0.4.0 - 2026-06-04
 
 ### Added

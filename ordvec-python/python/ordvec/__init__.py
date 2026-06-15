@@ -29,6 +29,12 @@ The ``*Index`` names are back-compat aliases for the pre-0.2 turbovec-python
 rank-mode classes; they are kept only to ease script migration and are not part
 of the documented surface — new code should use the OrdVec ontology names above.
 
+Subset rerank result length: ``RankQuant.search_asymmetric_subset(query,
+candidates, k)`` returns ``(scores, ids)`` of length ``min(k, len(candidates))``,
+not ``k``. Passing ``k > len(candidates)`` yields arrays shorter than ``k`` (the
+subset path does not pad with sentinel rows), so a caller building a fixed-width
+``(n_q, k)`` buffer must size each row by its candidate count.
+
 On-disk persistence: each class's ``write(path)`` / ``load(path)`` passes
 ``path`` straight to the filesystem with no normalisation or ``..`` / traversal
 checks. Treat ``path`` as trusted input — in a service that derives it from
@@ -105,4 +111,4 @@ __all__ = [
     "SignBitmapIndex",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

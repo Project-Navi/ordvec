@@ -3,9 +3,12 @@
 //!
 //! The low-level `rank_io::load_sign_bitmap` parser is crate-internal
 //! (`pub(crate)`), so the fuzzer exercises it through `SignBitmap::load` —
-//! which runs that exact loader and then the type's post-load checks (the
-//! full public load path). `load` takes a `&Path`, so each iteration writes
-//! the arbitrary input to a unique temp file (auto-cleaned by `tempfile`).
+//! which runs that exact loader and then the type's post-load checks (the full
+//! public load path). `load` takes a `&Path`, and the only public load entry
+//! points are path-based (there is no public `&[u8]`/`Read` loader — issue
+//! #6), so a shared process-local scratch file (see [`scratch`]) feeds the
+//! loader the fuzz bytes without the per-iteration `mkstemp`/`unlink` churn a
+//! fresh `NamedTempFile` each run would incur.
 //!
 //! Contract: on arbitrary bytes the loader must return `Ok(..)` or
 //! `Err(..)` — never panic, abort, or read out of bounds. libFuzzer
@@ -16,21 +19,12 @@
 
 #![no_main]
 
-use std::io::Write;
-
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|data: &[u8]| {
-    let mut tmp = match tempfile::NamedTempFile::new() {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-    if tmp.write_all(data).is_err() {
-        return;
-    }
-    if tmp.flush().is_err() {
-        return;
-    }
+mod scratch;
 
-    let _ = ordvec::SignBitmap::load(tmp.path());
+fuzz_target!(|data: &[u8]| {
+    scratch::with_scratch_file(data, |path| {
+        let _ = ordvec::SignBitmap::load(path);
+    });
 });
