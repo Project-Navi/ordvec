@@ -1323,15 +1323,19 @@ fn run_sign_threaded(
     let mut rq = RankQuant::new(dim, 2);
     let t0 = Instant::now();
     let mut codes = vec![0u64; n_docs * wpd];
-    for d in 0..n_docs {
-        let row = &corpus[d * dim..(d + 1) * dim];
-        let base = d * wpd;
-        for (j, &v) in row.iter().enumerate() {
-            // `> 0.0` -- same threshold as core SignBitmap (zero/NaN with negatives).
-            if v > 0.0 {
-                codes[base + (j >> 6)] |= 1u64 << (j & 63);
+    // One mutable stripe per doc (`wpd` words) -> parallel sign-code build, matching
+    // the adjacent `rq.add` which is already parallel over the corpus.
+    {
+        use rayon::prelude::*;
+        codes.par_chunks_mut(wpd).enumerate().for_each(|(d, code)| {
+            let row = &corpus[d * dim..(d + 1) * dim];
+            for (j, &v) in row.iter().enumerate() {
+                // `> 0.0` -- same threshold as core SignBitmap (zero/NaN with negatives).
+                if v > 0.0 {
+                    code[j >> 6] |= 1u64 << (j & 63);
+                }
             }
-        }
+        });
     }
     rq.add(corpus);
     let build_seconds = t0.elapsed().as_secs_f64();
@@ -1451,6 +1455,15 @@ fn sign_scan_topm_par(
 ) {
     use rayon::prelude::*;
     let dim = wpd * 64;
+    // Agreement (= dim - hamming) is stored as u16, so dim must fit in u16. BEIR /
+    // embedding dims are far below this (<= ~4096), but assert the precondition so a
+    // pathological dim fails loud here instead of silently wrapping the cast into a
+    // wrong `tau` and wrong candidate set (covers both the scalar path below and the
+    // AVX-512 kernel, which is only reached from this function).
+    assert!(
+        dim <= u16::MAX as usize,
+        "sign_scan_topm_par: dim {dim} exceeds the u16 agreement range (65535)"
+    );
     let t = threads.max(1).min(n.max(1));
     let chunk = n.div_ceil(t).max(1);
     // Phase A: ONE parallel pass over the codes -> per-doc agreement.
