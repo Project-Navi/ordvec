@@ -863,8 +863,13 @@ fn main() {
                 write_topk,
                 &mut timing_writer,
             ),
+            "sign-rq2-threaded" => run_sign_threaded(
+                cfg.candidates, corpus, &queries, dim, n_docs, n_queries, cfg.top_k, cfg.batch,
+                threads_resolved, &query_pool, &cfg, corpus_ids, &query_ids, &simd, &encoder_sha,
+                write_topk, &mut timing_writer,
+            ),
             other => panic!(
-                "unknown method '{other}'. Supported: flat, hnsw, rq2, rq4, bitmap-rq2, sign-rq2"
+                "unknown method '{other}'. Supported: flat, hnsw, rq2, rq4, bitmap-rq2, sign-rq2, sign-rq2-threaded"
             ),
         }
     }
@@ -935,7 +940,9 @@ fn run_flat(
 }
 
 // ---------------------------------------------------------------------------
-// Method: hnsw (pure-Rust HNSW, hnsw_rs; DistDot on unit-norm vectors)
+// Method: hnsw (pure-Rust HNSW, hnsw_rs; DistL2 ≡ max-dot on unit-norm vectors).
+// Score is `-distance` (nearer = smaller L2 = higher score), so the eval ranks
+// nearest-first; for unit vectors this is the identical ordering DistDot gives.
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -959,12 +966,16 @@ fn run_hnsw(
 ) {
     let slug = "hnsw";
     eprintln!("  building HNSW M={HNSW_M} ef_c={HNSW_EF_CONSTRUCTION} ({n_docs} docs) ...");
-    let hnsw: Hnsw<f32, DistDot> = Hnsw::new(
+    // DistL2 (not DistDot): embeddings are unit-normalized, so min-L2 ≡ max-dot ≡
+    // max-cosine — identical neighbors — but DistL2 avoids anndists' DistDot
+    // `1-dot` distance assert, which panics on near-duplicate pairs whose float
+    // dot rounds just past 1.0 (rare at 171K, frequent at ~1M).
+    let hnsw: Hnsw<f32, DistL2> = Hnsw::new(
         HNSW_M,
         n_docs,
         HNSW_MAX_LAYER,
         HNSW_EF_CONSTRUCTION,
-        DistDot {},
+        DistL2 {},
     );
     // Insert (build uses all cores via the global pool).
     let doc_refs: Vec<(&[f32], usize)> = (0..n_docs)
@@ -994,7 +1005,7 @@ fn run_hnsw(
                     .map(|qi| {
                         hnsw.search(query_rows[qi], top_k, HNSW_EF_SEARCH)
                             .into_iter()
-                            .map(|nb| (nb.d_id as i64, 1.0 - nb.distance))
+                            .map(|nb| (nb.d_id as i64, -nb.distance))
                             .collect()
                     })
                     .collect()
@@ -1006,7 +1017,7 @@ fn run_hnsw(
                     .into_iter()
                     .map(|nbs| {
                         nbs.into_iter()
-                            .map(|nb| (nb.d_id as i64, 1.0 - nb.distance))
+                            .map(|nb| (nb.d_id as i64, -nb.distance))
                             .collect()
                     })
                     .collect()
@@ -1209,11 +1220,14 @@ fn run_two_stage(
             };
 
             // Stage 2: pooled subset rerank (allocation-free).
+            // Rerank for `out_k` (= top_k capped by the candidate budget + corpus),
+            // matching the `batch * out_k` buffers; passing `top_k` would mis-size the
+            // buffers and panic the length assert when the budget is below `top_k`.
             rq.search_asymmetric_subset_batched_serial_into(
                 batch_q,
                 &offsets,
                 &cand_flat,
-                top_k,
+                out_k,
                 &mut scratch,
                 &mut out_scores_buf,
                 &mut out_indices_buf,
@@ -1256,4 +1270,328 @@ fn run_two_stage(
         encoder_sha,
         timing_writer,
     );
+}
+
+/// Deterministic EXACTLY-`m` selection over a `(count, id)` candidate pool, by
+/// `(count desc, id asc)` -- mirrors `SignBitmap`'s `select_nth_unstable_by`
+/// exact-`m_eff` tie-break. The `>= tau` threshold set is `>= m` (boundary ties
+/// overshoot); this trims it to exactly `m` by keeping the highest-agreement
+/// docs, tie-broken on smaller id. Output is sorted ascending by id so the serial
+/// and threaded paths return byte-identical candidate sets.
+fn select_exact_m(pool: &mut [(u32, u32)], m: usize, out: &mut Vec<u32>) {
+    out.clear();
+    let m_eff = m.min(pool.len());
+    if m_eff == 0 {
+        return;
+    }
+    let cmp = |a: &(u32, u32), b: &(u32, u32)| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1));
+    pool.select_nth_unstable_by(m_eff - 1, cmp);
+    out.extend(pool[..m_eff].iter().map(|&(_, id)| id));
+    out.sort_unstable();
+}
+
+/// Within-query-threaded `sign->rq2` baseline: doc-major sign codes (`wpd`
+/// u64/doc), per-doc agreement via hardware VPOPCNTDQ over all `dim` bits,
+/// parallelized over doc-stripes (parallel agreement scan -> histogram -> global
+/// top-M tau -> EXACTLY-m trim via [`select_exact_m`]) with the SAME fixed-`m`
+/// budget + (count desc, id asc) tie-break as the serial `sign-rq2` baseline. It
+/// is the SAME SignBitmap candidate set as `sign-rq2`, just computed with
+/// within-query threads (the serial baseline scans single-threaded per query).
+/// `threads=1` reproduces the serial sign scan.
+#[allow(clippy::too_many_arguments)]
+fn run_sign_threaded(
+    m: usize,
+    corpus: &[f32],
+    queries: &[f32],
+    dim: usize,
+    n_docs: usize,
+    n_queries: usize,
+    top_k: usize,
+    batch: usize,
+    threads: usize,
+    pool: &rayon::ThreadPool,
+    cfg: &Config,
+    corpus_ids: &[String],
+    query_ids: &[String],
+    simd: &[String],
+    encoder_sha: &str,
+    write_topk: bool,
+    timing_writer: &mut dyn Write,
+) {
+    let slug = "ordvec-sign-rq2-threaded";
+    let wpd = dim.div_ceil(64);
+    eprintln!(
+        "  building doc-major SIGN codes + RankQuant b=2 (threaded, m={m}, {n_docs} docs) ..."
+    );
+    let mut rq = RankQuant::new(dim, 2);
+    let t0 = Instant::now();
+    let mut codes = vec![0u64; n_docs * wpd];
+    // One mutable stripe per doc (`wpd` words) -> parallel sign-code build, matching
+    // the adjacent `rq.add` which is already parallel over the corpus.
+    {
+        use rayon::prelude::*;
+        codes.par_chunks_mut(wpd).enumerate().for_each(|(d, code)| {
+            let row = &corpus[d * dim..(d + 1) * dim];
+            for (j, &v) in row.iter().enumerate() {
+                // `> 0.0` -- same threshold as core SignBitmap (zero/NaN with negatives).
+                if v > 0.0 {
+                    code[j >> 6] |= 1u64 << (j & 63);
+                }
+            }
+        });
+    }
+    rq.add(corpus);
+    let build_seconds = t0.elapsed().as_secs_f64();
+    // doc-major sign code is dim bits/doc (= dim/8 bytes) -- identical substrate
+    // size to the serial SignBitmap baseline.
+    let bytes_per_vector = (wpd * 8) + rq.bytes_per_vec();
+    let index_total_mib = ((codes.len() * 8) + rq.byte_size()) as f64 / 1024.0 / 1024.0;
+
+    let out_k = top_k.min(m).min(n_docs);
+    let warmup = 5.min(n_queries);
+    let mut scratch = SubsetScratch::new();
+    let mut out_scores = vec![f32::NEG_INFINITY; batch * out_k];
+    let mut out_indices = vec![-1i64; batch * out_k];
+    let mut cand: Vec<u32> = Vec::new();
+    // Per-query scratch, allocated once so the timed path is allocation-free:
+    // `agree` is the u32 per-doc agreement buffer, `hists_buf` holds one (dim+1)-bin
+    // histogram per thread-stripe, `poolv` is the reused >= tau candidate pool.
+    let mut agree = vec![0u32; n_docs];
+    // checked_mul so a pathological threads/dim can't wrap usize into a too-small
+    // buffer in release (matches the core crate's `util::checked_*` convention);
+    // `sign_scan_topm_par` slices `hists_buf[..stripes * (dim + 1)]`.
+    let hists_buf_len = threads
+        .max(1)
+        .checked_mul(wpd * 64 + 1)
+        .expect("hists_buf length overflow");
+    let mut hists_buf = vec![0u32; hists_buf_len];
+    let mut poolv: Vec<(u32, u32)> = Vec::with_capacity(m * 2);
+
+    let (samples, preds) = pool.install(|| {
+        time_and_collect(n_queries, batch, warmup, write_topk, |bs, be| {
+            let nq_batch = be - bs;
+            let needed = nq_batch * out_k;
+            if out_scores.len() != needed {
+                out_scores.resize(needed, f32::NEG_INFINITY);
+                out_indices.resize(needed, -1);
+            }
+            // Stage 1: per-query within-query-threaded sign scan -> exact-m CSR.
+            let mut offsets = Vec::with_capacity(nq_batch + 1);
+            let mut cand_flat: Vec<u32> = Vec::new();
+            offsets.push(0usize);
+            for qi in bs..be {
+                let q = &queries[qi * dim..(qi + 1) * dim];
+                let qcode = build_query_sign(q, wpd);
+                sign_scan_topm_par(
+                    &codes,
+                    wpd,
+                    n_docs,
+                    &qcode,
+                    m,
+                    threads,
+                    &mut agree,
+                    &mut hists_buf,
+                    &mut poolv,
+                    &mut cand,
+                );
+                cand_flat.extend_from_slice(&cand);
+                offsets.push(cand_flat.len());
+            }
+            // Stage 2: pooled subset rerank. Rerank for `out_k` (= top_k capped by `m`
+            // + corpus) to match the `batch * out_k` buffers; passing `top_k` would
+            // mis-size them and panic the length assert when `m < top_k`.
+            let batch_q = &queries[bs * dim..be * dim];
+            rq.search_asymmetric_subset_batched_serial_into(
+                batch_q,
+                &offsets,
+                &cand_flat,
+                out_k,
+                &mut scratch,
+                &mut out_scores,
+                &mut out_indices,
+            );
+            let mut idx = vec![-1i64; nq_batch * top_k];
+            let mut sc = vec![0.0f32; nq_batch * top_k];
+            for qi in 0..nq_batch {
+                let si = &out_indices[qi * out_k..(qi + 1) * out_k];
+                let ss = &out_scores[qi * out_k..(qi + 1) * out_k];
+                let copy = si.len().min(top_k);
+                idx[qi * top_k..qi * top_k + copy].copy_from_slice(&si[..copy]);
+                sc[qi * top_k..qi * top_k + copy].copy_from_slice(&ss[..copy]);
+            }
+            (idx, sc)
+        })
+    });
+
+    finalize(
+        slug,
+        &samples,
+        preds,
+        dim,
+        n_docs,
+        n_queries,
+        top_k,
+        threads,
+        batch,
+        m,
+        bytes_per_vector,
+        index_total_mib,
+        build_seconds,
+        &cfg.dataset,
+        &cfg.split,
+        query_ids,
+        corpus_ids,
+        &cfg.out_dir,
+        simd,
+        encoder_sha,
+        timing_writer,
+    );
+}
+
+/// Query sign bits, doc-major layout (bit `j` set iff `q[j] > 0.0` -- the SAME
+/// threshold as core SignBitmap's `build_query_bitmap`, so zero/NaN group with
+/// the negatives and this threaded baseline is candidate-faithful to `sign-rq2`).
+fn build_query_sign(q: &[f32], wpd: usize) -> Vec<u64> {
+    let mut c = vec![0u64; wpd];
+    for (j, &v) in q.iter().enumerate() {
+        if v > 0.0 {
+            c[j >> 6] |= 1u64 << (j & 63);
+        }
+    }
+    c
+}
+
+/// Single-pass parallel sign-agreement scan + EXACTLY-m top selection. Scans the
+/// doc-major sign codes ONCE (hardware VPOPCNTDQ, bandwidth-bound -- the same
+/// vectorized popcount the optimized scan uses, so the baseline is not unfairly
+/// slow) into a per-doc agreement buffer, histograms to a global top-M `tau`,
+/// then trims the `>= tau` set to exactly `m` via [`select_exact_m`].
+/// `agree` (u32 per-doc agreement), `hists_buf` (one `dim+1`-bin histogram per
+/// thread-stripe) and `poolv` (the `>= tau` candidate pool) are all caller-owned
+/// reusable scratch, so the timed path performs no per-query allocation.
+#[allow(clippy::too_many_arguments)]
+fn sign_scan_topm_par(
+    codes: &[u64],
+    wpd: usize,
+    n: usize,
+    qcode: &[u64],
+    m: usize,
+    threads: usize,
+    agree: &mut [u32],
+    hists_buf: &mut [u32],
+    poolv: &mut Vec<(u32, u32)>,
+    out: &mut Vec<u32>,
+) {
+    use rayon::prelude::*;
+    let dim = wpd * 64;
+    let hlen = dim + 1;
+    let t = threads.max(1).min(n.max(1));
+    let chunk = n.div_ceil(t).max(1);
+    let stripes = n.div_ceil(chunk);
+    // Phase A: ONE parallel pass over the codes -> per-doc agreement. Stored as u32
+    // so the `dim - hamming` count never truncates regardless of dim.
+    agree[..n]
+        .par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(ci, slot)| {
+            let d0 = ci * chunk;
+            #[cfg(target_arch = "x86_64")]
+            {
+                // Guard EVERY feature the kernel enables via `#[target_feature]`
+                // (`avx512f` + `avx512vpopcntdq`) -- detecting only vpopcntdq would
+                // call into an under-verified target. Mirrors the core crate's
+                // dispatch (e.g. `lib.rs` / `multi_bucket.rs`).
+                if std::is_x86_feature_detected!("avx512f")
+                    && std::is_x86_feature_detected!("avx512vpopcntdq")
+                {
+                    unsafe { scan_agree_avx512(codes, wpd, d0, qcode, slot) };
+                    return;
+                }
+            }
+            for (li, a) in slot.iter_mut().enumerate() {
+                let base = (d0 + li) * wpd;
+                let mut ham = 0u32;
+                for w in 0..wpd {
+                    ham += (codes[base + w] ^ qcode[w]).count_ones();
+                }
+                *a = dim as u32 - ham;
+            }
+        });
+    // Parallel per-stripe histogram into the reused `hists_buf` (stripe `ci` owns
+    // `hists_buf[ci*hlen .. (ci+1)*hlen]`); zeroed per query but never reallocated.
+    let used = stripes * hlen;
+    hists_buf[..used].fill(0);
+    hists_buf[..used]
+        .par_chunks_mut(hlen)
+        .zip(agree[..n].par_chunks(chunk))
+        .for_each(|(h, slot)| {
+            for &a in slot {
+                h[a as usize] += 1;
+            }
+        });
+    // Global top-M threshold tau: walk agreement high->low, summing the per-stripe
+    // histogram columns until the cumulative count reaches m (no merge buffer).
+    let mut cum = 0u64;
+    let mut tau = 0u32;
+    'tau: for c in (0..=dim).rev() {
+        for s in 0..stripes {
+            cum += hists_buf[s * hlen + c] as u64;
+        }
+        if cum >= m as u64 {
+            tau = c as u32;
+            break 'tau;
+        }
+    }
+    // Phase B: parallel extract (agreement, id) for agreement >= tau into the reused
+    // `poolv` (clear() keeps the capacity; `par_extend` stays parallel), then trim to
+    // EXACTLY m via `select_exact_m` -- same fixed budget + (count desc, id asc)
+    // tie-break as the serial sign baseline, so both rerank identical candidate sets.
+    // Extract order is irrelevant: select_exact_m imposes a strict total order.
+    poolv.clear();
+    poolv.par_extend(
+        agree[..n]
+            .par_chunks(chunk)
+            .enumerate()
+            .flat_map_iter(|(ci, slot)| {
+                let d0 = ci * chunk;
+                slot.iter().enumerate().filter_map(move |(li, &a)| {
+                    if a >= tau {
+                        Some((a, (d0 + li) as u32))
+                    } else {
+                        None
+                    }
+                })
+            }),
+    );
+    select_exact_m(poolv, m, out);
+}
+
+/// Hardware VPOPCNTDQ sign-agreement scan for docs `[d0, d0+slot.len())`: the same
+/// vectorized popcount the optimized scan uses, so the baseline is not unfairly
+/// slow. Fills `slot` with `agreement = dim - hamming`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn scan_agree_avx512(codes: &[u64], wpd: usize, d0: usize, qcode: &[u64], slot: &mut [u32]) {
+    use std::arch::x86_64::*;
+    let dim = (wpd * 64) as u32;
+    let cp = codes.as_ptr();
+    let qp = qcode.as_ptr();
+    for (li, a) in slot.iter_mut().enumerate() {
+        let base = (d0 + li) * wpd;
+        let mut acc = _mm512_setzero_si512();
+        let mut w = 0usize;
+        while w + 8 <= wpd {
+            let c = _mm512_loadu_si512(cp.add(base + w) as *const __m512i);
+            let q = _mm512_loadu_si512(qp.add(w) as *const __m512i);
+            let pc = _mm512_popcnt_epi64(_mm512_xor_si512(c, q));
+            acc = _mm512_add_epi64(acc, pc);
+            w += 8;
+        }
+        let mut ham = _mm512_reduce_add_epi64(acc) as u32;
+        while w < wpd {
+            ham += (*cp.add(base + w) ^ *qp.add(w)).count_ones();
+            w += 1;
+        }
+        *a = dim - ham;
+    }
 }

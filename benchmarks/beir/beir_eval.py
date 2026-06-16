@@ -566,6 +566,12 @@ _METHOD_FAMILY: dict[str, dict[str, str]] = {
         "search_type": "candidate-gen + rerank",
         "headline_role": "candidate",
     },
+    "ordvec-sign-rq2-threaded": {
+        "family": "ordvec two-stage",
+        "implementation": "SignBitmap (within-query threaded, VPOPCNTDQ) → RankQuant b=2",
+        "search_type": "candidate-gen + rerank",
+        "headline_role": "candidate (within-query-threaded sign scan)",
+    },
 }
 
 
