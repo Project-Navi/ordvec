@@ -56,8 +56,12 @@ with `nomic-embed-text` (GPU-resident via ollama). Generator:
 `examples/embed_ollama.py`. Run: `density_collapse --corpus-npy repo_real.npy`.
 
 First real-data facts:
-- TwoNN intrinsic dimension of nomic-embed-text ≈ 13 (ambient 768) — our own
-  measurement, squarely in the predicted low-tens range.
+- A low intrinsic dimension for nomic-embed-text is a working hypothesis, not a
+  measurement: deep vision-CNN IDs are low-tens (Ansuini), but there is no
+  published sentence-transformer figure, and our TwoNN probe (sphere-validated
+  only; biased OLS estimate) records no clean nomic ID here. Treat low-tens as a
+  cross-domain analogy that motivates the density test, not an established fact
+  (see `twonn_id_results.md`).
 - Real embeddings are FAR more entangled at b=2 than synthetic clusters: mean
   nearest-code Hamming 314/768, and ~5083 of 8665 docs sit in each probe's
   b2-lookalike shell (vs ~60–120 synthetic). Real geometry, much denser collapse.

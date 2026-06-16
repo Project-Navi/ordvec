@@ -34,8 +34,7 @@ tiered below by **what survived scrutiny**. Read the tiers, not every doc.
 |-----|-------|
 | [density_collapse_results.md](density_collapse_results.md) | **Mechanism.** RankQuant b=2 density collapse = Hamming-near codes the scorer can't separate. Among those lookalikes, true neighbours have lower intra-code Kendall-tau (gap ≈ 0.04, CI > 0). Real but small. |
 | [tau_rerank_bakeoff_results.md](tau_rerank_bakeoff_results.md) | **The verdict.** Does that tau signal beat b=4? NO — b=4 wins even at the tau ceiling; tau scores below b=2's own ordering. Signal is real-but-inert; just use b=4. Closes the line: research, not a feature. |
-| [crt_seam_oracle_results.md](crt_seam_oracle_results.md) | CRT vernier seam theorem — exhaustive finite proof: lcm spacing, one coincidence/period, capped density `∏min(2t+1,m_i)/m_i`. Lean 4 formalization lives in the companion repo: [ordvec-formalization#17](https://github.com/Fieldnote-Echo/ordvec-formalization/pull/17) (draft). |
-| [twonn_id_results.md](twonn_id_results.md) | TwoNN intrinsic-dimension probe (chord-metric fix, sphere-validated). `nomic-embed-text` ID ≈ 13 / 768. Estimator-bias caveat noted. |
+| [crt_seam_oracle_results.md](crt_seam_oracle_results.md) | CRT vernier seam theorem — exhaustive finite proof: lcm spacing, one coincidence/period, capped density `∏min(2t+1,m_i)/m_i`. Lean 4 formalization lives in the companion repo: [ordvec-formalization#17](https://github.com/Fieldnote-Echo/ordvec-formalization/pull/17) (open PR, `sorry`-free). |
 | [shard_recall_results.md](shard_recall_results.md) | Controlled ablation (post RNG-desync fix): random phase offsets add nothing vs aligned grids across R random directions. |
 
 ## THEORY — directionally right, restated honestly
@@ -44,6 +43,7 @@ tiered below by **what survived scrutiny**. Read the tiers, not every doc.
 |-----|--------|
 | [rigidity_impossibility_proofs.md](rigidity_impossibility_proofs.md) | The routing key is not number-variance-rigid (Thm 2/3, binomial `L(1-L/n)`). The over-broad "quantile optimal over all partitions" claim is **retracted** as a non-sequitur. |
 | [conjecture_citation_audit.md](conjecture_citation_audit.md) | Citations verified by direct fetch (Ethayarajh, Broughan-Barnett, etc.); a few subagent confabulations caught and corrected. |
+| [twonn_id_results.md](twonn_id_results.md) | ⚠️ PARTIAL. The chord-metric fix is sound (sphere-validated to ID ~12); the OLS-through-origin estimator is biased (not MLE), and **no clean real-corpus ID is recorded here**. A low-tens sentence-transformer ID is a hypothesis by cross-domain analogy (Ansuini's low-tens are vision CNNs, not sentence encoders) — not established or measured in this branch. |
 
 ## WITHDRAWN — see [withdrawn/](withdrawn/)
 
