@@ -1357,7 +1357,14 @@ fn run_sign_threaded(
     // `agree` is the u32 per-doc agreement buffer, `hists_buf` holds one (dim+1)-bin
     // histogram per thread-stripe, `poolv` is the reused >= tau candidate pool.
     let mut agree = vec![0u32; n_docs];
-    let mut hists_buf = vec![0u32; threads.max(1) * (wpd * 64 + 1)];
+    // checked_mul so a pathological threads/dim can't wrap usize into a too-small
+    // buffer in release (matches the core crate's `util::checked_*` convention);
+    // `sign_scan_topm_par` slices `hists_buf[..stripes * (dim + 1)]`.
+    let hists_buf_len = threads
+        .max(1)
+        .checked_mul(wpd * 64 + 1)
+        .expect("hists_buf length overflow");
+    let mut hists_buf = vec![0u32; hists_buf_len];
     let mut poolv: Vec<(u32, u32)> = Vec::with_capacity(m * 2);
 
     let (samples, preds) = pool.install(|| {
