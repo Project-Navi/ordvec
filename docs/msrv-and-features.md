@@ -3,7 +3,8 @@
 This matrix is the release-facing build contract for downstream embedders,
 packagers, and host systems. It complements the
 [pre-1.0 compatibility policy](compatibility-policy.md), which defines how
-compatibility-impacting changes are classified.
+compatibility-impacting changes are classified. The release artifact and wheel
+target inventory lives in [artifact-platform-matrix.md](artifact-platform-matrix.md).
 
 Current MSRV: Rust 1.89.
 

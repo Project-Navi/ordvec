@@ -1,6 +1,8 @@
 # ordvec-go
 
 Thin cgo wrapper over the local `ordvec-ffi` C ABI.
+The shared Rust/Python/C/Go ownership and lifetime contract is documented in
+[`../docs/bindings-safety.md`](../docs/bindings-safety.md).
 
 Build the Rust library before running Go tests or linking a Go program:
 

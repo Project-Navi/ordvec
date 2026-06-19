@@ -10,4 +10,7 @@
 // Candidate slices are entry lists, not sets. Duplicate candidate IDs are scored
 // independently and can produce duplicate hits; callers that require unique row
 // IDs should deduplicate before Search.
+//
+// See ../docs/bindings-safety.md for the cross-language ownership and lifetime
+// contract shared by the Rust, Python, C, and Go surfaces.
 package ordvec

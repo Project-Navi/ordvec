@@ -602,6 +602,7 @@ fn batched_into_rejects_oob_candidate() {
     );
 }
 
+#[cfg(feature = "test-utils")]
 #[test]
 fn batched_into_is_allocation_free_after_warmup() {
     let (sign, rq, _corpus) = build_two_stage(2);
@@ -625,9 +626,9 @@ fn batched_into_is_allocation_free_after_warmup() {
         &mut scores,
         &mut indices,
     );
-    // Second identical call must not grow scratch (capacity-stability proxy for
-    // allocation-free; covers scan + finalize buffers). See spec §B for the
-    // optional allocator-counter strengthening.
+    // Second identical call must not grow the public scratch buffers
+    // (capacity-stability proxy for allocation-free). Scalar LUT reuse is
+    // covered by a crate-internal unit test that can inspect private scratch.
     let caps = scratch.capacities_for_test();
     rq.search_asymmetric_subset_batched_serial_into(
         &queries,

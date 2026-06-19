@@ -978,7 +978,7 @@ pub unsafe extern "C" fn ordvec_index_search(
 mod tests {
     use super::*;
     use ordvec::{Bitmap, Rank, SignBitmap};
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
     use std::io::Write;
 
     fn temp_path(name: &str, ext: &str) -> std::path::PathBuf {
@@ -1040,6 +1040,25 @@ mod tests {
         assert_eq!(std::mem::size_of::<ordvec_search_params_t>(), 128);
         assert_eq!(std::mem::size_of::<ordvec_hit_t>(), 24);
         assert_eq!(std::mem::size_of::<ordvec_search_stats_t>(), 184);
+    }
+
+    #[test]
+    fn ffi_boundary_translates_panic_to_status_and_last_error() {
+        clear_last_error();
+
+        let status = ffi_boundary(|| -> Result<(), FfiError> {
+            panic!("ffi boundary panic smoke");
+        });
+        assert_eq!(status, ORDVEC_STATUS_PANIC);
+
+        let last_error = unsafe { CStr::from_ptr(ordvec_last_error()) }
+            .to_str()
+            .unwrap();
+        assert_eq!(last_error, "ffi boundary panic smoke");
+
+        assert_eq!(ffi_boundary(|| Ok(())), ORDVEC_STATUS_OK);
+        let cleared = unsafe { CStr::from_ptr(ordvec_last_error()) };
+        assert_eq!(cleared.to_bytes(), b"");
     }
 
     #[test]

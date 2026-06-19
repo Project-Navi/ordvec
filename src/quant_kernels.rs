@@ -30,17 +30,48 @@ pub(crate) fn scan_via_lut_scalar(
     scale: f32,
     top: &mut TopK,
 ) {
-    let mut lut = vec![0.0f32; dim * n_buckets];
-    for d in 0..dim {
-        for b in 0..n_buckets {
-            lut[d * n_buckets + b] = q_unit[d] * bucket_centre(b as u8, bits);
+    let mut lut = Vec::new();
+    scan_via_lut_scalar_with_lut(
+        packed, n, dim, bits, n_buckets, q_unit, scale, top, &mut lut,
+    );
+}
+
+pub(crate) fn build_asym_lut_into(
+    lut: &mut Vec<f32>,
+    dim: usize,
+    bits: u8,
+    n_buckets: usize,
+    q_unit: &[f32],
+) {
+    assert_eq!(q_unit.len(), dim);
+    lut.resize(dim * n_buckets, 0.0);
+    for (&qd, row) in q_unit.iter().zip(lut.chunks_exact_mut(n_buckets)) {
+        for (b, slot) in row.iter_mut().enumerate() {
+            *slot = qd * bucket_centre(b as u8, bits);
         }
     }
+}
+
+/// Same scalar LUT scan as [`scan_via_lut_scalar`], but the caller supplies the
+/// LUT buffer so hot paths can reuse capacity after warmup.
+#[allow(clippy::too_many_arguments)] // kernel arity is intrinsic to the packed-scan signature
+pub(crate) fn scan_via_lut_scalar_with_lut(
+    packed: &[u8],
+    n: usize,
+    dim: usize,
+    bits: u8,
+    n_buckets: usize,
+    q_unit: &[f32],
+    scale: f32,
+    top: &mut TopK,
+    lut: &mut Vec<f32>,
+) {
+    build_asym_lut_into(lut, dim, bits, n_buckets, q_unit);
     match bits {
-        1 => scan_b1_to_topk(packed, n, dim, &lut, scale, top),
-        2 => scan_b2_to_topk(packed, n, dim, &lut, scale, top),
-        4 => scan_b4_to_topk(packed, n, dim, &lut, scale, top),
-        8 => scan_b8_to_topk(packed, n, dim, &lut, scale, top),
+        1 => scan_b1_to_topk(packed, n, dim, lut, scale, top),
+        2 => scan_b2_to_topk(packed, n, dim, lut, scale, top),
+        4 => scan_b4_to_topk(packed, n, dim, lut, scale, top),
+        8 => scan_b8_to_topk(packed, n, dim, lut, scale, top),
         _ => unreachable!("bits validated in new()"),
     }
 }
@@ -135,17 +166,14 @@ pub(crate) fn scan_b4_to_topk(
 ///
 /// `bucket_centre(code, 8) = code - 127.5`, so each row is the query
 /// coordinate scaled across the 256 centred bucket values.
-pub(crate) fn build_b8_asym_lut(q_unit: &[f32]) -> Vec<f32> {
+pub(crate) fn build_b8_asym_lut_into(lut: &mut Vec<f32>, q_unit: &[f32]) {
     let dim = q_unit.len();
-    let mut lut = vec![0.0f32; dim * 256];
-    for d in 0..dim {
-        let qd = q_unit[d];
-        let row = &mut lut[d * 256..(d + 1) * 256];
+    lut.resize(dim * 256, 0.0);
+    for (&qd, row) in q_unit.iter().zip(lut.chunks_exact_mut(256)) {
         for (code, slot) in row.iter_mut().enumerate() {
             *slot = qd * bucket_centre(code as u8, 8);
         }
     }
-    lut
 }
 
 /// 8-bit scan. 1 code per byte; n_buckets = 256. The degenerate
@@ -555,7 +583,7 @@ pub(crate) unsafe fn scan_b4_asym_avx512(
 /// Single entry point for the `b=8` asymmetric scan.
 ///
 /// Builds the shared `dim * 256` per-coordinate LUT once
-/// ([`build_b8_asym_lut`]), then dispatches to the AVX-512 gather kernel
+/// ([`build_b8_asym_lut_into`]), then dispatches to the AVX-512 gather kernel
 /// ([`scan_b8_asym_avx512_gather`]) when `avx512f` + `avx512bw` are detected at
 /// runtime and `dim % 16 == 0`, falling back to the portable scalar reference
 /// ([`scan_b8_to_topk`]) on every other target / CPU / dim. Centralising
@@ -569,7 +597,21 @@ pub(crate) fn scan_b8_asym(
     scale: f32,
     top: &mut TopK,
 ) {
-    let lut = build_b8_asym_lut(q_unit);
+    let mut lut = Vec::new();
+    scan_b8_asym_with_lut(packed, n, dim, q_unit, scale, top, &mut lut);
+}
+
+pub(crate) fn scan_b8_asym_with_lut(
+    packed: &[u8],
+    n: usize,
+    dim: usize,
+    q_unit: &[f32],
+    scale: f32,
+    top: &mut TopK,
+    lut: &mut Vec<f32>,
+) {
+    assert_eq!(q_unit.len(), dim);
+    build_b8_asym_lut_into(lut, q_unit);
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx512f")
@@ -583,12 +625,12 @@ pub(crate) fn scan_b8_asym(
             // above). The explicit block is required by
             // `#![deny(unsafe_op_in_unsafe_fn)]`.
             unsafe {
-                scan_b8_asym_avx512_gather(packed, n, dim, &lut, scale, top);
+                scan_b8_asym_avx512_gather(packed, n, dim, lut, scale, top);
             }
             return;
         }
     }
-    scan_b8_to_topk(packed, n, dim, &lut, scale, top);
+    scan_b8_to_topk(packed, n, dim, lut, scale, top);
 }
 
 // -------------------------------------------------------------------
@@ -652,7 +694,7 @@ pub(crate) unsafe fn scan_b8_asym_avx512_gather(
         // Hard backstop (see `scan_b2_asym_avx2`): mis-dispatch must fail
         // loudly in release, not silently drop the trailing chunk.
         assert_eq!(dim % 16, 0, "b=8 AVX-512 gather path needs dim % 16 == 0");
-        debug_assert_eq!(lut.len(), dim * 256, "b=8 LUT must be dim * 256 entries");
+        assert_eq!(lut.len(), dim * 256, "b=8 LUT must be dim * 256 entries");
         let bytes_per_vec = dim; // one byte per coordinate
         let lut_ptr = lut.as_ptr();
 
@@ -724,7 +766,7 @@ pub(crate) unsafe fn scan_b8_asym_avx512_gather(
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod b8_gather_tests {
-    use super::{build_b8_asym_lut, scan_b8_asym_avx512_gather, scan_b8_to_topk};
+    use super::{build_b8_asym_lut_into, scan_b8_asym_avx512_gather, scan_b8_to_topk};
     use crate::util::TopK;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -737,6 +779,12 @@ mod b8_gather_tests {
         let mut idxs = vec![-1i64; k];
         top.finalize_into(&mut scores, &mut idxs);
         (scores, idxs)
+    }
+
+    fn b8_lut(q_unit: &[f32]) -> Vec<f32> {
+        let mut lut = Vec::new();
+        build_b8_asym_lut_into(&mut lut, q_unit);
+        lut
     }
 
     /// The AVX-512 `vgatherdps` b=8 kernel must match the scalar LUT
@@ -764,7 +812,7 @@ mod b8_gather_tests {
             let q_unit: Vec<f32> = q.iter().map(|x| x / qn).collect();
             let scale = 1.0f32 / 137.0; // arbitrary inv_norm-like scale
 
-            let lut = build_b8_asym_lut(&q_unit);
+            let lut = b8_lut(&q_unit);
 
             let mut top_scalar = TopK::new(k);
             scan_b8_to_topk(&packed, n, dim, &lut, scale, &mut top_scalar);
@@ -816,7 +864,7 @@ mod b8_gather_tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0x00B8_FACE);
         let packed: Vec<u8> = (0..n * dim).map(|_| rng.random::<u8>()).collect();
         let q_unit: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
-        let lut = build_b8_asym_lut(&q_unit);
+        let lut = b8_lut(&q_unit);
 
         let mut top = TopK::new(k);
         // SAFETY: avx512f+avx512bw confirmed; dim % 16 == 0; shapes match.
@@ -886,7 +934,7 @@ mod b8_gather_tests {
         // b=4 corpus: two codes per byte → dim/2 bytes per doc.
         let packed4: Vec<u8> = (0..n * dim / 2).map(|_| rng.random::<u8>()).collect();
 
-        let lut8 = build_b8_asym_lut(&q_unit);
+        let lut8 = b8_lut(&q_unit);
 
         let bench = |label: &str, mut f: Box<dyn FnMut()>| {
             f(); // warmup
