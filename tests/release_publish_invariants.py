@@ -28,11 +28,10 @@ COVERAGE_WORKFLOW_PATH = os.environ.get("COVERAGE_WORKFLOW_PATH", ".github/workf
 SDE_ACTION_PATH = os.environ.get(
     "SDE_ACTION_PATH", ".github/actions/setup-intel-sde/action.yml"
 )
-PR_ONLY_SDE_ALLOW_UNAVAILABLE = "${{ github.event_name == 'pull_request' }}"
+ROUTINE_CI_SDE_ALLOW_UNAVAILABLE = "${{ github.event_name != 'workflow_dispatch' }}"
+RELEASE_SDE_ALLOW_UNAVAILABLE = "false"
 SDE_AVAILABLE_IF = "${{ steps.sde.outputs.sde-available == 'true' }}"
-PR_SDE_UNAVAILABLE_IF = (
-    "${{ github.event_name == 'pull_request' && steps.sde.outputs.sde-available != 'true' }}"
-)
+SDE_UNAVAILABLE_NOTICE_IF = "${{ steps.sde.outputs.sde-available != 'true' }}"
 PYPI_CANONICAL_EXPECTED_ARGS = (
     "--expected-wheels 4",
     "--expected-sdists 1",
@@ -1764,7 +1763,16 @@ def check_sde_setup_action(path: str) -> None:
             fail(f"{path}: Intel SDE outage softening must include {fragment!r}")
 
 
-def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> None:
+def check_sde_cache_job(
+    workflow: dict[str, Any],
+    path: str,
+    job_name: str,
+    *,
+    expected_allow_unavailable: str,
+    expected_notice_if: str | None,
+    require_cache: bool,
+    require_guarded_sde_steps: bool,
+) -> None:
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
     job_env = mapping(job.get("env"), f"{path}: jobs.{job_name}.env")
@@ -1787,28 +1795,39 @@ def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> N
             with_map = mapping(step.get("with", {}), f"{path}: {step_label(index, step)} with")
             setup_steps.append((index, step, with_map))
 
-    if len(cache_steps) != 1:
-        fail(f"{path}: jobs.{job_name} must restore exactly one Intel SDE archive cache")
-    _, _, cache_with = cache_steps[0]
-    key = cache_with.get("key")
-    expected_key = (
-        "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
-        "${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}"
-    )
-    if key != expected_key:
-        fail(
-            f"{path}: jobs.{job_name} Intel SDE cache key must be version+sha pinned, "
-            "not action-file-hash based"
+    if require_cache:
+        if len(cache_steps) != 1:
+            fail(f"{path}: jobs.{job_name} must restore exactly one Intel SDE archive cache")
+        _, _, cache_with = cache_steps[0]
+        key = cache_with.get("key")
+        expected_key = (
+            "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
+            "${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}"
         )
-    restore_keys = str(cache_with.get("restore-keys") or "")
-    expected_restore_key = "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
-    if expected_restore_key not in {line.strip() for line in restore_keys.splitlines()}:
-        fail(
-            f"{path}: jobs.{job_name} Intel SDE cache restore-keys must include "
-            "the runner OS/arch prefix"
-        )
-    if contains_text(key, "hashFiles") or contains_text(key, "setup-intel-sde/action.yml"):
-        fail(f"{path}: jobs.{job_name} Intel SDE cache key must not hash the action file")
+        if key != expected_key:
+            fail(
+                f"{path}: jobs.{job_name} Intel SDE cache key must be version+sha pinned, "
+                "not action-file-hash based"
+            )
+        restore_keys = str(cache_with.get("restore-keys") or "")
+        expected_restore_key = "intel-sde-${{ runner.os }}-${{ runner.arch }}-"
+        if expected_restore_key not in {line.strip() for line in restore_keys.splitlines()}:
+            fail(
+                f"{path}: jobs.{job_name} Intel SDE cache restore-keys must include "
+                "the runner OS/arch prefix"
+            )
+        if contains_text(key, "hashFiles") or contains_text(key, "setup-intel-sde/action.yml"):
+            fail(f"{path}: jobs.{job_name} Intel SDE cache key must not hash the action file")
+    else:
+        if cache_steps:
+            fail(f"{path}: jobs.{job_name} must not restore workflow caches in release context")
+        for index, step in enumerate(steps):
+            action = action_name(step)
+            if action in {"actions/cache", "swatinem/rust-cache"}:
+                fail(
+                    f"{path}: {step_label(index, step)} must not use workflow caches "
+                    "in the release fail-closed SDE proof"
+                )
 
     if len(setup_steps) != 1:
         fail(f"{path}: jobs.{job_name} must use exactly one setup-intel-sde action")
@@ -1817,24 +1836,30 @@ def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> N
         fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_VERSION")
     if setup_with.get("sha256") != "${{ env.SDE_SHA256 }}":
         fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_SHA256")
-    if setup_with.get("allow-unavailable") != PR_ONLY_SDE_ALLOW_UNAVAILABLE:
+    if setup_with.get("allow-unavailable") != expected_allow_unavailable:
         fail(
-            f"{path}: jobs.{job_name} may soften Intel SDE outages only on pull_request; "
-            "push and workflow_dispatch runs must fail closed"
+            f"{path}: jobs.{job_name} setup-intel-sde allow-unavailable must be "
+            f"{expected_allow_unavailable!r}"
         )
 
-    outage_notice_steps = []
-    for index, raw_step in enumerate(steps):
-        step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
-        if step.get("if") == PR_SDE_UNAVAILABLE_IF and contains_text(
-            step.get("run"), "Intel SDE archive unavailable"
-        ):
-            outage_notice_steps.append(step)
-    if len(outage_notice_steps) != 1:
-        fail(
-            f"{path}: jobs.{job_name} must emit exactly one PR-only Intel SDE outage notice; "
-            "release-gated runs must not green-skip AVX-512 coverage"
+    outage_notice_steps = [
+        mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        for index, raw_step in enumerate(steps)
+        if contains_text(
+            mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]").get("run"),
+            "Intel SDE archive unavailable",
         )
+    ]
+    if expected_notice_if is None:
+        if outage_notice_steps:
+            fail(f"{path}: jobs.{job_name} must not contain a soft-skip Intel SDE outage notice")
+    else:
+        matching_notices = [step for step in outage_notice_steps if step.get("if") == expected_notice_if]
+        if len(matching_notices) != 1:
+            fail(
+                f"{path}: jobs.{job_name} must emit exactly one Intel SDE outage notice "
+                f"guarded by {expected_notice_if!r}"
+            )
 
     sde_guarded_names = {
         "Install cargo-llvm-cov (pinned)",
@@ -1852,17 +1877,54 @@ def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> N
             or contains_nested_text(step.get("env"), "steps.sde.outputs.sde-path")
             or contains_text(step.get("run"), "SDE_PATH")
         ):
-            if step.get("if") != SDE_AVAILABLE_IF:
+            if require_guarded_sde_steps and step.get("if") != SDE_AVAILABLE_IF:
                 fail(
                     f"{path}: {step_label(index, step)} must run after SDE setup succeeds, "
-                    "and may be skipped only when PR-only SDE setup reports unavailable"
+                    "and may be skipped only when SDE setup reports unavailable"
+                )
+            if not require_guarded_sde_steps and step.get("if") is not None:
+                fail(
+                    f"{path}: {step_label(index, step)} is in a release fail-closed SDE proof "
+                    "and must not be guarded behind a green-skip condition"
                 )
 
 
 def check_sde_cache_invariants() -> None:
     check_sde_setup_action(SDE_ACTION_PATH)
-    check_sde_cache_job(load_workflow(CI_WORKFLOW_PATH), CI_WORKFLOW_PATH, "avx512")
-    check_sde_cache_job(load_workflow(COVERAGE_WORKFLOW_PATH), COVERAGE_WORKFLOW_PATH, "coverage")
+    check_sde_cache_job(
+        load_workflow(CI_WORKFLOW_PATH),
+        CI_WORKFLOW_PATH,
+        "avx512",
+        expected_allow_unavailable=ROUTINE_CI_SDE_ALLOW_UNAVAILABLE,
+        expected_notice_if=SDE_UNAVAILABLE_NOTICE_IF,
+        require_cache=True,
+        require_guarded_sde_steps=True,
+    )
+    check_sde_cache_job(
+        load_workflow(COVERAGE_WORKFLOW_PATH),
+        COVERAGE_WORKFLOW_PATH,
+        "coverage",
+        expected_allow_unavailable=ROUTINE_CI_SDE_ALLOW_UNAVAILABLE,
+        expected_notice_if=SDE_UNAVAILABLE_NOTICE_IF,
+        require_cache=True,
+        require_guarded_sde_steps=True,
+    )
+    release_workflow = load_workflow(WORKFLOW_PATH)
+    check_sde_cache_job(
+        release_workflow,
+        WORKFLOW_PATH,
+        "release-avx512",
+        expected_allow_unavailable=RELEASE_SDE_ALLOW_UNAVAILABLE,
+        expected_notice_if=None,
+        require_cache=False,
+        require_guarded_sde_steps=False,
+    )
+    jobs = mapping(release_workflow.get("jobs"), f"{WORKFLOW_PATH}: jobs")
+    draft_job = mapping(
+        jobs.get("release-assets-draft"), f"{WORKFLOW_PATH}: jobs.release-assets-draft"
+    )
+    if not has_need(draft_job, "release-avx512"):
+        fail(f"{WORKFLOW_PATH}: release-assets-draft must need release-avx512")
 
 
 def main() -> None:

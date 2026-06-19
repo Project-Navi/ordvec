@@ -114,9 +114,9 @@ job_downloads_artifact_to_path() {
 
 # ----------------------------------------------------------------------
 # (1) release-assets-draft needs attest + provenance + require-ci-green + notes
-#     + exact linux/aarch64 wheel smoke
+#     + fail-closed release AVX-512 proof + exact linux/aarch64 wheel smoke
 # ----------------------------------------------------------------------
-for dep in attest provenance pypi-canonical-dist require-ci-green notes smoke-linux-aarch64-wheel; do
+for dep in attest provenance pypi-canonical-dist require-ci-green release-avx512 notes smoke-linux-aarch64-wheel; do
   job_needs release-assets-draft "$dep" \
     || fail "release-assets-draft must \`needs: $dep\` (fail-closed on missing provenance/CI)"
 done

@@ -169,12 +169,15 @@ the OIDC exchange (no risk of a bad publish; just a failed run).
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`,
    `codeql.yml`, `actionlint.yml`, and `zizmor.yml`.
-   - The `ci.yml` AVX-512 job is release-blocking and installs Intel SDE. A
-     downloadmirror `403` / outage is external infrastructure, but it still means
-     the SHA is **not releasable** until that same SHA has a successful `ci.yml`
-     run on `main`. The setup action restores a SHA-verified archive cache when
-     available; if the cache misses and Intel's download path is unavailable,
-     wait, rerun, or land a reviewed SDE pin/cache update before tagging.
+   - Routine `ci.yml` / `coverage.yml` runs may warn and skip SDE-dependent
+     steps when Intel's downloadmirror challenges GitHub-hosted runners. That
+     keeps external mirror outages from holding `main` red, but it does **not**
+     make a release shippable by itself: `release.yml` has a fail-closed
+     `release-avx512` job that installs Intel SDE, runs the AVX-512 CPUID
+     probe, and runs the AVX-512 test lane before assets can be staged.
+     This release proof deliberately avoids writable workflow caches in the
+     tag workflow; if Intel's download path is unavailable, wait, rerun, or land
+     a reviewed SDE pin/update before tagging.
    - Before the final tag, spot-check `.github/actions/setup-intel-sde/action.yml`
      against Intel's SDE download page: version, Linux archive name, and SHA-256
      must match the currently accepted pin.

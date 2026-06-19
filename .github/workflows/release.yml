@@ -65,6 +65,10 @@
 # sets, so nothing is published unless the artifact source is verified; and
 # `publish-github-release` `needs:` every registry gate, so the Release stays
 # DRAFT unless all pass.
+# `release-avx512` reruns the Intel SDE CPUID probe and AVX-512 tests inside
+# this tag workflow and is a hard dependency of core asset staging. Routine
+# CI may tolerate Intel mirror outages, but a release cannot publish on skipped
+# AVX-512 coverage.
 # The signed-release graph is pinned in
 # `tests/release_signed_release_invariants.sh` (run by ci.yml's release-guard
 # on every push/PR) so a future commit can't silently dismantle it.
@@ -190,6 +194,70 @@ jobs:
               exit 1
             fi
           done
+
+  release-avx512:
+    name: prove AVX-512 coverage under Intel SDE
+    needs: [guard, require-ci-green]
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SDE_VERSION: sde-external-10.8.0-2026-03-15-lin
+      SDE_SHA256: 50b320cd226acef7a491f5b321fc1be3c3c7984f9e27a456e64894b5b0979dd3
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
+        with:
+          toolchain: stable
+      - name: Install Intel SDE
+        id: sde
+        uses: ./.github/actions/setup-intel-sde
+        with:
+          version: ${{ env.SDE_VERSION }}
+          sha256: ${{ env.SDE_SHA256 }}
+          allow-unavailable: "false"
+      - name: Sanity-check AVX-512 detection under SDE
+        env:
+          SDE_PATH: ${{ steps.sde.outputs.sde-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/sde-probe/src"
+          cat > "${RUNNER_TEMP}/sde-probe/Cargo.toml" <<'EOF'
+          [package]
+          name = "sde-probe"
+          version = "0.0.0"
+          edition = "2021"
+          [[bin]]
+          name = "sde-probe"
+          path = "src/main.rs"
+          EOF
+          cat > "${RUNNER_TEMP}/sde-probe/src/main.rs" <<'EOF'
+          fn main() {
+              let f = is_x86_feature_detected!("avx512f");
+              let p = is_x86_feature_detected!("avx512vpopcntdq");
+              println!("avx512f={f} avx512vpopcntdq={p}");
+              assert!(f, "SDE did not expose avx512f to the guest");
+              assert!(p, "SDE did not expose avx512vpopcntdq to the guest");
+          }
+          EOF
+          cargo build --release --manifest-path "${RUNNER_TEMP}/sde-probe/Cargo.toml"
+          "${SDE_PATH}" -spr -- \
+            "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
+      - name: cargo test under SDE (AVX-512 kernels)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ steps.sde.outputs.sde-path }} -spr --
+          ORDVEC_REQUIRE_AVX512: "1"
+        run: |
+          set -euo pipefail
+          cargo test
+          cargo test --features experimental
 
   notes:
     name: release notes (git-cliff) + draft Release
@@ -962,7 +1030,7 @@ jobs:
 
   release-assets-draft:
     name: stage core/Python assets on the DRAFT Release (does NOT un-draft)
-    needs: [guard, notes, attest, provenance, pypi-canonical-dist, require-ci-green, smoke-linux-aarch64-wheel]
+    needs: [guard, notes, attest, provenance, pypi-canonical-dist, require-ci-green, release-avx512, smoke-linux-aarch64-wheel]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:

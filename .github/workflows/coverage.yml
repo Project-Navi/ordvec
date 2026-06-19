@@ -54,11 +54,11 @@ jobs:
         with:
           version: ${{ env.SDE_VERSION }}
           sha256: ${{ env.SDE_SHA256 }}
-          allow-unavailable: ${{ github.event_name == 'pull_request' }}
-      - name: note Intel SDE unavailable on PR
-        if: ${{ github.event_name == 'pull_request' && steps.sde.outputs.sde-available != 'true' }}
+          allow-unavailable: ${{ github.event_name != 'workflow_dispatch' }}
+      - name: note Intel SDE unavailable
+        if: ${{ steps.sde.outputs.sde-available != 'true' }}
         run: |
-          echo "::warning::Intel SDE archive unavailable on this pull request; push and release-gated runs fail closed."
+          echo "::warning::Intel SDE archive unavailable; SDE-backed coverage skipped. The release workflow has a separate fail-closed AVX-512 proof."
       - name: Install cargo-llvm-cov (pinned)
         if: ${{ steps.sde.outputs.sde-available == 'true' }}
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked

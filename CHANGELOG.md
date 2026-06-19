@@ -119,11 +119,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Made Intel SDE AVX-512 coverage fail closed for release gating.** Pull
-  requests may emit a visible warning and skip SDE-dependent steps during an
-  Intel mirror outage, but the push/workflow-dispatch runs used by the release
-  gate still fail closed; setup must succeed, the AVX-512 CPUID probe must run,
-  and the SDE-backed test/coverage commands must execute before release.
+- **Made Intel SDE AVX-512 coverage fail closed for release publishes.** Pull
+  requests and main pushes may emit a visible warning and skip SDE-dependent
+  steps during an Intel mirror outage, but the tag-triggered release workflow
+  reruns a fail-closed SDE proof before staging release assets; setup must
+  succeed, the AVX-512 CPUID probe must run, and SDE-backed tests must execute
+  before publish.
 - **Closed manifest verifier path-reopen drift.** Verification and SQLite
   cache-key construction now hash, probe, and validate the canonical path that
   was checked and recorded, rather than reopening the pre-canonical joined path.

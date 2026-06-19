@@ -358,10 +358,11 @@ jobs:
   # Pattern adapted from microsoft/DiskANN's CI (also a vector-search crate).
   # The local setup-intel-sde action owns the fixed Intel downloadmirror build,
   # SHA256 verification, and x86_64 runner guard. The SHA gate fails closed for
-  # any archive we extract. Pull requests may soft-skip during Intel mirror
-  # outages, but push/workflow_dispatch runs fail closed; the release gate only
-  # accepts the post-merge push workflow result, so a release cannot proceed
-  # without the SDE probe and AVX-512 tests actually executing on main.
+  # any archive we extract. Pull requests and push runs may soft-skip during
+  # Intel mirror outages so external downloadmirror challenges do not hold the
+  # whole branch red. Manual workflow_dispatch runs remain fail-closed, and the
+  # tag-triggered release workflow has its own fail-closed AVX-512 proof before
+  # assets can be staged or published.
   avx512:
     name: avx512 (Intel SDE / Sapphire Rapids)
     runs-on: ubuntu-24.04
@@ -394,11 +395,11 @@ jobs:
         with:
           version: ${{ env.SDE_VERSION }}
           sha256: ${{ env.SDE_SHA256 }}
-          allow-unavailable: ${{ github.event_name == 'pull_request' }}
-      - name: note Intel SDE unavailable on PR
-        if: ${{ github.event_name == 'pull_request' && steps.sde.outputs.sde-available != 'true' }}
+          allow-unavailable: ${{ github.event_name != 'workflow_dispatch' }}
+      - name: note Intel SDE unavailable
+        if: ${{ steps.sde.outputs.sde-available != 'true' }}
         run: |
-          echo "::warning::Intel SDE archive unavailable on this pull request; push and release-gated runs fail closed."
+          echo "::warning::Intel SDE archive unavailable; SDE-dependent CI steps skipped. The release workflow has a separate fail-closed AVX-512 proof."
       - name: sanity-check AVX-512 detection under SDE
         if: ${{ steps.sde.outputs.sde-available == 'true' }}
         env:
