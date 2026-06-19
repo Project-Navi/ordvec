@@ -24,6 +24,10 @@ scores, ids = q.search_asymmetric(np.random.randn(8, 1024).astype(np.float32), k
 | `Bitmap` | Constant-weight top-bucket bitmap per document; `popcount(Q AND D)` candidate scoring. |
 | `SignBitmap` | Sign bitmap for sign-cosine candidate generation; separate from the constant-weight bitmap theorem. |
 
+The Rust crate's `b = 8` RankQuant evidence/refinement width is not exposed
+through the v0.5 Python `RankQuant` constructor and cannot be persisted to
+`.ovrq`; use `bits` 1, 2, or 4 from Python.
+
 ## Two-stage retrieval (subset rerank)
 
 A `Bitmap` / `SignBitmap` probe yields a candidate shortlist that

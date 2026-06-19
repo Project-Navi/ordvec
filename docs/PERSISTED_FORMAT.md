@@ -10,7 +10,10 @@ API, but `.ovfs` is intentionally outside this v1 primitive-format,
 `probe_index_metadata()`, and `ordvec-manifest` contract. Until metadata-probe
 and manifest support are promoted, callers should treat `.ovfs` as a
 specialized direct-load artifact and bind it with application-owned checksums or
-attestations when it crosses a trust boundary.
+attestations when it crosses a trust boundary. The direct `.ovfs` loader still
+validates the payload before search: real document bytes must be 4-bit FastScan
+codes, every row must satisfy b=2 constant composition, and block-tail padding
+must be zero.
 
 All integer fields are little-endian. Each format has one fixed header followed
 by one contiguous payload. The payload must consume the rest of the file
@@ -65,7 +68,8 @@ cache in their own manifests:
 In v0.5.0, `probe_index_metadata(path)` rejects `OVFS` with an unsupported
 metadata-probe error rather than returning a partial descriptor. Load `.ovfs`
 only through `RankQuantFastscan::load` unless and until the FastScan metadata
-contract is promoted in a later minor release.
+contract is promoted in a later minor release; the direct loader rejects
+invalid nibbles, non-canonical tail padding, and b=2 composition violations.
 
 Example external segment entry:
 

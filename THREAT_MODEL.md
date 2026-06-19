@@ -119,7 +119,9 @@ candidate generation followed by RankQuant subset reranking).
 - Per-row **structural** invariants: `Rank` rows must be a true permutation of
   `[0, dim)` (verified by bound + duplicate checks ⇒ pigeonhole);
   `RankQuant` rows must satisfy constant composition (uniform per-bucket
-  histogram); `Bitmap` rows must have exactly `n_top` bits set.
+  histogram); `Bitmap` rows must have exactly `n_top` bits set;
+  `RankQuantFastscan` `.ovfs` rows must use valid FastScan nibbles, satisfy
+  b=2 constant composition, and zero block-tail padding.
 - No `panic!` on malformed data — all validation returns
   `io::Error(InvalidData)`.
 - The raw `rank_io` read/write functions are `pub(crate)`; the only public
@@ -205,8 +207,9 @@ introduces `O(span/255)` per-pair approximation error — an intentional
 trade-off matching FAISS FastScan semantics, documented in the code. The
 scalar and AVX-512 paths agree on the same quantized inputs (equivalence test),
 and `TopK` uses `total_cmp` for deterministic tie-breaking across all paths.
-This is approximate *scoring*, not a CPU oracle. FastScan is a `#[doc(hidden)]`
-pre-ranker; callers needing exact scores use `RankQuant::search_asymmetric`.
+This is approximate *scoring*, not a CPU oracle. FastScan is a stable
+specialized pre-ranker; callers needing exact scores use
+`RankQuant::search_asymmetric`.
 
 **THREAT-SIMD-004 (mitigated this cycle): Native sanitizer coverage for
 unsafe kernels.** `.github/workflows/sanitizers.yml` runs nightly
@@ -444,7 +447,9 @@ SignBitmap→RankQuant retrieval path.
 `search_asymmetric_fastscan_b2` + the scalar/AVX-512 kernel), crossing the
 32-doc block boundary so tail-padding blocks are exercised. On
 non-AVX-512 CI runners it exercises the scalar reference kernel; under Intel SDE
-it exercises the AVX-512 kernel.
+it exercises the AVX-512 kernel. The `load_fastscan` target also follows every
+successful `.ovfs` load with a safe `search()` call so loader-accepted bytes
+must survive the public scan path.
 
 **THREAT-FUZZ-002 (mitigated this cycle): CI-bound fuzzing for continuous
 regression.** A `fuzz.yml` workflow now runs a bounded smoke on every pull

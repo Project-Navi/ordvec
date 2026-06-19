@@ -37,6 +37,7 @@ pub const DEFAULT_MAX_ROW_IDENTITY_ROWS: usize = 10_000_000;
 pub const DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_AUXILIARY_ARTIFACTS: usize = 1024;
 pub const DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_CALIBRATION_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_REPORT_ISSUES: usize = 1024;
 pub const DEFAULT_MAX_CACHED_REPORT_BYTES: u64 = 4 * 1024 * 1024;
@@ -252,7 +253,7 @@ fn verify_manifest_with_path_capture(
     ) {
         paths.artifact_path = Some(resolved.canonical_path.clone());
         report.artifact.canonical_path = Some(path_to_display(&resolved.canonical_path));
-        match sha256_file(&resolved.resolved_path) {
+        match sha256_file(&resolved.canonical_path) {
             Ok(hash) => {
                 report.artifact.sha256 = Some(hash.sha256.clone());
                 report.artifact.size_bytes = Some(hash.size_bytes);
@@ -281,11 +282,12 @@ fn verify_manifest_with_path_capture(
             ),
         }
 
-        match probe_index_metadata(&resolved.resolved_path) {
+        match probe_index_metadata(&resolved.canonical_path) {
             Ok(metadata) => {
-                let metadata_report = MetadataReport::from_core(&metadata);
+                if let Ok(metadata_report) = MetadataReport::try_from_core(&metadata) {
+                    report.artifact.metadata = Some(metadata_report);
+                }
                 compare_artifact_metadata(&document.manifest.artifact, &metadata, &mut report);
-                report.artifact.metadata = Some(metadata_report);
             }
             Err(err) => report.error(
                 "artifact_probe_failed",
@@ -645,25 +647,33 @@ fn compare_artifact_metadata(
     metadata: &CoreIndexMetadata,
     report: &mut VerificationReport,
 ) {
-    let observed_kind = ManifestIndexKind::from_core(metadata.kind);
-    if artifact.kind != observed_kind {
-        report.error(
-            "artifact_kind_mismatch",
-            format!(
-                "artifact kind was {:?}, manifest declares {:?}",
-                observed_kind, artifact.kind
-            ),
-        );
+    match ManifestIndexKind::try_from_core(metadata.kind) {
+        Ok(observed_kind) => {
+            if artifact.kind != observed_kind {
+                report.error(
+                    "artifact_kind_mismatch",
+                    format!(
+                        "artifact kind was {:?}, manifest declares {:?}",
+                        observed_kind, artifact.kind
+                    ),
+                );
+            }
+        }
+        Err(err) => report.error(err.code(), err.message()),
     }
-    let observed_params = ManifestIndexParams::from_core(metadata.params);
-    if artifact.params != observed_params {
-        report.error(
-            "artifact_params_mismatch",
-            format!(
-                "artifact params were {:?}, manifest declares {:?}",
-                observed_params, artifact.params
-            ),
-        );
+    match ManifestIndexParams::try_from_core(metadata.params) {
+        Ok(observed_params) => {
+            if artifact.params != observed_params {
+                report.error(
+                    "artifact_params_mismatch",
+                    format!(
+                        "artifact params were {:?}, manifest declares {:?}",
+                        observed_params, artifact.params
+                    ),
+                );
+            }
+        }
+        Err(err) => report.error(err.code(), err.message()),
     }
     if artifact.format_version != metadata.format_version {
         report.error(
@@ -754,7 +764,7 @@ fn verify_row_identity(
                 report.row_identity.canonical_path =
                     Some(path_to_display(&resolved.canonical_path));
                 match validate_jsonl_rows(
-                    &resolved.resolved_path,
+                    &resolved.canonical_path,
                     options.allow_duplicate_db_ids,
                     &options.limits,
                     Some(*row_count),
@@ -1212,7 +1222,7 @@ fn validate_encoder_distortion_profile_artifact(
             report.encoder_distortion.profile_canonical_path =
                 Some(path_to_display(&resolved.canonical_path));
             match sha256_file_bounded(
-                &resolved.resolved_path,
+                &resolved.canonical_path,
                 options.limits.max_encoder_distortion_profile_bytes,
                 "encoder_distortion_profile_too_large",
                 "encoder distortion profile",
@@ -1657,7 +1667,12 @@ fn validate_calibration_profile(
         ) {
             report.calibration.profile_canonical_path =
                 Some(path_to_display(&resolved.canonical_path));
-            match sha256_file(&resolved.resolved_path) {
+            match sha256_file_bounded(
+                &resolved.canonical_path,
+                options.limits.max_calibration_profile_bytes,
+                "calibration_profile_too_large",
+                "calibration profile",
+            ) {
                 Ok(hash) => {
                     report.calibration.profile_sha256 = Some(hash.sha256.clone());
                     report.calibration.profile_size_bytes = Some(hash.size_bytes);
@@ -1680,6 +1695,7 @@ fn validate_calibration_profile(
                         );
                     }
                 }
+                Err(ManifestError::LimitExceeded { code, message }) => report.error(code, message),
                 Err(err) => report.error(
                     "calibration_profile_hash_failed",
                     format!("failed to hash calibration profile: {err}"),
@@ -1921,7 +1937,7 @@ fn verify_auxiliary_artifacts(
                 captured_path = Some(resolved.canonical_path.clone());
                 entry.canonical_path = Some(path_to_display(&resolved.canonical_path));
                 match sha256_file_bounded(
-                    &resolved.resolved_path,
+                    &resolved.canonical_path,
                     options.limits.max_auxiliary_artifact_bytes,
                     "auxiliary_artifact_file_too_large",
                     "auxiliary artifact",
@@ -2149,10 +2165,7 @@ fn resolve_auxiliary_artifact_path(
         }
     }
 
-    AuxiliaryPathResolution::Resolved(ResolvedPath {
-        resolved_path,
-        canonical_path,
-    })
+    AuxiliaryPathResolution::Resolved(ResolvedPath { canonical_path })
 }
 
 fn auxiliary_artifact_resolved_path(artifact: &AuxiliaryArtifact, base_dir: &Path) -> PathBuf {
@@ -2248,6 +2261,7 @@ pub struct ResourceLimits {
     pub max_row_identity_tracked_db_id_bytes: usize,
     pub max_auxiliary_artifacts: usize,
     pub max_auxiliary_artifact_bytes: u64,
+    pub max_calibration_profile_bytes: u64,
     pub max_encoder_distortion_profile_bytes: u64,
     pub max_report_issues: usize,
     pub max_cached_report_bytes: u64,
@@ -2262,6 +2276,7 @@ impl Default for ResourceLimits {
             max_row_identity_tracked_db_id_bytes: DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES,
             max_auxiliary_artifacts: DEFAULT_MAX_AUXILIARY_ARTIFACTS,
             max_auxiliary_artifact_bytes: DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES,
+            max_calibration_profile_bytes: DEFAULT_MAX_CALIBRATION_PROFILE_BYTES,
             max_encoder_distortion_profile_bytes: DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES,
             max_report_issues: DEFAULT_MAX_REPORT_ISSUES,
             max_cached_report_bytes: DEFAULT_MAX_CACHED_REPORT_BYTES,
@@ -2271,7 +2286,6 @@ impl Default for ResourceLimits {
 
 #[derive(Clone, Debug)]
 struct ResolvedPath {
-    resolved_path: PathBuf,
     canonical_path: PathBuf,
 }
 
@@ -2347,10 +2361,7 @@ fn resolve_existing_path(
         return None;
     }
 
-    Some(ResolvedPath {
-        resolved_path,
-        canonical_path,
-    })
+    Some(ResolvedPath { canonical_path })
 }
 
 fn has_lexical_escape(path: &Path) -> bool {
@@ -2725,6 +2736,7 @@ pub struct RowIdentityDb {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ManifestIndexKind {
     Rank,
     RankQuant,
@@ -2733,18 +2745,20 @@ pub enum ManifestIndexKind {
 }
 
 impl ManifestIndexKind {
-    fn from_core(kind: CoreIndexKind) -> Self {
+    fn try_from_core(kind: CoreIndexKind) -> Result<Self, UnsupportedCoreMetadata> {
         match kind {
-            CoreIndexKind::Rank => Self::Rank,
-            CoreIndexKind::RankQuant => Self::RankQuant,
-            CoreIndexKind::Bitmap => Self::Bitmap,
-            CoreIndexKind::SignBitmap => Self::SignBitmap,
+            CoreIndexKind::Rank => Ok(Self::Rank),
+            CoreIndexKind::RankQuant => Ok(Self::RankQuant),
+            CoreIndexKind::Bitmap => Ok(Self::Bitmap),
+            CoreIndexKind::SignBitmap => Ok(Self::SignBitmap),
+            other => Err(UnsupportedCoreMetadata::Kind(other)),
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum ManifestIndexParams {
     Rank,
     RankQuant { bits: u8 },
@@ -2753,12 +2767,39 @@ pub enum ManifestIndexParams {
 }
 
 impl ManifestIndexParams {
-    fn from_core(params: CoreIndexParams) -> Self {
+    fn try_from_core(params: CoreIndexParams) -> Result<Self, UnsupportedCoreMetadata> {
         match params {
-            CoreIndexParams::Rank => Self::Rank,
-            CoreIndexParams::RankQuant { bits } => Self::RankQuant { bits },
-            CoreIndexParams::Bitmap { n_top } => Self::Bitmap { n_top },
-            CoreIndexParams::SignBitmap => Self::SignBitmap,
+            CoreIndexParams::Rank => Ok(Self::Rank),
+            CoreIndexParams::RankQuant { bits } => Ok(Self::RankQuant { bits }),
+            CoreIndexParams::Bitmap { n_top } => Ok(Self::Bitmap { n_top }),
+            CoreIndexParams::SignBitmap => Ok(Self::SignBitmap),
+            other => Err(UnsupportedCoreMetadata::Params(other)),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum UnsupportedCoreMetadata {
+    Kind(CoreIndexKind),
+    Params(CoreIndexParams),
+}
+
+impl UnsupportedCoreMetadata {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Kind(_) => "artifact_kind_unsupported",
+            Self::Params(_) => "artifact_params_unsupported",
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::Kind(kind) => {
+                format!("artifact metadata kind {kind:?} is not supported by ordvec-manifest v1")
+            }
+            Self::Params(params) => format!(
+                "artifact metadata params {params:?} are not supported by ordvec-manifest v1"
+            ),
         }
     }
 }
@@ -3269,16 +3310,16 @@ pub struct MetadataReport {
 }
 
 impl MetadataReport {
-    fn from_core(metadata: &CoreIndexMetadata) -> Self {
-        Self {
-            kind: ManifestIndexKind::from_core(metadata.kind),
+    fn try_from_core(metadata: &CoreIndexMetadata) -> Result<Self, UnsupportedCoreMetadata> {
+        Ok(Self {
+            kind: ManifestIndexKind::try_from_core(metadata.kind)?,
             format_version: metadata.format_version,
             dim: metadata.dim,
             vector_count: metadata.vector_count,
             bytes_per_vec: metadata.bytes_per_vec,
-            params: ManifestIndexParams::from_core(metadata.params),
+            params: ManifestIndexParams::try_from_core(metadata.params)?,
             file_size_bytes: metadata.file_size_bytes,
-        }
+        })
     }
 }
 
@@ -3438,15 +3479,19 @@ pub fn create_manifest_for_index_with_options(
     }
     let metadata = probe_index_metadata(index_path)?;
     let index_hash = sha256_file(index_path)?;
+    let kind = ManifestIndexKind::try_from_core(metadata.kind)
+        .map_err(|err| ManifestError::invalid(err.message()))?;
+    let params = ManifestIndexParams::try_from_core(metadata.params)
+        .map_err(|err| ManifestError::invalid(err.message()))?;
     let artifact = Artifact {
         path: manifest_path_for_create(index_path, out_base, &options, "artifact")?,
         sha256: index_hash.sha256,
-        kind: ManifestIndexKind::from_core(metadata.kind),
+        kind,
         format_version: metadata.format_version,
         dim: metadata.dim,
         vector_count: metadata.vector_count,
         bytes_per_vec: metadata.bytes_per_vec,
-        params: ManifestIndexParams::from_core(metadata.params),
+        params,
         file_size_bytes: metadata.file_size_bytes,
     };
 
@@ -3834,6 +3879,8 @@ fn is_limit_issue_code(code: &str) -> bool {
         "row_identity_line_too_large"
             | "row_identity_row_count_limit_exceeded"
             | "row_identity_duplicate_tracking_limit_exceeded"
+            | "calibration_profile_too_large"
+            | "encoder_distortion_profile_too_large"
             | "verification_report_issue_limit_exceeded"
     )
 }

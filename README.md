@@ -98,7 +98,10 @@ structure of each vector on its own:
   known before you see any data (256 B at dim = 1024, 2-bit), with
   `bits ∈ {1, 2, 4}` the size/recall knob. (`b = 8` is an opt-in
   evidence/refinement width — asymmetric scoring at any dim, symmetric only
-  when `dim % 256 == 0` — not a broad retrieval mode.)
+  when `dim % 256 == 0` — not a broad retrieval mode. In v0.5.0 it is
+  Rust-only, in-memory, not accepted by the Python `RankQuant` constructor, and
+  not persistable to `.ovrq`; each prepared asymmetric query owns a
+  `dim * 256` `f32` LUT, about 64 MiB at the maximum dimension.)
 - **Two-stage retrieval, built in.** A cheap bitmap / sign-popcount
   prefilter feeds an exact rerank — the coarse→fine pipeline ships as
   library primitives. The coarse-scan→exact-rerank pattern, and the
@@ -118,7 +121,9 @@ large-scale serving rather than competing with one.
 - **`Rank`** — full-precision rank vectors (`u16` per coordinate).
 - **`RankQuant`** — ranks bucketed into `1 << bits` equal-width
   bins, `bits` bits per coordinate (`dim * bits / 8` bytes/doc). Both a
-  symmetric (Spearman) and asymmetric (float-query LUT) scorer.
+  symmetric (Spearman) and asymmetric (float-query LUT) scorer. `bits ∈
+  {1, 2, 4}` are the cross-language persisted retrieval widths in v0.5.0;
+  `b = 8` is Rust-only and in-memory for evidence/refinement.
 - **`Bitmap`** — a top-bucket bitmap per document (one bit per
   coordinate); scoring is `popcount(Q AND D)`, a coarsened rank overlap.
 - **`SignBitmap`** — a sign bitmap per document for sign-cosine
@@ -127,8 +132,8 @@ large-scale serving rather than competing with one.
 Two further paths, for callers who need them:
 
 - **`RankQuantFastscan`** — a stable, documented *but specialized* public
-  type: an optional b=2 FastScan kernel (block-32 nibble/PQ-LUT, AVX-512 → AVX2
-  → scalar dispatch) for absolute-minimum stage-1 scan latency, at 2× the
+  type: an optional b=2 FastScan kernel (block-32 nibble/PQ-LUT, AVX-512 →
+  scalar dispatch) for absolute-minimum stage-1 scan latency, at 2× the
   RankQuant b=2 footprint (`dim/2` bytes/doc) and 8-bit LUT scoring noise. It
   persists to `.ovfs` (magic `OVFS`) through direct
   `RankQuantFastscan::{write,load}` calls. In v0.5.0, `.ovfs` is not yet part

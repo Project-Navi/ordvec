@@ -54,15 +54,16 @@ jobs:
         with:
           version: ${{ env.SDE_VERSION }}
           sha256: ${{ env.SDE_SHA256 }}
-          allow-unavailable: true
-      - name: Note Intel SDE unavailable
-        if: steps.sde.outputs.sde-available != 'true'
-        run: echo "::notice::Intel SDE archive unavailable; temporarily skipping SDE-backed coverage."
+          allow-unavailable: ${{ github.event_name == 'pull_request' }}
+      - name: note Intel SDE unavailable on PR
+        if: ${{ github.event_name == 'pull_request' && steps.sde.outputs.sde-available != 'true' }}
+        run: |
+          echo "::warning::Intel SDE archive unavailable on this pull request; push and release-gated runs fail closed."
       - name: Install cargo-llvm-cov (pinned)
-        if: steps.sde.outputs.sde-available == 'true'
+        if: ${{ steps.sde.outputs.sde-available == 'true' }}
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: Sanity-check AVX-512 detection under SDE
-        if: steps.sde.outputs.sde-available == 'true'
+        if: ${{ steps.sde.outputs.sde-available == 'true' }}
         env:
           SDE_PATH: ${{ steps.sde.outputs.sde-path }}
         run: |
@@ -99,12 +100,12 @@ jobs:
       # feature detection reaches the AVX-512 kernels. That makes the coverage
       # floor reflect the same exercised code as the dedicated ci.yml avx512 job.
       - name: Generate coverage (lcov) + enforce floor
-        if: steps.sde.outputs.sde-available == 'true'
+        if: ${{ steps.sde.outputs.sde-available == 'true' }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ steps.sde.outputs.sde-path }} -spr --
         run: cargo llvm-cov --all-features --target x86_64-unknown-linux-gnu --fail-under-lines 85 --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
-        if: steps.sde.outputs.sde-available == 'true'
+        if: ${{ steps.sde.outputs.sde-available == 'true' }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: lcov.info

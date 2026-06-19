@@ -357,10 +357,11 @@ jobs:
   #
   # Pattern adapted from microsoft/DiskANN's CI (also a vector-search crate).
   # The local setup-intel-sde action owns the fixed Intel downloadmirror build,
-  # SHA256 verification, and x86_64 runner guard. The SHA gate still fails
-  # closed for any archive we extract. While Intel's CloudFront/WAF challenge
-  # blocks GitHub-hosted runners, this PR temporarily lets the job report an
-  # explicit unavailable state and skip SDE-dependent steps.
+  # SHA256 verification, and x86_64 runner guard. The SHA gate fails closed for
+  # any archive we extract. Pull requests may soft-skip during Intel mirror
+  # outages, but push/workflow_dispatch runs fail closed; the release gate only
+  # accepts the post-merge push workflow result, so a release cannot proceed
+  # without the SDE probe and AVX-512 tests actually executing on main.
   avx512:
     name: avx512 (Intel SDE / Sapphire Rapids)
     runs-on: ubuntu-24.04
@@ -393,12 +394,13 @@ jobs:
         with:
           version: ${{ env.SDE_VERSION }}
           sha256: ${{ env.SDE_SHA256 }}
-          allow-unavailable: true
-      - name: note Intel SDE unavailable
-        if: steps.sde.outputs.sde-available != 'true'
-        run: echo "::notice::Intel SDE archive unavailable; temporarily skipping AVX-512 SDE coverage."
+          allow-unavailable: ${{ github.event_name == 'pull_request' }}
+      - name: note Intel SDE unavailable on PR
+        if: ${{ github.event_name == 'pull_request' && steps.sde.outputs.sde-available != 'true' }}
+        run: |
+          echo "::warning::Intel SDE archive unavailable on this pull request; push and release-gated runs fail closed."
       - name: sanity-check AVX-512 detection under SDE
-        if: steps.sde.outputs.sde-available == 'true'
+        if: ${{ steps.sde.outputs.sde-available == 'true' }}
         env:
           SDE_PATH: ${{ steps.sde.outputs.sde-path }}
         run: |
@@ -432,7 +434,7 @@ jobs:
           "${SDE_PATH}" -spr -- \
             "${RUNNER_TEMP}/sde-probe/target/release/sde-probe"
       - name: cargo test under SDE (AVX-512 kernels)
-        if: steps.sde.outputs.sde-available == 'true'
+        if: ${{ steps.sde.outputs.sde-available == 'true' }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ steps.sde.outputs.sde-path }} -spr --
           # Cause any AVX-512 test that would silently skip on a non-AVX-512 host

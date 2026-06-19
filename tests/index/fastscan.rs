@@ -269,11 +269,57 @@ fn fastscan_new_rejects_dim_above_u16_max() {
 // ---------------------------------------------------------------------
 
 fn fs_tmp(name: &str) -> std::path::PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     std::env::temp_dir().join(format!(
-        "ordvec_fastscan_{}_{}.ovfs",
+        "ordvec_fastscan_{}_{}_{}.ovfs",
         name,
-        std::process::id()
+        std::process::id(),
+        nonce
     ))
+}
+
+fn forge_ovfs(dim: usize, n_vectors: usize, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"OVFS");
+    bytes.push(1);
+    bytes.extend_from_slice(&(dim as u32).to_le_bytes());
+    bytes.extend_from_slice(&(n_vectors as u32).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn valid_dim4_n1_payload() -> Vec<u8> {
+    let mut payload = vec![0u8; 64];
+    // Buckets [0, 1, 2, 3] -> one coordinate in each b=2 bucket.
+    payload[0] = 0x01;
+    payload[32] = 0x0b;
+    payload
+}
+
+fn assert_fastscan_loaders_reject(bytes: &[u8], expected: &str) {
+    let path = fs_tmp("malformed_payload");
+    std::fs::write(&path, bytes).unwrap();
+    let path_err = RankQuantFastscan::load(&path).unwrap_err();
+    std::fs::remove_file(&path).ok();
+    assert!(
+        path_err.to_string().contains(expected),
+        "path loader returned unexpected error: {path_err}"
+    );
+
+    let reader_err = RankQuantFastscan::read_from(Cursor::new(bytes.to_vec())).unwrap_err();
+    assert!(
+        reader_err.to_string().contains(expected),
+        "reader loader returned unexpected error: {reader_err}"
+    );
+
+    let bytes_err = RankQuantFastscan::load_from_bytes(bytes).unwrap_err();
+    assert!(
+        bytes_err.to_string().contains(expected),
+        "byte-slice loader returned unexpected error: {bytes_err}"
+    );
 }
 
 #[test]
@@ -450,4 +496,28 @@ fn fastscan_load_rejects_dim_not_multiple_of_4() {
     };
     std::fs::remove_file(&path).ok();
     assert!(err.to_string().contains("multiple of 4"), "got: {err}");
+}
+
+#[test]
+fn fastscan_load_rejects_invalid_payload_nibble_on_all_public_loaders() {
+    let mut payload = valid_dim4_n1_payload();
+    payload[32] = 0x10;
+    let bytes = forge_ovfs(4, 1, &payload);
+    assert_fastscan_loaders_reject(&bytes, "invalid FastScan nibble");
+}
+
+#[test]
+fn fastscan_load_rejects_nonzero_tail_padding_on_all_public_loaders() {
+    let mut payload = valid_dim4_n1_payload();
+    payload[1] = 0x01;
+    let bytes = forge_ovfs(4, 1, &payload);
+    assert_fastscan_loaders_reject(&bytes, "tail padding byte");
+}
+
+#[test]
+fn fastscan_load_rejects_constant_composition_violation_on_all_public_loaders() {
+    let mut payload = valid_dim4_n1_payload();
+    payload[0] = 0x00;
+    let bytes = forge_ovfs(4, 1, &payload);
+    assert_fastscan_loaders_reject(&bytes, "constant composition");
 }

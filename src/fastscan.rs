@@ -19,7 +19,9 @@
 //! type — not the headline API. The free [`search_asymmetric_fastscan_b2`]
 //! entry point stays `pub(crate)`: production callers should reach for
 //! [`RankQuant::search_asymmetric`](crate::RankQuant::search_asymmetric),
-//! whose AVX-512 → AVX2 → scalar dispatch is the maintained surface. Prefer
+//! whose AVX-512 → AVX2 → scalar dispatch is the maintained exact surface.
+//! FastScan itself dispatches AVX-512 when available and otherwise uses its
+//! scalar kernel. Prefer
 //! FastScan only when b=2 scan latency is the binding constraint.
 //! This latency path is not part of the constant-weight bitmap overlap
 //! calibration theorem.
@@ -654,7 +656,9 @@ impl RankQuantFastscan {
     /// Persist this index to a `.ovfs` file (magic `OVFS`).
     ///
     /// The on-disk form is a 13-byte header (`OVFS` magic, version, `dim`,
-    /// `n_vectors`) followed by the opaque block-32 packed FastScan payload.
+    /// `n_vectors`) followed by the block-32 packed FastScan payload. Each
+    /// real document byte must be a 4-bit code, each row must satisfy b=2
+    /// constant composition, and block-tail padding must be zero.
     /// This is a new ordvec format with no turbovec-era counterpart. Round-trip
     /// is a type-level guarantee: [`Self::load`] reconstructs the same
     /// `(dim, n_vectors)` and packed buffer this writes.
@@ -669,9 +673,9 @@ impl RankQuantFastscan {
 
     /// Load a `.ovfs` FastScan index previously written by [`Self::write`].
     ///
-    /// The loader validates the header and that the payload length is exactly
-    /// the block-32 size implied by `(dim, n_vectors)` (`dim % 4 == 0`, no
-    /// trailing bytes), so the returned index is consistent by construction.
+    /// The loader validates the header, exact payload length, FastScan nibble
+    /// domain, b=2 constant composition, and zero tail padding, so the returned
+    /// index is consistent by construction.
     pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let (dim, n_vectors, packed_fs) = crate::rank_io::load_fastscan(path)?;
         Ok(Self {
@@ -697,5 +701,78 @@ impl RankQuantFastscan {
     /// Load a `.ovfs` FastScan index from an in-memory byte slice.
     pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
         Self::read_from(std::io::Cursor::new(bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar_search_reference(
+        packed_fs: &[u8],
+        n: usize,
+        dim: usize,
+        queries: &[f32],
+        k: usize,
+    ) -> SearchResults {
+        let nq = queries.len() / dim;
+        let k = k.min(n);
+        let mut scores = vec![f32::NEG_INFINITY; nq * k];
+        let mut indices = vec![-1i64; nq * k];
+        if k == 0 {
+            return SearchResults {
+                scores: Vec::new(),
+                indices: Vec::new(),
+                nq,
+                k,
+            };
+        }
+
+        let centred_norm = rankquant_norm(dim, 2);
+        let inv_norm = 1.0_f32 / centred_norm;
+        for query_index in 0..nq {
+            let q = &queries[query_index * dim..(query_index + 1) * dim];
+            let q_unit = l2_normalise(q);
+            let (lut_u8, bias_sum, inv_q) = build_fastscan_b2_query(&q_unit, dim);
+            let mut top = TopK::new(k);
+            scan_b2_fastscan_scalar(
+                packed_fs, n, dim, &lut_u8, bias_sum, inv_q, inv_norm, &mut top,
+            );
+            top.finalize_into(
+                &mut scores[query_index * k..(query_index + 1) * k],
+                &mut indices[query_index * k..(query_index + 1) * k],
+            );
+        }
+
+        SearchResults {
+            scores,
+            indices,
+            nq,
+            k,
+        }
+    }
+
+    #[test]
+    fn persisted_fastscan_dispatch_matches_scalar_reference() {
+        let dim = 64usize;
+        let n = 65usize;
+        let k = 9usize;
+        let docs: Vec<f32> = (0..n * dim)
+            .map(|i| (((i * 37 + 11) % 257) as f32 - 128.0) / 128.0)
+            .collect();
+        let queries: Vec<f32> = (0..3 * dim)
+            .map(|i| (((i * 19 + 5) % 193) as f32 - 96.0) / 96.0)
+            .collect();
+
+        let mut idx = RankQuantFastscan::new(dim);
+        idx.add(&docs);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        let loaded = RankQuantFastscan::load_from_bytes(&bytes).unwrap();
+
+        let scalar = scalar_search_reference(&loaded.packed_fs, loaded.n_vectors, dim, &queries, k);
+        let dispatched = loaded.search(&queries, k);
+        assert_eq!(dispatched.indices, scalar.indices);
+        assert_eq!(dispatched.scores, scalar.scores);
     }
 }

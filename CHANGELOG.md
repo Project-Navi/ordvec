@@ -5,10 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.5.0 - 2026-06-19
 
 ### Security
 
+- **Hardened `.ovfs` FastScan loading before the format's first stable
+  release.** `RankQuantFastscan` now rejects invalid FastScan payload bytes
+  (`byte & 0xf0 != 0`), rows that violate b=2 constant composition, and
+  nonzero block-tail padding across the path, reader, and byte-slice load APIs.
+  Loader fuzzing now runs a safe `search()` after every successful `.ovfs` load,
+  and persisted-input tests compare the dispatch path against the scalar
+  FastScan reference (AVX-512 under SDE, scalar otherwise).
+- **Bounded calibration-profile hashing in `ordvec-manifest`.** Verification now
+  applies `max_calibration_profile_bytes` (64 MiB by default, CLI-overridable)
+  before hashing calibration profile artifacts, matching the existing bounded
+  resource model for encoder-distortion profiles and auxiliary artifacts.
 - **Cleared OSV / OpenSSF-Scorecard advisories on the dev-only BEIR benchmark
   tooling** (introduced with the benchmark harness; none reach the published
   `ordvec` crate or the `ordvec` PyPI wheel). The `benchmarks/beir/requirements.txt`
@@ -41,6 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ordvec-manifest` v1 support for `.ovfs` are deferred to 0.8.0 (#233, #232);
   bind `.ovfs` artifacts with caller-owned checksums or attestations when they
   cross a trust boundary.
+- **Caller-owned serial batched/buffered two-stage primitives** (additive):
+  `SignBitmap::top_m_candidates_batched_serial_csr`, `CandidateBatch`,
+  `SubsetScratch`, `RankQuant::search_asymmetric_subset_batched_serial`, and
+  `RankQuant::search_asymmetric_subset_batched_serial_into`. These primitives
+  never enter rayon; callers partition query batches and drive the serial
+  `_into` primitive from their own scheduler. The serial CSR candidate generator
+  is correctness-first in this release; future releases can optimize internals
+  behind the same signature.
+- `avx512vpop_supported()` (`#[doc(hidden)]`) — reports whether the AVX-512
+  VPOPCNTDQ scan kernels are active on the current CPU. The scan dispatch reads
+  only this predicate (no per-dimension gate).
 
 ### Performance
 
@@ -58,12 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   residues 0..7 plus 384/512/768/1024/1536 for all six SignBitmap/Bitmap scan
   kernels. This is stage-1 scan-kernel throughput, not a whole-pipeline figure.
 
-### Added
-
-- `avx512vpop_supported()` (`#[doc(hidden)]`) — reports whether the AVX-512
-  VPOPCNTDQ scan kernels are active on the current CPU. The scan dispatch reads
-  only this predicate (no per-dimension gate).
-
 ### Changed
 
 - **Clarified BEIR benchmark release claims.** The committed README figures use
@@ -76,6 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously-written `.tvr` / `.tvrq` / `.tvbm` / `.tvsb` file continues to load
   unchanged; only the file extensions and magic bytes written by `write()`
   change (#230).
+- **Documented the v0.5 `b=8` support boundary.** `b=8` is a stable Rust
+  in-memory evidence/refinement width: asymmetric scoring and code/projection
+  generation work at any valid dimension, while symmetric `RankQuant::search`
+  requires `dim % 256 == 0`. It is not exposed through the Python `RankQuant`
+  constructor in v0.5.0, cannot be persisted to `.ovrq`, and each prepared
+  asymmetric query/worker owns a `dim * 256` `f32` LUT (about 64 MiB at the
+  maximum dimension).
 - **Release-hardened the caller-owned serial two-stage primitives** (no API
   change; added in 0.5.0). The trust model is now explicit and tested:
   - Rejection-path regression tests for the full CSR/query/buffer validation set
@@ -85,9 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     input can never reach the SIMD scan.
   - A counting-allocator test proving `search_asymmetric_subset_batched_serial_into`
     performs **zero heap allocations** in steady state (warmed `SubsetScratch`,
-    reused caller buffers) **on the AVX-512/AVX2 rerank path** — the strong form of
-    the prior capacity-stability proxy. (The scalar fallback, e.g. aarch64,
-    allocates a per-query scoring LUT; the test skips the strict check there.)
+    reused caller buffers, including the scalar LUT scratch) across the rerank
+    paths — the strong form of the prior capacity-stability proxy.
   - A focused `two_stage_bench` example decomposing stage-1 candidate-gen /
     single-query rerank loop / batched `_into` / full two-stage at the
     Harrier-1024 shape, with a committed reference capture
@@ -97,6 +119,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Made Intel SDE AVX-512 coverage fail closed for release gating.** Pull
+  requests may emit a visible warning and skip SDE-dependent steps during an
+  Intel mirror outage, but the push/workflow-dispatch runs used by the release
+  gate still fail closed; setup must succeed, the AVX-512 CPUID probe must run,
+  and the SDE-backed test/coverage commands must execute before release.
+- **Closed manifest verifier path-reopen drift.** Verification and SQLite
+  cache-key construction now hash, probe, and validate the canonical path that
+  was checked and recorded, rather than reopening the pre-canonical joined path.
+- **Marked persisted-format metadata enums non-exhaustive before v0.5 ships.**
+  `IndexKind`, `IndexParams`, `ManifestIndexKind`, and `ManifestIndexParams`
+  are now future-extensible for later stable formats such as `.ovfs` manifest
+  support without forcing downstream exhaustive matches.
+- **Corrected FastScan dispatch documentation.** `RankQuantFastscan` dispatches
+  AVX-512 when available and otherwise uses its scalar kernel; the AVX2 path is
+  part of the exact `RankQuant` asymmetric scorer, not FastScan.
 - **`ordvec-manifest` crate and wheel now ship license text.** Both declared
   `MIT OR Apache-2.0` but packaged no `LICENSE-*` files (a pre-0.5.0 defect);
   added `LICENSE-MIT` + `LICENSE-APACHE-2.0` (copied from the workspace root) to
@@ -107,32 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   license location (`*.dist-info/licenses/` for the wheel, the archive root for
   the sdist) — closing the regression class at the published-bytes layer, not
   only at `cargo package`.
-
-## 0.5.0 - 2026-06-13
-
-### Added
-
-- **Caller-owned serial batched/buffered two-stage primitives** (additive):
-  - `SignBitmap::top_m_candidates_batched_serial_csr(&self, queries, m) -> CandidateBatch`
-    — serial (no rayon) CSR candidate generation; pair with the rerank below to
-    run a fully caller-scheduled two-stage search.
-  - `RankQuant::search_asymmetric_subset_batched_serial(..) -> SearchResults` and
-    `..._serial_into(.., &mut SubsetScratch, &mut out_scores, &mut out_indices)`
-    — serial batched subset rerank; the `_into` form is allocation-free after
-    scratch warmup on the AVX-512/AVX2 rerank path (the integration contract for
-    runtimes that own their own thread pool / GIL release).
-  - New public types `CandidateBatch` (CSR candidate carrier) and `SubsetScratch`
-    (reusable rerank scratch).
-- These primitives never enter rayon; the caller owns parallelism. No bundled
-  rayon convenience wrapper ships in this release — partition the query batch and
-  drive the serial `_into` primitive from your own pool. The existing
-  internally-parallel `top_m_candidates_batched` and `search_asymmetric*` are
-  unchanged.
-
-### Notes
-
-- The serial CSR candidate-gen is a correctness-first implementation; a future
-  release optimizes its internals behind the same signature.
 
 ## 0.4.0 - 2026-06-04
 
