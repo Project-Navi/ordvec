@@ -154,6 +154,8 @@ Deployment-side provenance guidance lives in
 The Rust MSRV is Rust 1.89. Raising it is a minor-version compatibility change
 and requires a reason in release notes. Keep `Cargo.toml` `rust-version`, the
 README MSRV badge/section, and the CI MSRV job synchronized.
+The release-facing feature matrix lives in
+[`msrv-and-features.md`](msrv-and-features.md).
 
 The core crate has no required system or numerical dependencies. Adding one, or
 adding an optional dependency feature that changes build expectations for

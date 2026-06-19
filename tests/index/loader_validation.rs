@@ -9,7 +9,7 @@
 //! Each case pairs a positive control (a freshly-written valid index still
 //! round-trips) with a corrupted-but-well-shaped negative case.
 
-use std::io::Write;
+use std::io::{Cursor, Write};
 
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 
@@ -42,6 +42,202 @@ fn assert_load_err_contains<T>(result: std::io::Result<T>, expected: &str) {
 
 fn set_u32_field(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn prefixed_cursor(bytes: &[u8]) -> Cursor<Vec<u8>> {
+    const PREFIX: &[u8] = b"container-prefix";
+    let mut prefixed = PREFIX.to_vec();
+    prefixed.extend_from_slice(bytes);
+    let mut cursor = Cursor::new(prefixed);
+    cursor.set_position(PREFIX.len() as u64);
+    cursor
+}
+
+fn append_trailer(mut bytes: Vec<u8>) -> Cursor<Vec<u8>> {
+    bytes.extend_from_slice(b"next-record");
+    Cursor::new(bytes)
+}
+
+#[test]
+fn public_stream_persistence_roundtrips_core_formats() {
+    let corpus = make_corpus(90_001);
+    let query = &make_corpus(90_002)[..D];
+
+    {
+        let mut idx = Rank::new(D);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[..4], b"OVR1");
+
+        let p = tmp("rank_stream_bytes");
+        idx.write(&p).unwrap();
+        assert_eq!(read_bytes(&p), bytes);
+        std::fs::remove_file(&p).ok();
+
+        let from_bytes = Rank::load_from_bytes(&bytes).unwrap();
+        let from_reader = Rank::read_from(prefixed_cursor(&bytes)).unwrap();
+        assert_eq!(from_bytes.len(), idx.len());
+        assert_eq!(from_reader.dim(), idx.dim());
+        assert_eq!(
+            from_bytes.search(query, 10).indices_for_query(0),
+            idx.search(query, 10).indices_for_query(0)
+        );
+        assert_eq!(
+            from_reader.search(query, 10).indices_for_query(0),
+            idx.search(query, 10).indices_for_query(0)
+        );
+    }
+
+    {
+        let mut idx = RankQuant::new(D, 2);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[..4], b"OVRQ");
+
+        let p = tmp("rankquant_stream_bytes");
+        idx.write(&p).unwrap();
+        assert_eq!(read_bytes(&p), bytes);
+        std::fs::remove_file(&p).ok();
+
+        let from_bytes = RankQuant::load_from_bytes(&bytes).unwrap();
+        let from_reader = RankQuant::read_from(prefixed_cursor(&bytes)).unwrap();
+        assert_eq!(from_bytes.len(), idx.len());
+        assert_eq!(from_reader.bits(), idx.bits());
+        assert_eq!(
+            from_bytes.search_asymmetric(query, 10).indices_for_query(0),
+            idx.search_asymmetric(query, 10).indices_for_query(0)
+        );
+        assert_eq!(
+            from_reader
+                .search_asymmetric(query, 10)
+                .indices_for_query(0),
+            idx.search_asymmetric(query, 10).indices_for_query(0)
+        );
+    }
+
+    {
+        let mut idx = Bitmap::new(D, D / 4);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[..4], b"OVBM");
+
+        let p = tmp("bitmap_stream_bytes");
+        idx.write(&p).unwrap();
+        assert_eq!(read_bytes(&p), bytes);
+        std::fs::remove_file(&p).ok();
+
+        let from_bytes = Bitmap::load_from_bytes(&bytes).unwrap();
+        let from_reader = Bitmap::read_from(prefixed_cursor(&bytes)).unwrap();
+        assert_eq!(from_bytes.len(), idx.len());
+        assert_eq!(from_reader.n_top(), idx.n_top());
+        assert_eq!(
+            from_bytes.search(query, 10).indices_for_query(0),
+            idx.search(query, 10).indices_for_query(0)
+        );
+        assert_eq!(
+            from_reader.top_m_candidates(query, 32),
+            idx.top_m_candidates(query, 32)
+        );
+    }
+
+    {
+        let mut idx = SignBitmap::new(D);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[..4], b"OVSB");
+
+        let p = tmp("sign_bitmap_stream_bytes");
+        idx.write(&p).unwrap();
+        assert_eq!(read_bytes(&p), bytes);
+        std::fs::remove_file(&p).ok();
+
+        let from_bytes = SignBitmap::load_from_bytes(&bytes).unwrap();
+        let from_reader = SignBitmap::read_from(prefixed_cursor(&bytes)).unwrap();
+        assert_eq!(from_bytes.len(), idx.len());
+        assert_eq!(from_reader.dim(), idx.dim());
+        assert_eq!(from_bytes.score_all(query), idx.score_all(query));
+        assert_eq!(
+            from_reader.top_m_candidates(query, 32),
+            idx.top_m_candidates(query, 32)
+        );
+    }
+}
+
+#[test]
+fn public_readers_do_not_buffer_past_reported_trailing_bytes() {
+    let corpus = make_corpus(90_101);
+
+    {
+        let mut idx = Rank::new(D);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        let mut cursor = append_trailer(bytes);
+        assert_load_err_contains(
+            Rank::read_from(&mut cursor),
+            "OVR1 payload has trailing bytes",
+        );
+        assert_eq!(
+            cursor.position(),
+            13,
+            "Rank reader should stop after header"
+        );
+    }
+
+    {
+        let mut idx = RankQuant::new(D, 2);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        let mut cursor = append_trailer(bytes);
+        assert_load_err_contains(
+            RankQuant::read_from(&mut cursor),
+            "OVRQ payload has trailing bytes",
+        );
+        assert_eq!(
+            cursor.position(),
+            14,
+            "RankQuant reader should stop after header"
+        );
+    }
+
+    {
+        let mut idx = Bitmap::new(D, D / 4);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        let mut cursor = append_trailer(bytes);
+        assert_load_err_contains(
+            Bitmap::read_from(&mut cursor),
+            "OVBM payload has trailing bytes",
+        );
+        assert_eq!(
+            cursor.position(),
+            17,
+            "Bitmap reader should stop after header"
+        );
+    }
+
+    {
+        let mut idx = SignBitmap::new(D);
+        idx.add(&corpus);
+        let mut bytes = Vec::new();
+        idx.write_to(&mut bytes).unwrap();
+        let mut cursor = append_trailer(bytes);
+        assert_load_err_contains(
+            SignBitmap::read_from(&mut cursor),
+            "OVSB payload has trailing bytes",
+        );
+        assert_eq!(
+            cursor.position(),
+            13,
+            "SignBitmap reader should stop after header"
+        );
+    }
 }
 
 fn rank_payload_cases(dim: usize) -> (Vec<u8>, Vec<u8>) {
@@ -236,6 +432,25 @@ fn public_loaders_report_stable_malformed_payload_context() {
             ),
             _ => unreachable!(),
         }
+        match label {
+            "OVR1" => assert_load_err_contains(
+                Rank::load_from_bytes(&truncated_header),
+                &format!("{label} payload truncated"),
+            ),
+            "OVRQ" => assert_load_err_contains(
+                RankQuant::load_from_bytes(&truncated_header),
+                &format!("{label} payload truncated"),
+            ),
+            "OVBM" => assert_load_err_contains(
+                Bitmap::load_from_bytes(&truncated_header),
+                &format!("{label} payload truncated"),
+            ),
+            "OVSB" => assert_load_err_contains(
+                SignBitmap::load_from_bytes(&truncated_header),
+                &format!("{label} payload truncated"),
+            ),
+            _ => unreachable!(),
+        }
         std::fs::remove_file(&truncated).ok();
 
         trailing_bytes.push(0);
@@ -256,6 +471,25 @@ fn public_loaders_report_stable_malformed_payload_context() {
             ),
             "OVSB" => assert_load_err_contains(
                 SignBitmap::load(&trailing),
+                &format!("{label} payload has trailing bytes"),
+            ),
+            _ => unreachable!(),
+        }
+        match label {
+            "OVR1" => assert_load_err_contains(
+                Rank::load_from_bytes(&trailing_bytes),
+                &format!("{label} payload has trailing bytes"),
+            ),
+            "OVRQ" => assert_load_err_contains(
+                RankQuant::load_from_bytes(&trailing_bytes),
+                &format!("{label} payload has trailing bytes"),
+            ),
+            "OVBM" => assert_load_err_contains(
+                Bitmap::load_from_bytes(&trailing_bytes),
+                &format!("{label} payload has trailing bytes"),
+            ),
+            "OVSB" => assert_load_err_contains(
+                SignBitmap::load_from_bytes(&trailing_bytes),
                 &format!("{label} payload has trailing bytes"),
             ),
             _ => unreachable!(),

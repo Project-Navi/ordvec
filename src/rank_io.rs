@@ -42,13 +42,19 @@
 //!
 //! # Persistence API & round-trip contract
 //!
-//! The supported persistence API is the index types' `write()` / `load()`
-//! methods: [`Rank`](crate::Rank) / [`RankQuant`](crate::RankQuant) /
-//! [`Bitmap`](crate::Bitmap) / [`SignBitmap`](crate::SignBitmap) /
+//! The supported persistence API is the index types' path, stream, and byte
+//! loaders/writers: `write(path)`, `write_to(writer)`, `load(path)`,
+//! `read_from(reader)`, and `load_from_bytes(bytes)` on
+//! [`Rank`](crate::Rank), [`RankQuant`](crate::RankQuant),
+//! [`Bitmap`](crate::Bitmap), [`SignBitmap`](crate::SignBitmap), and
 //! [`RankQuantFastscan`](crate::RankQuantFastscan) (the last via the `.ovfs`
-//! format). The
-//! `write_*` / `load_*` format helpers in this module are **crate-internal**
-//! (`pub(crate)`); only the `MAX_*` capacity constants are public.
+//! format). `read_from` parses from the reader's current position through EOF
+//! and rejects trailing bytes; callers embedding an index inside a larger
+//! container should pass a length-bounded reader such as `Cursor<&[u8]>`.
+//!
+//! The `write_*` / `load_*` format helpers in this module are
+//! **crate-internal** (`pub(crate)`); only the `MAX_*` capacity constants are
+//! public.
 //!
 //! Round-trip is a guarantee of the **index types**: each constructor
 //! validates its parameters (matching the loaders' `dim` / `n_top` / `bits` /
@@ -63,7 +69,7 @@
 //! that the helpers are no longer reachable with arbitrary external input.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 // Current ordvec magics — written by this crate going forward.
@@ -219,6 +225,13 @@ fn check_payload_matches_file<R: Seek>(
         )));
     }
     Ok(())
+}
+
+fn stream_len_from_current<R: Seek>(reader: &mut R) -> io::Result<u64> {
+    let start = reader.stream_position()?;
+    let end = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(start))?;
+    Ok(end)
 }
 
 fn check_dim(dim: usize) -> io::Result<()> {
@@ -521,10 +534,34 @@ pub(crate) fn write_rank(
     // Enforce the loaders' MAX_PAYLOAD cap *before* File::create so a rejected
     // oversized write never truncates an existing file. Defense-in-depth; the
     // round-trip guarantee is type-level (see module docs). Mirrors load_rank.
+    check_rank_write(dim, n_vectors, ranks)?;
+    write_rank_to_checked(File::create(path)?, dim, n_vectors, ranks)
+}
+
+pub(crate) fn write_rank_to<W: Write>(
+    writer: W,
+    dim: usize,
+    n_vectors: usize,
+    ranks: &[u16],
+) -> io::Result<()> {
+    check_rank_write(dim, n_vectors, ranks)?;
+    write_rank_to_checked(writer, dim, n_vectors, ranks)
+}
+
+fn check_rank_write(dim: usize, n_vectors: usize, ranks: &[u16]) -> io::Result<()> {
     let payload_bytes = rank_payload_bytes(dim, n_vectors)?;
     check_payload_bytes(payload_bytes)?;
     assert_eq!(ranks.len(), payload_bytes / 2);
-    let mut f = BufWriter::new(File::create(path)?);
+    Ok(())
+}
+
+fn write_rank_to_checked<W: Write>(
+    writer: W,
+    dim: usize,
+    n_vectors: usize,
+    ranks: &[u16],
+) -> io::Result<()> {
+    let mut f = BufWriter::new(writer);
     f.write_all(OVR_MAGIC)?;
     f.write_all(&[VERSION])?;
     f.write_all(&(dim as u32).to_le_bytes())?;
@@ -545,7 +582,20 @@ pub(crate) fn load_rank(path: impl AsRef<Path>) -> io::Result<(usize, usize, Vec
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "OVR1")?;
+    load_rank_from_stream(&mut f, file_len)
+}
+
+pub(crate) fn load_rank_from<R: Read + Seek>(reader: R) -> io::Result<(usize, usize, Vec<u16>)> {
+    let mut reader = reader;
+    let file_len = stream_len_from_current(&mut reader)?;
+    load_rank_from_stream(&mut reader, file_len)
+}
+
+fn load_rank_from_stream<R: Read + Seek>(
+    mut f: &mut R,
+    file_len: u64,
+) -> io::Result<(usize, usize, Vec<u16>)> {
+    let magic = read_magic(f, "OVR1")?;
     if &magic != OVR_MAGIC && &magic != TVR_MAGIC {
         return Err(invalid("not an OVR1/TVR1 (Rank) file: wrong magic"));
     }
@@ -614,10 +664,36 @@ pub(crate) fn write_rankquant(
     // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
     // depth; a rejected write must not truncate an existing file). Mirrors
     // load_rankquant: checked multiply before the /8 divide.
+    check_rankquant_write(bits, dim, n_vectors, packed)?;
+    write_rankquant_to_checked(File::create(path)?, bits, dim, n_vectors, packed)
+}
+
+pub(crate) fn write_rankquant_to<W: Write>(
+    writer: W,
+    bits: u8,
+    dim: usize,
+    n_vectors: usize,
+    packed: &[u8],
+) -> io::Result<()> {
+    check_rankquant_write(bits, dim, n_vectors, packed)?;
+    write_rankquant_to_checked(writer, bits, dim, n_vectors, packed)
+}
+
+fn check_rankquant_write(bits: u8, dim: usize, n_vectors: usize, packed: &[u8]) -> io::Result<()> {
     let payload_bytes = rankquant_payload_bytes(dim, n_vectors, bits)?;
     check_payload_bytes(payload_bytes)?;
     assert_eq!(packed.len(), payload_bytes);
-    let mut f = BufWriter::new(File::create(path)?);
+    Ok(())
+}
+
+fn write_rankquant_to_checked<W: Write>(
+    writer: W,
+    bits: u8,
+    dim: usize,
+    n_vectors: usize,
+    packed: &[u8],
+) -> io::Result<()> {
+    let mut f = BufWriter::new(writer);
     f.write_all(OVRQ_MAGIC)?;
     f.write_all(&[VERSION])?;
     f.write_all(&[bits])?;
@@ -637,7 +713,22 @@ pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, u
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "OVRQ")?;
+    load_rankquant_from_stream(&mut f, file_len)
+}
+
+pub(crate) fn load_rankquant_from<R: Read + Seek>(
+    reader: R,
+) -> io::Result<(u8, usize, usize, Vec<u8>)> {
+    let mut reader = reader;
+    let file_len = stream_len_from_current(&mut reader)?;
+    load_rankquant_from_stream(&mut reader, file_len)
+}
+
+fn load_rankquant_from_stream<R: Read + Seek>(
+    mut f: &mut R,
+    file_len: u64,
+) -> io::Result<(u8, usize, usize, Vec<u8>)> {
+    let magic = read_magic(f, "OVRQ")?;
     if &magic != OVRQ_MAGIC && &magic != TVRQ_MAGIC {
         return Err(invalid("not an OVRQ/TVRQ (RankQuant) file: wrong magic"));
     }
@@ -724,10 +815,36 @@ pub(crate) fn write_bitmap(
     // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
     // depth; a rejected write must not truncate an existing file). Mirrors
     // load_bitmap.
+    check_bitmap_write(dim, n_vectors, bitmaps)?;
+    write_bitmap_to_checked(File::create(path)?, dim, n_top, n_vectors, bitmaps)
+}
+
+pub(crate) fn write_bitmap_to<W: Write>(
+    writer: W,
+    dim: usize,
+    n_top: usize,
+    n_vectors: usize,
+    bitmaps: &[u64],
+) -> io::Result<()> {
+    check_bitmap_write(dim, n_vectors, bitmaps)?;
+    write_bitmap_to_checked(writer, dim, n_top, n_vectors, bitmaps)
+}
+
+fn check_bitmap_write(dim: usize, n_vectors: usize, bitmaps: &[u64]) -> io::Result<()> {
     let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVBM")?;
     check_payload_bytes(payload_bytes)?;
     assert_eq!(bitmaps.len(), payload_bytes / 8);
-    let mut f = BufWriter::new(File::create(path)?);
+    Ok(())
+}
+
+fn write_bitmap_to_checked<W: Write>(
+    writer: W,
+    dim: usize,
+    n_top: usize,
+    n_vectors: usize,
+    bitmaps: &[u64],
+) -> io::Result<()> {
+    let mut f = BufWriter::new(writer);
     f.write_all(OVBM_MAGIC)?;
     f.write_all(&[VERSION])?;
     f.write_all(&(dim as u32).to_le_bytes())?;
@@ -749,7 +866,22 @@ pub(crate) fn load_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usize, u
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "OVBM")?;
+    load_bitmap_from_stream(&mut f, file_len)
+}
+
+pub(crate) fn load_bitmap_from<R: Read + Seek>(
+    reader: R,
+) -> io::Result<(usize, usize, usize, Vec<u64>)> {
+    let mut reader = reader;
+    let file_len = stream_len_from_current(&mut reader)?;
+    load_bitmap_from_stream(&mut reader, file_len)
+}
+
+fn load_bitmap_from_stream<R: Read + Seek>(
+    mut f: &mut R,
+    file_len: u64,
+) -> io::Result<(usize, usize, usize, Vec<u64>)> {
+    let magic = read_magic(f, "OVBM")?;
     if &magic != OVBM_MAGIC && &magic != TVBM_MAGIC {
         return Err(invalid("not an OVBM/TVBM (Bitmap) file: wrong magic"));
     }
@@ -815,10 +947,34 @@ pub(crate) fn write_sign_bitmap(
     // Enforce the loaders' MAX_PAYLOAD cap *before* File::create (defense-in-
     // depth; a rejected write must not truncate an existing file). Mirrors
     // load_sign_bitmap.
+    check_sign_bitmap_write(dim, n_vectors, bitmaps)?;
+    write_sign_bitmap_to_checked(File::create(path)?, dim, n_vectors, bitmaps)
+}
+
+pub(crate) fn write_sign_bitmap_to<W: Write>(
+    writer: W,
+    dim: usize,
+    n_vectors: usize,
+    bitmaps: &[u64],
+) -> io::Result<()> {
+    check_sign_bitmap_write(dim, n_vectors, bitmaps)?;
+    write_sign_bitmap_to_checked(writer, dim, n_vectors, bitmaps)
+}
+
+fn check_sign_bitmap_write(dim: usize, n_vectors: usize, bitmaps: &[u64]) -> io::Result<()> {
     let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVSB")?;
     check_payload_bytes(payload_bytes)?;
     assert_eq!(bitmaps.len(), payload_bytes / 8);
-    let mut f = BufWriter::new(File::create(path)?);
+    Ok(())
+}
+
+fn write_sign_bitmap_to_checked<W: Write>(
+    writer: W,
+    dim: usize,
+    n_vectors: usize,
+    bitmaps: &[u64],
+) -> io::Result<()> {
+    let mut f = BufWriter::new(writer);
     f.write_all(OVSB_MAGIC)?;
     f.write_all(&[VERSION])?;
     f.write_all(&(dim as u32).to_le_bytes())?;
@@ -854,7 +1010,22 @@ pub(crate) fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usi
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "OVSB")?;
+    load_sign_bitmap_from_stream(&mut f, file_len)
+}
+
+pub(crate) fn load_sign_bitmap_from<R: Read + Seek>(
+    reader: R,
+) -> io::Result<(usize, usize, Vec<u64>)> {
+    let mut reader = reader;
+    let file_len = stream_len_from_current(&mut reader)?;
+    load_sign_bitmap_from_stream(&mut reader, file_len)
+}
+
+fn load_sign_bitmap_from_stream<R: Read + Seek>(
+    mut f: &mut R,
+    file_len: u64,
+) -> io::Result<(usize, usize, Vec<u64>)> {
+    let magic = read_magic(f, "OVSB")?;
     if &magic != OVSB_MAGIC && &magic != TVSB_MAGIC {
         return Err(invalid("not an OVSB/TVSB (SignBitmap) file: wrong magic"));
     }
@@ -904,6 +1075,21 @@ pub(crate) fn write_fastscan(
     n_vectors: usize,
     packed_fs: &[u8],
 ) -> io::Result<()> {
+    check_fastscan_write(dim, n_vectors, packed_fs)?;
+    write_fastscan_to_checked(File::create(path)?, dim, n_vectors, packed_fs)
+}
+
+pub(crate) fn write_fastscan_to<W: Write>(
+    writer: W,
+    dim: usize,
+    n_vectors: usize,
+    packed_fs: &[u8],
+) -> io::Result<()> {
+    check_fastscan_write(dim, n_vectors, packed_fs)?;
+    write_fastscan_to_checked(writer, dim, n_vectors, packed_fs)
+}
+
+fn check_fastscan_write(dim: usize, n_vectors: usize, packed_fs: &[u8]) -> io::Result<()> {
     // Validate every header parameter *before* File::create, so a now-public
     // persistence API never (a) silently truncates `dim`/`n_vectors` through the
     // `as u32` casts below, (b) writes a corrupt/oversized file (the loaders'
@@ -924,7 +1110,16 @@ pub(crate) fn write_fastscan(
             packed_fs.len()
         )));
     }
-    let mut f = BufWriter::new(File::create(path)?);
+    Ok(())
+}
+
+fn write_fastscan_to_checked<W: Write>(
+    writer: W,
+    dim: usize,
+    n_vectors: usize,
+    packed_fs: &[u8],
+) -> io::Result<()> {
+    let mut f = BufWriter::new(writer);
     f.write_all(OVFS_MAGIC)?;
     f.write_all(&[VERSION])?;
     f.write_all(&(dim as u32).to_le_bytes())?;
@@ -938,7 +1133,20 @@ pub(crate) fn load_fastscan(path: impl AsRef<Path>) -> io::Result<(usize, usize,
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    let magic = read_magic(&mut f, "OVFS")?;
+    load_fastscan_from_stream(&mut f, file_len)
+}
+
+pub(crate) fn load_fastscan_from<R: Read + Seek>(reader: R) -> io::Result<(usize, usize, Vec<u8>)> {
+    let mut reader = reader;
+    let file_len = stream_len_from_current(&mut reader)?;
+    load_fastscan_from_stream(&mut reader, file_len)
+}
+
+fn load_fastscan_from_stream<R: Read + Seek>(
+    mut f: &mut R,
+    file_len: u64,
+) -> io::Result<(usize, usize, Vec<u8>)> {
+    let magic = read_magic(f, "OVFS")?;
     // OVFS is new in the ordvec format: there is no legacy TV* fastscan magic.
     if &magic != OVFS_MAGIC {
         return Err(invalid("not an OVFS (RankQuantFastscan) file: wrong magic"));

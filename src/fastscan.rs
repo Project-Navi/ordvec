@@ -653,6 +653,11 @@ impl RankQuantFastscan {
         crate::rank_io::write_fastscan(path, self.dim, self.n_vectors, &self.packed_fs)
     }
 
+    /// Persist to any byte writer using the `.ovfs` format.
+    pub fn write_to<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::rank_io::write_fastscan_to(writer, self.dim, self.n_vectors, &self.packed_fs)
+    }
+
     /// Load a `.ovfs` FastScan index previously written by [`Self::write`].
     ///
     /// The loader validates the header and that the payload length is exactly
@@ -665,5 +670,23 @@ impl RankQuantFastscan {
             n_vectors,
             packed_fs,
         })
+    }
+
+    /// Load a `.ovfs` FastScan index from any reader that can seek.
+    ///
+    /// The reader is parsed from its current position through EOF; any trailing
+    /// bytes after the declared payload are rejected.
+    pub fn read_from<R: std::io::Read + std::io::Seek>(reader: R) -> std::io::Result<Self> {
+        let (dim, n_vectors, packed_fs) = crate::rank_io::load_fastscan_from(reader)?;
+        Ok(Self {
+            dim,
+            n_vectors,
+            packed_fs,
+        })
+    }
+
+    /// Load a `.ovfs` FastScan index from an in-memory byte slice.
+    pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
+        Self::read_from(std::io::Cursor::new(bytes))
     }
 }

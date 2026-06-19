@@ -344,6 +344,13 @@ def package_publish_setting(path: str) -> bool:
     return publish
 
 
+def string_sequence(value: Any, context: str) -> list[str]:
+    items = sequence(value, context)
+    if not all(isinstance(item, str) for item in items):
+        fail(f"{context} must contain only strings")
+    return items
+
+
 def project_version(path: str) -> str:
     data = load_toml(path)
     project = mapping(data.get("project"), f"{path}: project")
@@ -456,12 +463,67 @@ def check_release_compatibility_sync() -> None:
     if f"The Rust MSRV is Rust {core_msrv}." not in compatibility:
         fail(f"docs/compatibility-policy.md must mention Rust {core_msrv}")
 
+    msrv_features = read_text("docs/msrv-and-features.md")
+    if f"Current MSRV: Rust {core_msrv}." not in msrv_features:
+        fail(f"docs/msrv-and-features.md must mention Rust {core_msrv}")
+    for required in (
+        "`Cargo.toml` `rust-version`",
+        "README MSRV badge/section",
+        "New feature flags must declare a stability class before merging",
+        "`experimental` exposes `MultiBucketBitmap`",
+        "`test-utils` is repo-test-only",
+        "`cli`, `sqlite`, `sqlite-bundled`",
+        "without hidden platform or feature surprises",
+    ):
+        if required not in msrv_features:
+            fail(f"docs/msrv-and-features.md must mention {required!r}")
+
     ci = read_text(".github/workflows/ci.yml")
     msrv_toolchain = f"{core_msrv}.0"
     if f"name: msrv ({msrv_toolchain})" not in ci:
         fail(f".github/workflows/ci.yml MSRV job name must mention {msrv_toolchain}")
     if f"toolchain: {msrv_toolchain}" not in ci:
         fail(f".github/workflows/ci.yml MSRV job must pin toolchain {msrv_toolchain}")
+
+
+def check_registry_metadata_parity() -> None:
+    expected_crates = {
+        "Cargo.toml": {
+            "license": "MIT OR Apache-2.0",
+            "repository": "https://github.com/Fieldnote-Echo/ordvec",
+            "homepage": "https://github.com/Fieldnote-Echo/ordvec",
+            "documentation": "https://docs.rs/ordvec",
+            "readme": "README.md",
+            "keywords": ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"],
+            "categories": ["algorithms", "science", "compression"],
+        },
+        "ordvec-manifest/Cargo.toml": {
+            "license": "MIT OR Apache-2.0",
+            "repository": "https://github.com/Fieldnote-Echo/ordvec",
+            "homepage": "https://github.com/Fieldnote-Echo/ordvec",
+            "documentation": "https://docs.rs/ordvec-manifest",
+            "readme": "README.md",
+            "keywords": ["vector-search", "manifest", "provenance", "verification", "quantization"],
+            "categories": ["algorithms", "command-line-utilities", "data-structures"],
+        },
+    }
+
+    for path, expected in expected_crates.items():
+        data = load_toml(path)
+        package = mapping(data.get("package"), f"{path}: package")
+        for key in ("license", "repository", "homepage", "documentation", "readme"):
+            if package.get(key) != expected[key]:
+                fail(f"{path}: package.{key} is {package.get(key)!r}, expected {expected[key]!r}")
+        for key in ("keywords", "categories"):
+            actual = string_sequence(package.get(key), f"{path}: package.{key}")
+            if actual != expected[key]:
+                fail(f"{path}: package.{key} is {actual!r}, expected {expected[key]!r}")
+
+        metadata = mapping(package.get("metadata"), f"{path}: package.metadata")
+        docs = mapping(metadata.get("docs"), f"{path}: package.metadata.docs")
+        docs_rs = mapping(docs.get("rs"), f"{path}: package.metadata.docs.rs")
+        if docs_rs.get("all-features") is not False:
+            fail(f"{path}: package.metadata.docs.rs.all-features must be false")
 
 
 def check_publication_model() -> None:
@@ -493,6 +555,38 @@ def check_python_package_metadata() -> None:
     )
     if "numpy>=2.2" not in dependencies:
         fail("ordvec-python/pyproject.toml: project.dependencies must include numpy>=2.2")
+    license_table = mapping(project.get("license"), "ordvec-python/pyproject.toml: project.license")
+    if license_table.get("text") != "MIT OR Apache-2.0":
+        fail("ordvec-python/pyproject.toml: project.license.text must be MIT OR Apache-2.0")
+    classifiers = set(
+        string_sequence(
+            project.get("classifiers"), "ordvec-python/pyproject.toml: project.classifiers"
+        )
+    )
+    for classifier in (
+        "Development Status :: 3 - Alpha",
+        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: Apache Software License",
+        "Operating System :: POSIX :: Linux",
+        "Operating System :: MacOS",
+        "Operating System :: Microsoft :: Windows",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Rust",
+    ):
+        if classifier not in classifiers:
+            fail(f"ordvec-python/pyproject.toml: missing classifier {classifier!r}")
+    urls = mapping(project.get("urls"), "ordvec-python/pyproject.toml: project.urls")
+    for key, expected in {
+        "Homepage": "https://github.com/Fieldnote-Echo/ordvec",
+        "Repository": "https://github.com/Fieldnote-Echo/ordvec",
+        "Issues": "https://github.com/Fieldnote-Echo/ordvec/issues",
+        "Formalization": "https://github.com/Fieldnote-Echo/ordvec-formalization",
+    }.items():
+        if urls.get(key) != expected:
+            fail(f"ordvec-python/pyproject.toml: project.urls.{key} must be {expected!r}")
 
     cargo = load_toml("ordvec-python/Cargo.toml")
     dependencies_table = mapping(cargo.get("dependencies"), "ordvec-python/Cargo.toml: dependencies")
@@ -513,6 +607,49 @@ def check_python_package_metadata() -> None:
         fail("ordvec-manifest-python/pyproject.toml: project.name must be 'ordvec-manifest'")
     if manifest_project.get("requires-python") != ">=3.10":
         fail("ordvec-manifest-python/pyproject.toml: project.requires-python must be >=3.10")
+    manifest_license = mapping(
+        manifest_project.get("license"),
+        "ordvec-manifest-python/pyproject.toml: project.license",
+    )
+    if manifest_license.get("text") != "MIT OR Apache-2.0":
+        fail(
+            "ordvec-manifest-python/pyproject.toml: project.license.text must be MIT OR Apache-2.0"
+        )
+    manifest_classifiers = set(
+        string_sequence(
+            manifest_project.get("classifiers"),
+            "ordvec-manifest-python/pyproject.toml: project.classifiers",
+        )
+    )
+    for classifier in (
+        "Development Status :: 3 - Alpha",
+        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: Apache Software License",
+        "Operating System :: POSIX :: Linux",
+        "Operating System :: MacOS",
+        "Operating System :: Microsoft :: Windows",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Rust",
+    ):
+        if classifier not in manifest_classifiers:
+            fail(f"ordvec-manifest-python/pyproject.toml: missing classifier {classifier!r}")
+    manifest_urls = mapping(
+        manifest_project.get("urls"),
+        "ordvec-manifest-python/pyproject.toml: project.urls",
+    )
+    for key, expected in {
+        "Homepage": "https://github.com/Fieldnote-Echo/ordvec",
+        "Repository": "https://github.com/Fieldnote-Echo/ordvec",
+        "Issues": "https://github.com/Fieldnote-Echo/ordvec/issues",
+    }.items():
+        if manifest_urls.get(key) != expected:
+            fail(
+                "ordvec-manifest-python/pyproject.toml: "
+                f"project.urls.{key} must be {expected!r}"
+            )
 
     manifest_cargo = load_toml("ordvec-manifest-python/Cargo.toml")
     manifest_dependencies = mapping(
@@ -1720,6 +1857,7 @@ def main() -> None:
     ci_workflow = load_workflow(CI_WORKFLOW_PATH)
     check_release_version_sync()
     check_release_compatibility_sync()
+    check_registry_metadata_parity()
     check_publication_model()
     check_python_package_metadata()
     check_release_docs_include_manifest_pypi_lane()

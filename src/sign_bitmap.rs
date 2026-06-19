@@ -459,6 +459,11 @@ impl SignBitmap {
         crate::rank_io::write_sign_bitmap(path, self.dim, self.n_vectors, &self.bitmaps)
     }
 
+    /// Persist to any byte writer using the `.ovsb` format.
+    pub fn write_to<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::rank_io::write_sign_bitmap_to(writer, self.dim, self.n_vectors, &self.bitmaps)
+    }
+
     /// Load from a `.ovsb` file produced by [`Self::write`].
     ///
     /// Legacy `.tvsb` files (magic `TVSB`) written by older versions of this
@@ -470,6 +475,28 @@ impl SignBitmap {
     /// expected `n_vectors * dim / 64` u64 lanes.
     pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let (dim, n_vectors, bitmaps) = crate::rank_io::load_sign_bitmap(path)?;
+        Self::from_persisted_parts(dim, n_vectors, bitmaps)
+    }
+
+    /// Load a `.ovsb`/legacy `.tvsb` index from any reader that can seek.
+    ///
+    /// The reader is parsed from its current position through EOF; any trailing
+    /// bytes after the declared payload are rejected.
+    pub fn read_from<R: std::io::Read + std::io::Seek>(reader: R) -> std::io::Result<Self> {
+        let (dim, n_vectors, bitmaps) = crate::rank_io::load_sign_bitmap_from(reader)?;
+        Self::from_persisted_parts(dim, n_vectors, bitmaps)
+    }
+
+    /// Load a `.ovsb`/legacy `.tvsb` index from an in-memory byte slice.
+    pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
+        Self::read_from(std::io::Cursor::new(bytes))
+    }
+
+    fn from_persisted_parts(
+        dim: usize,
+        n_vectors: usize,
+        bitmaps: Vec<u64>,
+    ) -> std::io::Result<Self> {
         let qpv = dim / 64;
         // `checked_mul` (not `saturating`): on a 32-bit target `n_vectors * qpv`
         // can overflow `usize`; treat overflow as malformed rather than letting

@@ -545,6 +545,11 @@ impl Rank {
         crate::rank_io::write_rank(path, self.dim, self.n_vectors, &self.ranks)
     }
 
+    /// Persist to any byte writer using the `.ovr` format.
+    pub fn write_to<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::rank_io::write_rank_to(writer, self.dim, self.n_vectors, &self.ranks)
+    }
+
     /// Load from a `.ovr` file produced by [`Self::write`].
     ///
     /// Legacy `.tvr` files (magic `TVR1`) written by older versions of this
@@ -557,6 +562,28 @@ impl Rank {
     /// specific to `Rank` are checked here.
     pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let (dim, n_vectors, ranks) = crate::rank_io::load_rank(path)?;
+        Self::from_persisted_parts(dim, n_vectors, ranks)
+    }
+
+    /// Load a `.ovr`/legacy `.tvr` index from any reader that can seek.
+    ///
+    /// The reader is parsed from its current position through EOF; any trailing
+    /// bytes after the declared payload are rejected.
+    pub fn read_from<R: std::io::Read + std::io::Seek>(reader: R) -> std::io::Result<Self> {
+        let (dim, n_vectors, ranks) = crate::rank_io::load_rank_from(reader)?;
+        Self::from_persisted_parts(dim, n_vectors, ranks)
+    }
+
+    /// Load a `.ovr`/legacy `.tvr` index from an in-memory byte slice.
+    pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
+        Self::read_from(std::io::Cursor::new(bytes))
+    }
+
+    fn from_persisted_parts(
+        dim: usize,
+        n_vectors: usize,
+        ranks: Vec<u16>,
+    ) -> std::io::Result<Self> {
         // `checked_mul` (not `saturating`): on a 32-bit target `n_vectors * dim`
         // can overflow `usize`; treat that as malformed rather than letting a
         // saturated `usize::MAX` stand in for the expected length.

@@ -150,9 +150,16 @@ filename. Until a record is updated, the corresponding gated publish fails
 3. Bump the lockstep version (`Cargo.toml`,
    `ordvec-manifest/Cargo.toml` including its `ordvec` dependency,
    `ordvec-python/Cargo.toml`, `ordvec-python/pyproject.toml`,
-   `ordvec-python/python/ordvec/__init__.py`, and `ordvec-ffi/Cargo.toml`) and
-   update `CHANGELOG.md` with migration notes for every intentional
-   compatibility break. Commit on `main`.
+   `ordvec-python/python/ordvec/__init__.py`,
+   `ordvec-manifest-python/Cargo.toml`,
+   `ordvec-manifest-python/pyproject.toml`,
+   `ordvec-manifest-python/python/ordvec_manifest/__init__.py`, and
+   `ordvec-ffi/Cargo.toml`) and update `CHANGELOG.md` with migration notes for
+   every intentional compatibility break. Commit on `main`.
+   - Run `python tests/release_publish_invariants.py` after the bump; it checks
+     lockstep versions, MSRV/docs drift, registry metadata parity, Python
+     classifier/URL parity, docs.rs feature policy, package contents, and
+     release workflow invariants.
 4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`,

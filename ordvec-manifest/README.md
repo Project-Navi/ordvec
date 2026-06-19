@@ -60,6 +60,75 @@ let _app_ids = plan.require_auxiliary("app.ids")?;
 let index = ordvec::RankQuant::load(plan.artifact_path())?;
 ```
 
+Concrete sidecar-backed bundle pattern:
+
+```text
+docs.odb/
+  manifest.json
+  index.ovrq
+  ids.bin
+```
+
+The application writes the ordvec index and its own sidecar bytes first:
+
+```rust
+use std::{fs, path::Path};
+
+fn write_bundle(
+    index: &ordvec::RankQuant,
+    doc_ids: &[u64],
+    bundle: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(bundle)?;
+    index.write(bundle.join("index.ovrq"))?;
+
+    let mut id_bytes = Vec::with_capacity(doc_ids.len() * std::mem::size_of::<u64>());
+    for id in doc_ids {
+        id_bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    fs::write(bundle.join("ids.bin"), id_bytes)?;
+    Ok(())
+}
+```
+
+Then create and verify a manifest that binds both files:
+
+```sh
+cargo run -p ordvec-manifest --features cli -- create \
+  --index docs.odb/index.ovrq \
+  --row-id-is-identity \
+  --aux app.ids=docs.odb/ids.bin \
+  --embedding-model bge-small-en-v1.5 \
+  --out docs.odb/manifest.json
+
+cargo run -p ordvec-manifest --features cli -- verify \
+  --manifest docs.odb/manifest.json \
+  --json
+```
+
+The load side verifies the bundle before any caller-owned sidecar parsing:
+
+```rust
+let plan = ordvec_manifest::verify_for_load(
+    &bundle.join("manifest.json"),
+    ordvec_manifest::VerifyOptions::default(),
+)?;
+
+let metadata = plan.metadata();
+assert_eq!(metadata.vector_count, expected_rows);
+
+let index = ordvec::RankQuant::load(plan.artifact_path())?;
+let ids_path = plan.require_auxiliary("app.ids")?;
+let ids_bytes = std::fs::read(ids_path)?;
+let doc_ids = parse_caller_owned_ids(&ids_bytes)?;
+```
+
+`ordvec-manifest` owns the path, size, SHA-256, and index-metadata checks.
+The application still owns the `ids.bin` schema, count check, duplicate policy,
+endianness, and any database reconstruction rules. If `ids.bin` is modified
+after manifest creation, verification fails with a stable auxiliary artifact
+size or digest code before the caller parses those bytes.
+
 Racy load pattern:
 
 ```rust
@@ -150,12 +219,57 @@ required auxiliary artifact (e.g. `app.ids`). That makes the vector row count an
 ordvec invariant while leaving the caller's `u64` document IDs as caller-owned
 sidecar bytes. Do not encode the ID sidecar as `RowIdentity::Jsonl`: v1 JSONL
 row identity is UUID-oriented (`id_kind = "uuid"`), and generic row-map ID
-formats are intentionally deferred. The reserved `row_identity.db` metadata
-block is rejected in v1 because it is not byte-bound or path-checked.
+formats are intentionally deferred to
+[#145](https://github.com/Fieldnote-Echo/ordvec/issues/145). The reserved
+`row_identity.db` metadata block is rejected in v1 because it is not byte-bound
+or path-checked.
+
+Stable row-identity boundary codes:
+
+| Condition | Verification report code |
+| --- | --- |
+| JSONL row identity declares an ID kind other than `uuid` | `row_identity_id_kind_unsupported` |
+| JSONL row identity includes reserved `row_identity.db` metadata | `row_identity_db_unsupported` |
+| JSONL `db_id` / `parent_id` is empty | `row_identity_db_id_empty` / `row_identity_parent_id_empty` |
+| JSONL `db_id` / `parent_id` contains NUL | `row_identity_db_id_contains_nul` / `row_identity_parent_id_contains_nul` |
+| JSONL `db_id` / `parent_id` is not a UUID | `row_identity_db_id_invalid_uuid` / `row_identity_parent_id_invalid_uuid` |
 
 The unified JSON report carries per-sidecar audit fields. A successful
 auxiliary artifact verification includes the manifest path, resolved/canonical
 paths, declared digest/length, and observed digest/length:
+
+Stable sidecar report fields:
+
+| Field | Meaning |
+| --- | --- |
+| `auxiliary_artifacts[].name` | Caller-owned sidecar name from the manifest. |
+| `manifest_path` | Manifest-declared relative path. |
+| `resolved_path` / `canonical_path` | Path used for verification and its canonical form when available. |
+| `expected_sha256` / `expected_size_bytes` | Manifest-declared digest and byte length. |
+| `sha256` / `size_bytes` | Observed digest and byte length when bytes could be read. |
+| `required` | Whether absence is a verification error. |
+| `state` | One of `verified`, `optional_absent`, `missing_required`, or `failed`. |
+| `reason_code` | Stable null-or-string reason for any non-verified state, or the first failure reason. |
+
+Stable sidecar states:
+
+| `state` | `reason_code` | Report outcome |
+| --- | --- | --- |
+| `verified` | `null` | The declared sidecar was present and matched path policy, size, and digest. |
+| `optional_absent` | `auxiliary_artifact_optional_absent` | The optional sidecar was absent; this is not an error. |
+| `missing_required` | `auxiliary_artifact_missing_required` | A required sidecar was absent and verification fails. |
+| `failed` | Code-specific | Path policy, hashing, size, digest, or limit validation failed. |
+
+Common `failed` reason codes include `auxiliary_artifact_path_empty`,
+`auxiliary_artifact_base_dir_unavailable`,
+`auxiliary_artifact_path_unavailable`,
+`auxiliary_artifact_path_escape_rejected`,
+`auxiliary_artifact_file_too_large`,
+`auxiliary_artifact_file_size_mismatch`, and
+`auxiliary_artifact_sha256_mismatch`. `errors[].code` and `warnings[].code`
+carry the same stable code namespace. `skipped_checks[]` is machine-readable
+and records checks that were intentionally not run, such as
+`attestations_absent`.
 
 ```json
 {

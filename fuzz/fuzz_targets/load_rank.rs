@@ -1,15 +1,11 @@
 //! libFuzzer target for the `.ovr` / `OVR1` loader (which also accepts the
-//! legacy `.tvr` / `TVR1` magic), driven through the public `ordvec::Rank::load`
-//! entry point.
+//! legacy `.tvr` / `TVR1` magic), driven through the public
+//! `ordvec::Rank::load_from_bytes` entry point.
 //!
 //! The low-level `rank_io::load_rank` parser is crate-internal (`pub(crate)`),
-//! so the fuzzer exercises it through `Rank::load` — which runs that exact
-//! loader and then the type's post-load length check (the full public load
-//! path). `load` takes a `&Path`, and the only public load entry points are
-//! path-based (there is no public `&[u8]`/`Read` loader — issue #6), so a
-//! shared process-local scratch file (see [`scratch`]) feeds the loader the
-//! fuzz bytes without the per-iteration `mkstemp`/`unlink` churn a fresh
-//! `NamedTempFile` each run would incur.
+//! so the fuzzer exercises it through `Rank::load_from_bytes` — which runs
+//! that exact loader and then the type's post-load length check (the full
+//! public in-memory load path).
 //!
 //! Contract: on arbitrary bytes the loader must return `Ok(..)` or
 //! `Err(..)` — never panic, abort, or read out of bounds. libFuzzer
@@ -20,11 +16,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-mod scratch;
-
 fuzz_target!(|data: &[u8]| {
-    scratch::with_scratch_file(data, |path| {
-        // The only thing under test: arbitrary bytes -> Ok | Err, no panic.
-        let _ = ordvec::Rank::load(path);
-    });
+    // The only thing under test: arbitrary bytes -> Ok | Err, no panic.
+    let _ = ordvec::Rank::load_from_bytes(data);
 });

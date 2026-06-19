@@ -516,7 +516,9 @@ floor from `is_multiple_of`). Because the kernels are built against those
 intrinsics, this is a hard compile floor, not just a convenience pin: a
 toolchain below 1.89 won't build the crate. Raising the MSRV is treated as a
 minor-version change under the
-[compatibility policy](docs/compatibility-policy.md).
+[compatibility policy](docs/compatibility-policy.md). The current feature
+stability matrix and downstream embedding notes live in
+[`docs/msrv-and-features.md`](docs/msrv-and-features.md).
 
 ## License
 

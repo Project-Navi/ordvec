@@ -882,6 +882,25 @@ impl RankQuant {
         crate::rank_io::write_rankquant(path, self.bits, self.dim, self.n_vectors, &self.packed)
     }
 
+    /// Persist to any byte writer using the `.ovrq` format.
+    pub fn write_to<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        if self.bits == 8 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "RankQuant b=8 persistence is not supported yet (the .ovrq loader \
+                 accepts bits ∈ {1, 2, 4}); b=8 is an in-memory evidence surface \
+                 in this phase",
+            ));
+        }
+        crate::rank_io::write_rankquant_to(
+            writer,
+            self.bits,
+            self.dim,
+            self.n_vectors,
+            &self.packed,
+        )
+    }
+
     /// Load from a `.ovrq` file produced by [`Self::write`].
     ///
     /// Legacy `.tvrq` files (magic `TVRQ`) written by older versions of this
@@ -893,10 +912,33 @@ impl RankQuant {
     /// any violation — never panics on malformed input.
     pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let (bits, dim, n_vectors, packed) = crate::rank_io::load_rankquant(path)?;
+        Self::from_persisted_parts(bits, dim, n_vectors, packed)
+    }
+
+    /// Load a `.ovrq`/legacy `.tvrq` index from any reader that can seek.
+    ///
+    /// The reader is parsed from its current position through EOF; any trailing
+    /// bytes after the declared payload are rejected.
+    pub fn read_from<R: std::io::Read + std::io::Seek>(reader: R) -> std::io::Result<Self> {
+        let (bits, dim, n_vectors, packed) = crate::rank_io::load_rankquant_from(reader)?;
+        Self::from_persisted_parts(bits, dim, n_vectors, packed)
+    }
+
+    /// Load a `.ovrq`/legacy `.tvrq` index from an in-memory byte slice.
+    pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
+        Self::read_from(std::io::Cursor::new(bytes))
+    }
+
+    fn from_persisted_parts(
+        bits: u8,
+        dim: usize,
+        n_vectors: usize,
+        packed: Vec<u8>,
+    ) -> std::io::Result<Self> {
         // load_rankquant already validates bits ∈ {1,2,4} and bounds
         // dim/n_vectors; we replay the per-type invariants here.
         let n_buckets = 1usize << bits;
-        if dim % n_buckets != 0 {
+        if !dim.is_multiple_of(n_buckets) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -906,7 +948,7 @@ impl RankQuant {
             ));
         }
         let codes_per_byte = (8 / bits) as usize;
-        if dim % codes_per_byte != 0 {
+        if !dim.is_multiple_of(codes_per_byte) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("OVRQ dim {dim} is not a multiple of codes_per_byte = {codes_per_byte}",),

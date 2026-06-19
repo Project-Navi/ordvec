@@ -10,6 +10,7 @@
 //! roundtrip) carried over from the author's earlier rank-modes
 //! development.
 
+use std::io::Cursor;
 use std::sync::Arc;
 use std::thread;
 
@@ -300,6 +301,76 @@ fn fastscan_write_load_roundtrip_searches_identically() {
     let after = loaded.search(&queries, 10);
     assert_eq!(after.indices, before.indices, "reloaded indices must match");
     assert_eq!(after.scores, before.scores, "reloaded scores must match");
+}
+
+#[test]
+fn fastscan_stream_persistence_roundtrips() {
+    const FD: usize = 128;
+    const FN: usize = 96;
+    const PREFIX: &[u8] = b"container-prefix";
+
+    let mut rng = ChaCha8Rng::seed_from_u64(909091);
+    let docs: Vec<f32> = (0..FN * FD).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let queries: Vec<f32> = (0..2 * FD).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+    let mut idx = RankQuantFastscan::new(FD);
+    idx.add(&docs);
+    let before = idx.search(&queries, 10);
+
+    let mut bytes = Vec::new();
+    idx.write_to(&mut bytes).unwrap();
+    assert_eq!(&bytes[..4], b"OVFS");
+
+    let path = fs_tmp("stream_bytes");
+    idx.write(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    std::fs::remove_file(&path).ok();
+
+    let from_bytes = RankQuantFastscan::load_from_bytes(&bytes).unwrap();
+    let mut prefixed = PREFIX.to_vec();
+    prefixed.extend_from_slice(&bytes);
+    let mut cursor = std::io::Cursor::new(prefixed);
+    cursor.set_position(PREFIX.len() as u64);
+    let from_reader = RankQuantFastscan::read_from(cursor).unwrap();
+
+    for loaded in [from_bytes, from_reader] {
+        assert_eq!(loaded.dim(), FD);
+        assert_eq!(loaded.len(), FN);
+        assert_eq!(loaded.byte_size(), idx.byte_size());
+        let after = loaded.search(&queries, 10);
+        assert_eq!(after.indices, before.indices);
+        assert_eq!(after.scores, before.scores);
+    }
+}
+
+#[test]
+fn fastscan_reader_does_not_buffer_past_reported_trailing_bytes() {
+    const FD: usize = 128;
+    const FN: usize = 96;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(909092);
+    let docs: Vec<f32> = (0..FN * FD).map(|_| rng.random_range(-1.0..1.0)).collect();
+
+    let mut idx = RankQuantFastscan::new(FD);
+    idx.add(&docs);
+
+    let mut bytes = Vec::new();
+    idx.write_to(&mut bytes).unwrap();
+    bytes.extend_from_slice(b"next-record");
+
+    let mut cursor = Cursor::new(bytes);
+    let Err(err) = RankQuantFastscan::read_from(&mut cursor) else {
+        panic!("FastScan reader accepted trailing bytes");
+    };
+    assert!(
+        err.to_string().contains("OVFS payload has trailing bytes"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        cursor.position(),
+        13,
+        "FastScan reader should stop after header"
+    );
 }
 
 #[test]
