@@ -82,6 +82,12 @@ structure of each vector on its own:
   fit step. Encoding is a per-vector rank (or sign) transform — index the
   very first vector with no prior data, and never refit when the corpus
   drifts.
+- **Robust by construction on messy corpora.** Because the code is built
+  from per-vector ranks (magnitude discarded) with no global frequency / IDF
+  term, the two things that corrupt learned codebooks — near-duplicate hubs
+  and mixed chunk lengths — have nothing to grab: b=4 R@10 moved −0.002 under
+  15% templated-hub injection and +0.002 across a four-chunk-length mixture.
+  ([details + honest scope](docs/RANK_MODES.md#a-consequence-robust-by-construction-on-messy-corpora))
 - **Zero system dependencies.** Pure Rust — no BLAS / LAPACK / `ndarray` /
   `faer`. Builds and cross-compiles cleanly, including to `aarch64` and
   `wasm32`.

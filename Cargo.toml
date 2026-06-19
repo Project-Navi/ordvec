@@ -42,6 +42,7 @@ exclude = [
     "docs/FOLLOWUP_BODY_KERNEL_TIE_BREAK.md",
     "docs/INDEX_PROVENANCE.md",
     "docs/c-api.md",
+    "experiments/",
     "fuzz/",
     "ordvec-ffi/",
     "ordvec-go/",
