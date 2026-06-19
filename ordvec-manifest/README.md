@@ -220,7 +220,7 @@ ordvec invariant while leaving the caller's `u64` document IDs as caller-owned
 sidecar bytes. Do not encode the ID sidecar as `RowIdentity::Jsonl`: v1 JSONL
 row identity is UUID-oriented (`id_kind = "uuid"`), and generic row-map ID
 formats are intentionally deferred to
-[#145](https://github.com/Fieldnote-Echo/ordvec/issues/145). The reserved
+[#145](https://github.com/Project-Navi/ordvec/issues/145). The reserved
 `row_identity.db` metadata block is rejected in v1 because it is not byte-bound
 or path-checked.
 

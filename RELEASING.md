@@ -107,20 +107,25 @@ the GitHub Release.
 ### Trusted-publisher configuration (one-time, in the registries)
 
 The crates.io and PyPI Trusted Publisher records must point at this workflow
-filename. Until a record is updated, the corresponding gated publish fails
-**closed** at the OIDC exchange (no risk of a bad publish; just a failed run).
+filename and GitHub repository identity. After the GitHub repo transfer, the
+registry-side owner must be `Project-Navi` and the repository must be `ordvec`.
+Until a record is updated, the corresponding gated publish fails **closed** at
+the OIDC exchange (no risk of a bad publish; just a failed run).
 
 - **crates.io** → `ordvec` → Settings → Trusted Publishing → GitHub publisher:
-  `workflow = release.yml`, `environment = crates-io`.
+  `owner = Project-Navi`, `repository = ordvec`, `workflow = release.yml`,
+  `environment = crates-io`.
 - **crates.io** → `ordvec-manifest` → Settings → Trusted Publishing → GitHub
-  publisher: `workflow = release.yml`, `environment = crates-io`. If crates.io
-  requires an initial owner bootstrap before a new crate's Trusted Publisher can
-  be configured, do that explicit maintainer-approved bootstrap before tagging.
+  publisher: `owner = Project-Navi`, `repository = ordvec`,
+  `workflow = release.yml`, `environment = crates-io`. If crates.io requires an
+  initial owner bootstrap before a new crate's Trusted Publisher can be
+  configured, do that explicit maintainer-approved bootstrap before tagging.
 - **PyPI** → `ordvec` → Publishing → GitHub publisher: `workflow = release.yml`,
-  `environment = pypi`, project URL `https://pypi.org/p/ordvec`.
+  `owner = Project-Navi`, `repository = ordvec`, `environment = pypi`, project
+  URL `https://pypi.org/p/ordvec`.
 - **PyPI** → `ordvec-manifest` → Publishing → GitHub publisher:
-  `workflow = release.yml`, `environment = pypi`, project URL
-  `https://pypi.org/p/ordvec-manifest`.
+  `workflow = release.yml`, `owner = Project-Navi`, `repository = ordvec`,
+  `environment = pypi`, project URL `https://pypi.org/p/ordvec-manifest`.
 
 ### Tag and branch protection
 
@@ -244,7 +249,7 @@ filename. Until a record is updated, the corresponding gated publish fails
      at `GET https://pypi.org/integrity/ordvec/X.Y.Z/<file>/provenance`);
    - the GitHub Release page (`.crate`, wheels, sdist, `*.sigstore.json`,
      `*.intoto.jsonl` all present);
-   - `gh attestation verify <file> -R Fieldnote-Echo/ordvec` on a downloaded
+   - `gh attestation verify <file> -R Project-Navi/ordvec` on a downloaded
      artifact;
    - compare the observed release assets against
      [`docs/artifact-platform-matrix.md`](docs/artifact-platform-matrix.md);

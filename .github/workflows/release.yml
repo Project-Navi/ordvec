@@ -72,12 +72,14 @@
 # ONE-TIME SETUP before the first tag on this workflow (each fails CLOSED until
 # done, so landing this first is safe):
 #   * crates.io: ordvec and ordvec-manifest > Settings > Trusted Publishing >
-#       edit each GitHub publisher -> workflow = `release.yml` (env stays
-#       `crates-io`).
-#   * PyPI: ordvec > publishing > edit the GitHub publisher -> workflow =
-#       `release.yml` (env stays `pypi`).
+#       edit each GitHub publisher -> owner = `Project-Navi`, repository =
+#       `ordvec`, workflow = `release.yml` (env stays `crates-io`).
+#   * PyPI: ordvec > publishing > edit the GitHub publisher -> owner =
+#       `Project-Navi`, repository = `ordvec`, workflow = `release.yml`
+#       (env stays `pypi`).
 #   * PyPI: ordvec-manifest > publishing > add or edit the GitHub publisher
-#       -> workflow = `release.yml` (env stays `pypi`).
+#       -> owner = `Project-Navi`, repository = `ordvec`, workflow =
+#       `release.yml` (env stays `pypi`).
 #   * GitHub Environments `crates-io` AND `pypi`:
 #       - keep "Required reviewers" (the human publish gate);
 #       - set "Deployment branches and tags" to **Selected branches and tags**
@@ -1090,7 +1092,7 @@ jobs:
           METADATA_URL="https://crates.io/api/v1/crates/ordvec/${VERSION}"
           API_URL="https://crates.io/api/v1/crates/ordvec/${VERSION}/download"
           STATIC_URL="https://static.crates.io/crates/ordvec/ordvec-${VERSION}.crate"
-          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
+          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Project-Navi/ordvec)"
           EXISTING="${RUNNER_TEMP}/existing-ordvec.crate"
           METADATA="${RUNNER_TEMP}/existing-ordvec-metadata.json"
           METADATA_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-metadata-status.txt"
@@ -1223,7 +1225,7 @@ jobs:
           # CDN propagation can take a few seconds after publish — retry briefly.
           API_URL="https://crates.io/api/v1/crates/ordvec/${VERSION}/download"
           STATIC_URL="https://static.crates.io/crates/ordvec/ordvec-${VERSION}.crate"
-          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
+          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Project-Navi/ordvec)"
           PUBLISHED="${RUNNER_TEMP}/published.crate"
           for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             rm -f "$PUBLISHED"
@@ -1467,7 +1469,7 @@ jobs:
           METADATA_URL="https://crates.io/api/v1/crates/ordvec-manifest/${VERSION}"
           API_URL="https://crates.io/api/v1/crates/ordvec-manifest/${VERSION}/download"
           STATIC_URL="https://static.crates.io/crates/ordvec-manifest/ordvec-manifest-${VERSION}.crate"
-          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
+          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Project-Navi/ordvec)"
           EXISTING="${RUNNER_TEMP}/existing-ordvec-manifest.crate"
           METADATA="${RUNNER_TEMP}/existing-ordvec-manifest-metadata.json"
           METADATA_STATUS_FILE="${RUNNER_TEMP}/existing-ordvec-manifest-metadata-status.txt"
@@ -1585,7 +1587,7 @@ jobs:
           A_SHA=$(sha256sum "$ATTESTED" | cut -d' ' -f1)
           API_URL="https://crates.io/api/v1/crates/ordvec-manifest/${VERSION}/download"
           STATIC_URL="https://static.crates.io/crates/ordvec-manifest/ordvec-manifest-${VERSION}.crate"
-          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Fieldnote-Echo/ordvec)"
+          CRATES_IO_USER_AGENT="ordvec-release-verify/${VERSION} (https://github.com/Project-Navi/ordvec)"
           PUBLISHED="${RUNNER_TEMP}/published.crate"
           for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             rm -f "$PUBLISHED"

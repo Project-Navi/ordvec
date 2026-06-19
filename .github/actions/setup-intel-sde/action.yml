@@ -61,7 +61,7 @@ runs:
         archive_cache_dir="${HOME}/.cache/ordvec-intel-sde"
         cached_archive="${archive_cache_dir}/${version}-${sha256}.tar.xz"
         download_url="${url_base}/${version}.tar.xz"
-        curl_user_agent="ordvec-ci-intel-sde/${version} (https://github.com/Fieldnote-Echo/ordvec)"
+        curl_user_agent="ordvec-ci-intel-sde/${version} (https://github.com/Project-Navi/ordvec)"
         archive_ready=false
 
         mark_unavailable() {

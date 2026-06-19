@@ -490,8 +490,8 @@ def check_registry_metadata_parity() -> None:
     expected_crates = {
         "Cargo.toml": {
             "license": "MIT OR Apache-2.0",
-            "repository": "https://github.com/Fieldnote-Echo/ordvec",
-            "homepage": "https://github.com/Fieldnote-Echo/ordvec",
+            "repository": "https://github.com/Project-Navi/ordvec",
+            "homepage": "https://github.com/Project-Navi/ordvec",
             "documentation": "https://docs.rs/ordvec",
             "readme": "README.md",
             "keywords": ["vector-search", "quantization", "nearest-neighbor", "ann", "simd"],
@@ -499,8 +499,8 @@ def check_registry_metadata_parity() -> None:
         },
         "ordvec-manifest/Cargo.toml": {
             "license": "MIT OR Apache-2.0",
-            "repository": "https://github.com/Fieldnote-Echo/ordvec",
-            "homepage": "https://github.com/Fieldnote-Echo/ordvec",
+            "repository": "https://github.com/Project-Navi/ordvec",
+            "homepage": "https://github.com/Project-Navi/ordvec",
             "documentation": "https://docs.rs/ordvec-manifest",
             "readme": "README.md",
             "keywords": ["vector-search", "manifest", "provenance", "verification", "quantization"],
@@ -580,9 +580,9 @@ def check_python_package_metadata() -> None:
             fail(f"ordvec-python/pyproject.toml: missing classifier {classifier!r}")
     urls = mapping(project.get("urls"), "ordvec-python/pyproject.toml: project.urls")
     for key, expected in {
-        "Homepage": "https://github.com/Fieldnote-Echo/ordvec",
-        "Repository": "https://github.com/Fieldnote-Echo/ordvec",
-        "Issues": "https://github.com/Fieldnote-Echo/ordvec/issues",
+        "Homepage": "https://github.com/Project-Navi/ordvec",
+        "Repository": "https://github.com/Project-Navi/ordvec",
+        "Issues": "https://github.com/Project-Navi/ordvec/issues",
         "Formalization": "https://github.com/Fieldnote-Echo/ordvec-formalization",
     }.items():
         if urls.get(key) != expected:
@@ -641,9 +641,9 @@ def check_python_package_metadata() -> None:
         "ordvec-manifest-python/pyproject.toml: project.urls",
     )
     for key, expected in {
-        "Homepage": "https://github.com/Fieldnote-Echo/ordvec",
-        "Repository": "https://github.com/Fieldnote-Echo/ordvec",
-        "Issues": "https://github.com/Fieldnote-Echo/ordvec/issues",
+        "Homepage": "https://github.com/Project-Navi/ordvec",
+        "Repository": "https://github.com/Project-Navi/ordvec",
+        "Issues": "https://github.com/Project-Navi/ordvec/issues",
     }.items():
         if manifest_urls.get(key) != expected:
             fail(

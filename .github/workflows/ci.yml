@@ -280,7 +280,7 @@ jobs:
             --max-time 60 \
             --retry 3 \
             --retry-all-errors \
-            --user-agent "ordvec-ci/${core_version} (https://github.com/Fieldnote-Echo/ordvec)" \
+            --user-agent "ordvec-ci/${core_version} (https://github.com/Project-Navi/ordvec)" \
             --output /dev/null \
             --write-out "%{http_code}" \
             "https://crates.io/api/v1/crates/ordvec/${core_version}" || true)"

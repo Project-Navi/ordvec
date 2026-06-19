@@ -39,9 +39,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Fieldnote-Echo/ordvec"
-Repository = "https://github.com/Fieldnote-Echo/ordvec"
-Issues = "https://github.com/Fieldnote-Echo/ordvec/issues"
+Homepage = "https://github.com/Project-Navi/ordvec"
+Repository = "https://github.com/Project-Navi/ordvec"
+Issues = "https://github.com/Project-Navi/ordvec/issues"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"

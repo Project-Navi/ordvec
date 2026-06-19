@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 # (slug, display label, colour). Order = legend / bar order.
 METHOD_STYLE: list[tuple[str, str, str]] = [
     ("flat", "flat (exact IP, 4096 B)", "#444444"),
-    ("hnsw", "HNSW M=32 (4096 B)", "#1f77b4"),
+    ("hnsw", "HNSW M=32 (4096 B + graph)", "#1f77b4"),
     ("ordvec-rq4", "ordvec RankQuant b=4 (512 B)", "#2ca02c"),
     ("ordvec-rq2", "ordvec RankQuant b=2 (256 B)", "#17becf"),
     ("ordvec-bitmap-rq2", "ordvec Bitmap→rq2 (384 B)", "#ff7f0e"),

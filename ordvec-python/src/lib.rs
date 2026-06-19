@@ -1,4 +1,4 @@
-//! Python bindings for [`ordvec`](https://github.com/Fieldnote-Echo/ordvec) — the
+//! Python bindings for [`ordvec`](https://github.com/Project-Navi/ordvec) — the
 //! training-free ordinal & sign vector-quantization crate.
 //!
 //! Exposes the four retrieval types under the OrdVec ontology — `Rank`,

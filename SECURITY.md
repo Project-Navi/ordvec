@@ -11,7 +11,7 @@ Please report security issues **privately** — do not open a public issue.
 
 Use GitHub's private vulnerability reporting:
 **Security → Report a vulnerability**
-(<https://github.com/Fieldnote-Echo/ordvec/security/advisories/new>).
+(<https://github.com/Project-Navi/ordvec/security/advisories/new>).
 
 We aim to acknowledge reports within a few business days.
 

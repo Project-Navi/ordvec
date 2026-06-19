@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tooling** (introduced with the benchmark harness; none reach the published
   `ordvec` crate or the `ordvec` PyPI wheel). The `benchmarks/beir/requirements.txt`
   deps were unpinned, so OSV flagged each against its full historical CVE list;
-  they are now lower-bound-pinned at the first patched release (`requests>=2.32.4`,
+  they are now lower-bound-pinned at the first patched release (`requests>=2.33.0`,
   `hnswlib>=0.8.0`, `numpy>=1.26`, plus safe floors for the rest). `bincode` 1.x
   (RUSTSEC-2025-0141, *unmaintained* — not a vulnerability) enters only
   transitively via `hnsw_rs` in `benchmarks/beir-bench` and is absent from
@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`RankQuantFastscan` is now a stable, public API** (previously re-exported
   `#[doc(hidden)]`), with `.ovfs` / `OVFS` persistence via
   `RankQuantFastscan::{write,load}` and a ninth `load_fastscan` cargo-fuzz
-  target. Metadata-probe support (`probe_index_metadata`) for `.ovfs` is
-  deferred to 0.8.0 (#233, #232).
+  target. Metadata-probe support (`probe_index_metadata`) and
+  `ordvec-manifest` v1 support for `.ovfs` are deferred to 0.8.0 (#233, #232);
+  bind `.ovfs` artifacts with caller-owned checksums or attestations when they
+  cross a trust boundary.
 
 ### Performance
 
@@ -64,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Clarified BEIR benchmark release claims.** The committed README figures use
+  the default method set and do not yet include the newer
+  `sign-rq2-threaded` probe row; the docs and plot generator now distinguish
+  4096-byte HNSW float-vector storage from implementation-owned graph side
+  storage instead of treating the graph as zero.
 - **On-disk format magics renamed to `OV*`** (`OVR1` / `OVRQ` / `OVBM` /
   `OVSB`). The loaders still accept the legacy `TV*` magics, so every
   previously-written `.tvr` / `.tvrq` / `.tvbm` / `.tvsb` file continues to load
@@ -321,6 +328,6 @@ system dependencies** — no BLAS, no `ndarray`, no `faer`.
   AVX-512 intrinsics this crate relies on were stabilized.
 - Dual-licensed under **MIT OR Apache-2.0**.
 
-[0.4.0]: https://github.com/Fieldnote-Echo/ordvec/compare/v0.3.0...v0.4.0
-[0.2.0]: https://github.com/Fieldnote-Echo/ordvec/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Fieldnote-Echo/ordvec/releases/tag/v0.1.0
+[0.4.0]: https://github.com/Project-Navi/ordvec/compare/v0.3.0...v0.4.0
+[0.2.0]: https://github.com/Project-Navi/ordvec/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Project-Navi/ordvec/releases/tag/v0.1.0

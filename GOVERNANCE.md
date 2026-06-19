@@ -8,7 +8,7 @@ describes how it is run.
 - **Maintainer.** ordvec is currently maintained by Nelson Spence
   ([@Fieldnote-Echo](https://github.com/Fieldnote-Echo)), the project lead and
   final decision-maker on technical direction, releases, and scope.
-- **Code owners.** Listed in [`.github/CODEOWNERS`](https://github.com/Fieldnote-Echo/ordvec/blob/main/.github/CODEOWNERS); they
+- **Code owners.** Listed in [`.github/CODEOWNERS`](https://github.com/Project-Navi/ordvec/blob/main/.github/CODEOWNERS); they
   review and approve changes.
 
 ## Decision-making

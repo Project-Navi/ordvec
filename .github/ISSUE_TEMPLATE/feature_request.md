@@ -12,7 +12,7 @@ What are you trying to do that ordvec doesn't support today?
 What you'd like to see.
 
 **Alternatives considered**
-(See [docs/ALTERNATIVES_CONSIDERED.md](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/ALTERNATIVES_CONSIDERED.md) —
+(See [docs/ALTERNATIVES_CONSIDERED.md](https://github.com/Project-Navi/ordvec/blob/main/docs/ALTERNATIVES_CONSIDERED.md) —
 some directions were already trialled and dropped.)
 
 **Scope**

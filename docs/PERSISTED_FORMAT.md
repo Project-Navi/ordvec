@@ -5,13 +5,21 @@ It covers the primitive index artifacts only: `.ovr`, `.ovrq`, `.ovbm`, and
 `.ovsb`. It does not define a database, transaction log, replication protocol,
 provenance system, checksum manifest, signature, or trust policy.
 
+`RankQuantFastscan` can write and load `.ovfs` (magic `OVFS`) through its direct
+API, but `.ovfs` is intentionally outside this v1 primitive-format,
+`probe_index_metadata()`, and `ordvec-manifest` contract. Until metadata-probe
+and manifest support are promoted, callers should treat `.ovfs` as a
+specialized direct-load artifact and bind it with application-owned checksums or
+attestations when it crosses a trust boundary.
+
 All integer fields are little-endian. Each format has one fixed header followed
 by one contiguous payload. The payload must consume the rest of the file
 exactly; v1 files have no footer, reserved trailing bytes, or extension block.
 
 ## Compatibility Policy
 
-The current on-disk format version is `1` for every persisted index family.
+The current on-disk format version is `1` for every primitive family covered
+here.
 Within the v1 contract:
 
 - loaders and `probe_index_metadata()` reject unknown magic, unsupported
@@ -53,6 +61,11 @@ cache in their own manifests:
 - `params`: format-specific parameters such as RankQuant `bits` or Bitmap
   `n_top`;
 - `file_size_bytes`: total observed file size.
+
+In v0.5.0, `probe_index_metadata(path)` rejects `OVFS` with an unsupported
+metadata-probe error rather than returning a partial descriptor. Load `.ovfs`
+only through `RankQuantFastscan::load` unless and until the FastScan metadata
+contract is promoted in a later minor release.
 
 Example external segment entry:
 
@@ -208,6 +221,9 @@ payload invariants:
 - `RankQuant::load`: each row has the required constant bucket composition;
 - `Bitmap::load`: each row has exactly `n_top` bits set;
 - `SignBitmap::load`: no additional row invariant exists.
+
+`RankQuantFastscan::load` has its own direct loader path for `.ovfs`; it is not
+covered by this probe-versus-load contract in v0.5.0.
 
 Loader success is the primitive binary-safety boundary. It is not a provenance
 or deployment-policy decision.

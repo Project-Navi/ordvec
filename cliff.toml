@@ -45,7 +45,7 @@ filter_unconventional = true
 split_commits = false
 # Turn "(#NN)" PR references into links in the public release notes.
 commit_preprocessors = [
-  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/Fieldnote-Echo/ordvec/pull/${1}))" },
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/Project-Navi/ordvec/pull/${1}))" },
 ]
 # Conventional Commit type -> Keep a Changelog section. Housekeeping and merge
 # commits are dropped so the notes stay user-facing.

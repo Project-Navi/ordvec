@@ -6,7 +6,7 @@
 # gh token that can read repository environment settings.
 set -euo pipefail
 
-REPO="${REPO:-Fieldnote-Echo/ordvec}"
+REPO="${REPO:-Project-Navi/ordvec}"
 EXPECTED_REVIEWER="${EXPECTED_REVIEWER:-Fieldnote-Echo}"
 EXPECTED_POLICY="${EXPECTED_POLICY:-v[0-9]*.[0-9]*.[0-9]*}"
 ENVIRONMENTS=(crates-io pypi)

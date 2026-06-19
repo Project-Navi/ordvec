@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.89" # inherits ordvec's AVX-512 MSRV floor
 description = "Python bindings for ordvec — training-free ordinal & sign vector quantization"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Fieldnote-Echo/ordvec"
+repository = "https://github.com/Project-Navi/ordvec"
 # Ships to PyPI as `ordvec` via maturin — never to crates.io.
 publish = false
 
