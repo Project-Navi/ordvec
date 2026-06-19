@@ -24,15 +24,11 @@
 //! unmodified — there is no `..` / traversal sanitisation — so callers must
 //! treat the path as trusted input (see the `ordvec` package docstring).
 //!
-//! Threading: the search / candidate / `add` methods release the GIL
-//! (`py.detach`) around the Rust scan and read the input arrays *in place*
-//! (the `PyReadonlyArray` keeps the buffer alive and blocks rust-numpy-mediated
-//! writes for the call's duration, but a raw Python in-place mutation from
-//! another thread is not tracked). So a caller must not mutate an input array
-//! from another thread while such a call is in progress — the released GIL lets
-//! the write race the read and may yield inconsistent results. This is the
-//! usual contract for GIL-releasing numeric extensions (NumPy behaves the same
-//! way).
+//! Threading: methods that release the GIL (`py.detach`) copy NumPy input
+//! buffers into Rust-owned memory before the detached scan. This keeps ordinary
+//! Python in-place mutations in other threads from racing Rust reads of borrowed
+//! NumPy storage. The copy covers query/vector inputs and candidate/doc-id
+//! arrays that are consumed inside the detached closure.
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
@@ -144,10 +140,9 @@ fn not_contiguous_err() -> PyErr {
     )
 }
 
-/// Candidate / doc-id slice obtained from a NumPy array, either borrowed
-/// zero-copy (already `uint32` and contiguous) or owned (converted from another
-/// integer dtype). The `Borrowed` variant keeps the `PyReadonlyArray` guard
-/// alive so its slice stays valid across a GIL-released `py.detach` call.
+/// Candidate / doc-id slice obtained from a NumPy array, either borrowed for
+/// validation (already `uint32` and contiguous) or owned (converted from another
+/// integer dtype). Callers must use `into_owned` before crossing `py.detach`.
 enum CandidateIds<'py> {
     Borrowed(PyReadonlyArray1<'py, u32>),
     Owned(Vec<u32>),
@@ -157,6 +152,16 @@ impl CandidateIds<'_> {
     fn as_slice(&self) -> PyResult<&[u32]> {
         match self {
             CandidateIds::Borrowed(ro) => ro.as_slice().map_err(|_| not_contiguous_err()),
+            CandidateIds::Owned(v) => Ok(v),
+        }
+    }
+
+    fn into_owned(self) -> PyResult<Vec<u32>> {
+        match self {
+            CandidateIds::Borrowed(ro) => ro
+                .as_slice()
+                .map(|slice| slice.to_vec())
+                .map_err(|_| not_contiguous_err()),
             CandidateIds::Owned(v) => Ok(v),
         }
     }
@@ -446,9 +451,10 @@ impl Rank {
             self.inner.dim(),
             std::mem::size_of::<u16>(),
         )?;
+        let owned = slice.to_vec();
         // Release the GIL around the parallel rank-transform / pack so other
-        // Python threads run during a bulk add. `slice` (`&[f32]`) and
-        // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        // Python threads run during a bulk add. The input buffer is Rust-owned
+        // before detach, so Python-side mutation cannot race this read.
         //
         // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
         // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
@@ -456,7 +462,7 @@ impl Rank {
         // re-acquires the GIL and tries to touch the SAME object gets a clean
         // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
         // objects run freely, which is the point of releasing the GIL.
-        py.detach(|| self.inner.add(slice));
+        py.detach(|| self.inner.add(&owned));
         Ok(())
     }
 
@@ -476,7 +482,8 @@ impl Rank {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let results = py.detach(|| self.inner.search(slice, k));
+        let owned = slice.to_vec();
+        let results = py.detach(|| self.inner.search(&owned, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_pyarray(py);
@@ -502,7 +509,8 @@ impl Rank {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let results = py.detach(|| self.inner.search_asymmetric(slice, k));
+        let owned = slice.to_vec();
+        let results = py.detach(|| self.inner.search_asymmetric(&owned, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_pyarray(py);
@@ -633,9 +641,10 @@ impl RankQuant {
             self.inner.bytes_per_vec(),
             std::mem::size_of::<u8>(),
         )?;
+        let owned = slice.to_vec();
         // Release the GIL around the parallel rank-transform / pack so other
-        // Python threads run during a bulk add. `slice` (`&[f32]`) and
-        // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        // Python threads run during a bulk add. The input buffer is Rust-owned
+        // before detach, so Python-side mutation cannot race this read.
         //
         // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
         // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
@@ -643,7 +652,7 @@ impl RankQuant {
         // re-acquires the GIL and tries to touch the SAME object gets a clean
         // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
         // objects run freely, which is the point of releasing the GIL.
-        py.detach(|| self.inner.add(slice));
+        py.detach(|| self.inner.add(&owned));
         Ok(())
     }
 
@@ -661,7 +670,8 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let results = py.detach(|| self.inner.search(slice, k));
+        let owned = slice.to_vec();
+        let results = py.detach(|| self.inner.search(&owned, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_pyarray(py);
@@ -686,7 +696,8 @@ impl RankQuant {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let results = py.detach(|| self.inner.search_asymmetric(slice, k));
+        let owned = slice.to_vec();
+        let results = py.detach(|| self.inner.search_asymmetric(&owned, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_pyarray(py);
@@ -775,9 +786,14 @@ impl RankQuant {
         // by default) and convert to the core's u32 with checked bounds, then
         // reject any id outside the corpus before dispatch.
         let cands = as_u32_ids_1d(candidates, "candidate id")?;
-        let c_slice = cands.as_slice()?;
-        check_ids_in_range(c_slice, self.inner.len(), "candidate id")?;
-        let (scores, ids) = py.detach(|| self.inner.search_asymmetric_subset(q_slice, c_slice, k));
+        {
+            let c_slice = cands.as_slice()?;
+            check_ids_in_range(c_slice, self.inner.len(), "candidate id")?;
+        }
+        let q_owned = q_slice.to_vec();
+        let c_owned = cands.into_owned()?;
+        let (scores, ids) =
+            py.detach(|| self.inner.search_asymmetric_subset(&q_owned, &c_owned, k));
         Ok((scores.into_pyarray(py), ids.into_pyarray(py)))
     }
 
@@ -872,9 +888,10 @@ impl Bitmap {
             self.inner.dim() / 64,
             std::mem::size_of::<u64>(),
         )?;
+        let owned = slice.to_vec();
         // Release the GIL around the parallel rank-transform / pack so other
-        // Python threads run during a bulk add. `slice` (`&[f32]`) and
-        // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        // Python threads run during a bulk add. The input buffer is Rust-owned
+        // before detach, so Python-side mutation cannot race this read.
         //
         // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
         // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
@@ -882,7 +899,7 @@ impl Bitmap {
         // re-acquires the GIL and tries to touch the SAME object gets a clean
         // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
         // objects run freely, which is the point of releasing the GIL.
-        py.detach(|| self.inner.add(slice));
+        py.detach(|| self.inner.add(&owned));
         Ok(())
     }
 
@@ -904,7 +921,8 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let results = py.detach(|| self.inner.search(slice, k));
+        let owned = slice.to_vec();
+        let results = py.detach(|| self.inner.search(&owned, k));
         let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_pyarray(py);
@@ -935,9 +953,13 @@ impl Bitmap {
             )
         })?;
         let ids = as_u32_ids_1d(doc_ids, "doc id")?;
-        let ids_slice = ids.as_slice()?;
-        check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
-        let (scores, out_ids) = py.detach(|| self.inner.search_subset(q_slice, ids_slice, k));
+        {
+            let ids_slice = ids.as_slice()?;
+            check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
+        }
+        let q_owned = q_slice.to_vec();
+        let ids_owned = ids.into_owned()?;
+        let (scores, out_ids) = py.detach(|| self.inner.search_subset(&q_owned, &ids_owned, k));
         Ok((scores.into_pyarray(py), out_ids.into_pyarray(py)))
     }
 
@@ -959,7 +981,8 @@ impl Bitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let cands = py.detach(|| self.inner.top_m_candidates(slice, m));
+        let owned = slice.to_vec();
+        let cands = py.detach(|| self.inner.top_m_candidates(&owned, m));
         Ok(cands.into_pyarray(py))
     }
 
@@ -1012,7 +1035,8 @@ impl Bitmap {
         batch.checked_mul(n.max(qpv)).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("batch * index size overflows usize")
         })?;
-        let result = py.detach(|| self.inner.top_m_candidates_batched(slice, m));
+        let owned = slice.to_vec();
+        let result = py.detach(|| self.inner.top_m_candidates_batched(&owned, m));
         let m_eff = m.min(n);
         let total = batch.checked_mul(m_eff).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("result size (batch * m) overflows usize")
@@ -1070,9 +1094,10 @@ impl Bitmap {
         effective_batch.checked_mul(n.max(qpv)).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("batch_size * index size overflows usize")
         })?;
+        let owned = slice.to_vec();
         let result = py.detach(|| {
             self.inner
-                .top_m_candidates_batched_chunked(slice, m, effective_batch)
+                .top_m_candidates_batched_chunked(&owned, m, effective_batch)
         });
         let m_eff = m.min(n);
         let total = n_queries.checked_mul(m_eff).ok_or_else(|| {
@@ -1127,22 +1152,26 @@ impl Bitmap {
         // default) and convert to u32 with checked bounds, then reject any id
         // outside the corpus before dispatch.
         let doc_ids = as_u32_ids_1d(doc_ids, "doc id")?;
-        let ids_slice = doc_ids.as_slice()?;
-        check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
-        // Python-side ergonomic policy (NOT a core correctness requirement):
-        // the Rust core scores unsorted ids correctly in input order, just with
-        // worse cache locality. The binding requires the sorted, cache-friendly
-        // form and returns a clean ValueError rather than silently running the
-        // slow path.
-        if ids_slice.windows(2).any(|w| w[0] > w[1]) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "doc_ids must be sorted in ascending order",
-            ));
+        {
+            let ids_slice = doc_ids.as_slice()?;
+            check_ids_in_range(ids_slice, self.inner.len(), "doc id")?;
+            // Python-side ergonomic policy (NOT a core correctness requirement):
+            // the Rust core scores unsorted ids correctly in input order, just with
+            // worse cache locality. The binding requires the sorted, cache-friendly
+            // form and returns a clean ValueError rather than silently running the
+            // slow path.
+            if ids_slice.windows(2).any(|w| w[0] > w[1]) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "doc_ids must be sorted in ascending order",
+                ));
+            }
         }
-        let mut out = vec![0u32; ids_slice.len()];
+        let qb_owned = qb_slice.to_vec();
+        let ids_owned = doc_ids.into_owned()?;
+        let mut out = vec![0u32; ids_owned.len()];
         py.detach(|| {
             self.inner
-                .body_overlap_scores_subset(qb_slice, ids_slice, &mut out)
+                .body_overlap_scores_subset(&qb_owned, &ids_owned, &mut out)
         });
         Ok(out.into_pyarray(py))
     }
@@ -1250,9 +1279,10 @@ impl SignBitmap {
             self.inner.dim() / 64,
             std::mem::size_of::<u64>(),
         )?;
+        let owned = slice.to_vec();
         // Release the GIL around the parallel rank-transform / pack so other
-        // Python threads run during a bulk add. `slice` (`&[f32]`) and
-        // `&mut self.inner` are both `Ungil`, so no pointer juggling is needed.
+        // Python threads run during a bulk add. The input buffer is Rust-owned
+        // before detach, so Python-side mutation cannot race this read.
         //
         // SAFETY (detaching on a `&mut self` method): `detach` drops the GIL
         // but NOT the `&mut self` exclusive borrow — PyO3 holds this object's
@@ -1260,7 +1290,7 @@ impl SignBitmap {
         // re-acquires the GIL and tries to touch the SAME object gets a clean
         // `Already borrowed` RuntimeError, never concurrent mutation. Distinct
         // objects run freely, which is the point of releasing the GIL.
-        py.detach(|| self.inner.add(slice));
+        py.detach(|| self.inner.add(&owned));
         Ok(())
     }
 
@@ -1280,7 +1310,8 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let cands = py.detach(|| self.inner.top_m_candidates(slice, m));
+        let owned = slice.to_vec();
+        let cands = py.detach(|| self.inner.top_m_candidates(&owned, m));
         Ok(cands.into_pyarray(py))
     }
 
@@ -1313,7 +1344,8 @@ impl SignBitmap {
         batch.checked_mul(n.max(qpv)).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("batch * index size overflows usize")
         })?;
-        let result = py.detach(|| self.inner.top_m_candidates_batched(slice, m));
+        let owned = slice.to_vec();
+        let result = py.detach(|| self.inner.top_m_candidates_batched(&owned, m));
         // m_eff is the per-row width the Rust impl guarantees for every non-empty
         // row; deriving it from `m` and the index size keeps the shape consistent
         // at `batch=0`.
@@ -1345,7 +1377,8 @@ impl SignBitmap {
                 "array must be C-contiguous; call np.ascontiguousarray() first",
             )
         })?;
-        let scores = py.detach(|| self.inner.score_all(slice));
+        let owned = slice.to_vec();
+        let scores = py.detach(|| self.inner.score_all(&owned));
         Ok(scores.into_pyarray(py))
     }
 
@@ -1369,7 +1402,8 @@ impl SignBitmap {
         batch.checked_mul(n.max(qpv)).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("batch * index size overflows usize")
         })?;
-        let scores = py.detach(|| self.inner.score_all_batched_flat(slice));
+        let owned = slice.to_vec();
+        let scores = py.detach(|| self.inner.score_all_batched_flat(&owned));
         Ok(numpy::ndarray::Array2::from_shape_vec((batch, n), scores)
             .expect("internal: batched dense score flatten shape invariant")
             .into_pyarray(py))
@@ -1668,7 +1702,8 @@ fn search_asymmetric_byte_lut<'py>(
     // capturing `index` (a `PyRef`) directly would make the closure non-`Ungil`,
     // but a bare `&ordvec_core::RankQuant` is fine to carry across `detach`.
     let inner = &index.inner;
-    let results = py.detach(|| ordvec_core::search_asymmetric_byte_lut(inner, slice, k));
+    let owned = slice.to_vec();
+    let results = py.detach(|| ordvec_core::search_asymmetric_byte_lut(inner, &owned, k));
     let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
         .into_pyarray(py);
@@ -1715,8 +1750,10 @@ fn rankquant_eval_search<'py>(
             "array must be C-contiguous; call np.ascontiguousarray() first",
         )
     })?;
+    let corpus_owned = corpus_slice.to_vec();
+    let query_owned = query_slice.to_vec();
     let results =
-        py.detach(|| ordvec_core::rankquant_eval_search(corpus_slice, query_slice, dim, bits, k));
+        py.detach(|| ordvec_core::rankquant_eval_search(&corpus_owned, &query_owned, dim, bits, k));
     let scores = numpy::ndarray::Array2::from_shape_vec((nq, results.k), results.scores)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
         .into_pyarray(py);

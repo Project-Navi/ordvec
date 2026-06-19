@@ -69,8 +69,9 @@ source needs a Rust toolchain (MSRV 1.89) and
 ## Safety contract
 
 The Python binding releases the GIL while Rust searches, scores, and mutates
-indexes. NumPy arrays passed to those methods are read in place while the call
-is active; do not mutate them from another thread until the method returns.
+indexes. Inputs that cross a GIL-released call are copied into Rust-owned
+buffers first, so ordinary Python in-place NumPy mutation from another thread
+cannot race the detached Rust scan.
 The cross-language ownership and lifetime contract is maintained in
 [`docs/bindings-safety.md`](https://github.com/Project-Navi/ordvec/blob/v0.5.0/docs/bindings-safety.md)
 for this release line.

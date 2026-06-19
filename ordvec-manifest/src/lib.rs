@@ -16,8 +16,8 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ordvec::{
-    probe_index_metadata, IndexKind as CoreIndexKind, IndexMetadata as CoreIndexMetadata,
-    IndexParams as CoreIndexParams,
+    probe_index_metadata, FormatSpec, IndexKind as CoreIndexKind,
+    IndexMetadata as CoreIndexMetadata, IndexParams as CoreIndexParams, ManifestCoverage, FORMATS,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -2746,6 +2746,7 @@ pub enum ManifestIndexKind {
 
 impl ManifestIndexKind {
     fn try_from_core(kind: CoreIndexKind) -> Result<Self, UnsupportedCoreMetadata> {
+        require_manifest_coverage(kind)?;
         match kind {
             CoreIndexKind::Rank => Ok(Self::Rank),
             CoreIndexKind::RankQuant => Ok(Self::RankQuant),
@@ -2782,6 +2783,11 @@ impl ManifestIndexParams {
 enum UnsupportedCoreMetadata {
     Kind(CoreIndexKind),
     Params(CoreIndexParams),
+    RegistryMissing(CoreIndexKind),
+    ManifestNotCovered {
+        kind: CoreIndexKind,
+        reason: &'static str,
+    },
 }
 
 impl UnsupportedCoreMetadata {
@@ -2789,6 +2795,8 @@ impl UnsupportedCoreMetadata {
         match self {
             Self::Kind(_) => "artifact_kind_unsupported",
             Self::Params(_) => "artifact_params_unsupported",
+            Self::RegistryMissing(_) => "artifact_format_registry_missing",
+            Self::ManifestNotCovered { .. } => "artifact_manifest_coverage_unsupported",
         }
     }
 
@@ -2800,7 +2808,35 @@ impl UnsupportedCoreMetadata {
             Self::Params(params) => format!(
                 "artifact metadata params {params:?} are not supported by ordvec-manifest v1"
             ),
+            Self::RegistryMissing(kind) => format!(
+                "artifact metadata kind {kind:?} has no ordvec persisted-format registry entry"
+            ),
+            Self::ManifestNotCovered { kind, reason } => format!(
+                "artifact metadata kind {kind:?} is not covered by ordvec-manifest v1: {reason}"
+            ),
         }
+    }
+}
+
+fn format_spec_for_kind(
+    kind: CoreIndexKind,
+) -> Result<&'static FormatSpec, UnsupportedCoreMetadata> {
+    FORMATS
+        .iter()
+        .find(|spec| spec.kind == kind)
+        .ok_or(UnsupportedCoreMetadata::RegistryMissing(kind))
+}
+
+fn require_manifest_coverage(kind: CoreIndexKind) -> Result<(), UnsupportedCoreMetadata> {
+    match format_spec_for_kind(kind)?.manifest {
+        ManifestCoverage::Covered => Ok(()),
+        ManifestCoverage::NotCovered { reason, .. } => {
+            Err(UnsupportedCoreMetadata::ManifestNotCovered { kind, reason })
+        }
+        _ => Err(UnsupportedCoreMetadata::ManifestNotCovered {
+            kind,
+            reason: "unsupported manifest coverage stance in ordvec persisted-format registry",
+        }),
     }
 }
 
@@ -4017,6 +4053,39 @@ fn is_sha256_hex(value: &str) -> bool {
 
 fn hex_digest_eq(a: &str, b: &str) -> bool {
     a == b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_kind_conversion_uses_format_registry_coverage() {
+        for spec in FORMATS {
+            match spec.manifest {
+                ManifestCoverage::Covered => {
+                    ManifestIndexKind::try_from_core(spec.kind)
+                        .expect("manifest-covered registry rows must map to manifest kinds");
+                }
+                ManifestCoverage::NotCovered {
+                    tracking_issue,
+                    reason,
+                } => {
+                    let err = ManifestIndexKind::try_from_core(spec.kind).unwrap_err();
+                    assert_eq!(err.code(), "artifact_manifest_coverage_unsupported");
+                    assert!(err.message().contains(reason));
+                    assert!(tracking_issue > 0);
+                }
+                _ => panic!("unsupported manifest coverage stance in registry test"),
+            }
+        }
+        assert!(matches!(
+            ManifestIndexKind::try_from_core(CoreIndexKind::RankQuantFastscan)
+                .unwrap_err()
+                .code(),
+            "artifact_manifest_coverage_unsupported"
+        ));
+    }
 }
 
 #[cfg(feature = "sqlite")]

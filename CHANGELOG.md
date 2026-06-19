@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Hardened the Python binding's GIL-released search, candidate, scoring, and
+  `add` paths: NumPy inputs are now copied into Rust-owned buffers before
+  `py.detach`, so safe Python code cannot race a detached Rust read by mutating
+  the same array from another thread.
 - Updated release governance to document and audit the two-approver
   `crates-io` / `pypi` GitHub Environment gates: `Fieldnote-Echo` and
   `toadkicker` are listed as required reviewers, self-review is blocked, and a
@@ -23,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Added a persisted-format registry that drives probe, manifest-coverage, and
+  C-ABI load decisions from one table; `.ovfs` now remains explicitly
+  known-but-not-probeable/not-manifest-covered, and the C ABI reports it as an
+  unsupported format rather than a corrupt index.
 - Hid the `SubsetScratch::capacities_for_test` helper behind the non-default
   `test-utils` feature and cleaned stale release-doc comments around FastScan
   and b=8 bucket rustdoc.

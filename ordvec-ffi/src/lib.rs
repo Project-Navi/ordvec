@@ -10,7 +10,10 @@ use std::path::Path;
 use std::ptr;
 use std::time::Instant;
 
-use ordvec::{probe_index_metadata, Bitmap, IndexKind, IndexMetadata, IndexParams, RankQuant};
+use ordvec::{
+    probe_index_metadata, Bitmap, FfiLoadSupport, IndexKind, IndexMetadata, IndexParams,
+    PersistedFormat, RankQuant,
+};
 
 pub type ordvec_status_t = u32;
 pub type ordvec_index_kind_t = u32;
@@ -733,25 +736,29 @@ pub unsafe extern "C" fn ordvec_index_load(
             .map_err(|err| io_to_ffi(err, "stat index"))?
             .len();
 
-        // Accept both the current `OV*` magics and the legacy turbovec-era
-        // `TV*` magics (back-compat) — mirrors the loaders in `rank_io.rs`.
-        let index = match &magic {
-            b"OVRQ" | b"TVRQ" => LoadedIndex::RankQuant(
-                RankQuant::load(path).map_err(|err| io_to_ffi(err, "load RankQuant index"))?,
-            ),
-            b"OVBM" | b"TVBM" => LoadedIndex::Bitmap(
-                Bitmap::load(path).map_err(|err| io_to_ffi(err, "load Bitmap index"))?,
-            ),
-            b"OVR1" | b"OVSB" | b"TVR1" | b"TVSB" => {
-                return Err(FfiError::new(
-                    ORDVEC_STATUS_UNSUPPORTED_FORMAT,
-                    "ABI v1 supports only RankQuant and Bitmap indexes",
-                ))
+        let spec = ordvec::format::lookup_magic(&magic).ok_or_else(|| {
+            FfiError::new(
+                ORDVEC_STATUS_CORRUPT_INDEX,
+                "unrecognized ordvec index magic",
+            )
+        })?;
+        let index = match spec.ffi_load {
+            FfiLoadSupport::Supported => match spec.format {
+                PersistedFormat::RankQuant => LoadedIndex::RankQuant(
+                    RankQuant::load(path).map_err(|err| io_to_ffi(err, "load RankQuant index"))?,
+                ),
+                PersistedFormat::Bitmap => LoadedIndex::Bitmap(
+                    Bitmap::load(path).map_err(|err| io_to_ffi(err, "load Bitmap index"))?,
+                ),
+                _ => unreachable!("only RankQuant and Bitmap are FFI-loadable in ABI v1"),
+            },
+            FfiLoadSupport::Unsupported { reason } => {
+                return Err(FfiError::new(ORDVEC_STATUS_UNSUPPORTED_FORMAT, reason))
             }
             _ => {
                 return Err(FfiError::new(
-                    ORDVEC_STATUS_CORRUPT_INDEX,
-                    "unrecognized ordvec index magic",
+                    ORDVEC_STATUS_UNSUPPORTED_FORMAT,
+                    "ABI v1 does not support this persisted index format",
                 ))
             }
         };
@@ -1504,6 +1511,17 @@ mod tests {
         sign.add(&[0.0f32; 64]);
         sign.write(&sign_path).unwrap();
 
+        let fastscan_path = temp_path("fastscan", "ovfs");
+        let mut fastscan = Vec::new();
+        fastscan.extend_from_slice(b"OVFS");
+        fastscan.push(1);
+        fastscan.extend_from_slice(&8u32.to_le_bytes());
+        fastscan.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::File::create(&fastscan_path)
+            .unwrap()
+            .write_all(&fastscan)
+            .unwrap();
+
         let corrupt_path = temp_path("corrupt", "ovrq");
         std::fs::File::create(&corrupt_path)
             .unwrap()
@@ -1511,7 +1529,7 @@ mod tests {
             .unwrap();
 
         unsafe {
-            for path in [&rank_path, &sign_path] {
+            for path in [&rank_path, &sign_path, &fastscan_path] {
                 let cpath = CString::new(path.to_str().unwrap()).unwrap();
                 let mut out = ptr::null_mut();
                 assert_eq!(
@@ -1530,6 +1548,7 @@ mod tests {
         }
         std::fs::remove_file(rank_path).ok();
         std::fs::remove_file(sign_path).ok();
+        std::fs::remove_file(fastscan_path).ok();
         std::fs::remove_file(corrupt_path).ok();
     }
 }

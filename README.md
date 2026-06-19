@@ -276,9 +276,9 @@ The runtime dependency floor is `numpy>=2.2`.
 The consolidated cross-language ownership and lifetime contract is in
 [`docs/bindings-safety.md`](docs/bindings-safety.md).
 
-Python search, candidate-generation, and scoring methods release the GIL and
-read NumPy inputs in place. Callers must not mutate query, corpus, candidate,
-or scoring input arrays passed to those methods until the call returns.
+Python search, candidate-generation, scoring, and `add` methods release the GIL
+after copying NumPy inputs into Rust-owned buffers, so ordinary Python in-place
+array mutation in another thread cannot race the detached Rust scan.
 
 The C ABI allows concurrent search and info calls on one loaded handle.
 `ordvec_index_free` must not race with any other call on the same handle.

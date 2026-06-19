@@ -83,6 +83,7 @@ pub mod const_weight_bitmap;
 #[cfg(feature = "experimental")]
 mod contingency;
 mod fastscan;
+pub mod format;
 #[cfg(feature = "experimental")]
 mod multi_bucket;
 mod quant;
@@ -94,6 +95,9 @@ pub mod sign_bitmap;
 mod util;
 
 pub use bitmap::Bitmap;
+pub use format::{
+    FfiLoadSupport, FormatSpec, ManifestCoverage, PersistedFormat, ProbeCoverage, FORMATS,
+};
 pub use quant::SubsetScratch;
 pub use quant::{rankquant_eval_search, RankQuant, RankQuantCapability, TwoStageCandidatePolicy};
 pub use rank::Rank;

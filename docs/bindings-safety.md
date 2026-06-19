@@ -13,8 +13,8 @@ still own scheduling, path trust, input mutability, and deployment provenance.
   Mutation methods such as `add` require exclusive access.
 - Python search, candidate-generation, scoring, and `add` methods release the
   GIL while Rust performs the heavy work. PyO3 still enforces object borrow
-  rules, but caller-owned NumPy arrays are read in place while the GIL is
-  released.
+  rules, and the binding copies NumPy input arrays into Rust-owned buffers
+  before releasing the GIL.
 - The C ABI permits concurrent `ordvec_index_search`,
   `ordvec_index_probe`, and `ordvec_index_info` calls on one loaded handle.
   `ordvec_index_free` must not race with any other call on that handle.
@@ -23,11 +23,13 @@ still own scheduling, path trust, input mutability, and deployment provenance.
 
 ## Borrowed Inputs
 
-Caller-provided buffers are borrowed for the duration of the call and are not
-retained after the function returns.
+Caller-provided Rust slices, C buffers, and Go slices are borrowed for the
+duration of the call and are not retained after the function returns. Python
+NumPy inputs that cross a GIL-released call are copied before the GIL is
+released.
 
-- Do not mutate Rust slices, NumPy arrays, C buffers, or Go slices while a call
-  that received them is in progress.
+- Do not mutate Rust slices, C buffers, or Go slices while a call that received
+  them is in progress.
 - Query, corpus, candidate, output, hit, and stats buffers remain caller-owned
   unless a specific API says otherwise.
 - Candidate lists are entry lists, not sets. Duplicate candidate IDs are scored

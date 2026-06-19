@@ -73,21 +73,11 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-// Current ordvec magics — written by this crate going forward.
-const OVR_MAGIC: &[u8; 4] = b"OVR1";
-const OVRQ_MAGIC: &[u8; 4] = b"OVRQ";
-const OVBM_MAGIC: &[u8; 4] = b"OVBM";
-const OVSB_MAGIC: &[u8; 4] = b"OVSB";
-// FastScan b=2 block-32 layout (`RankQuantFastscan`). New in the ordvec format —
-// there is no turbovec-era counterpart, so it has no legacy magic.
-const OVFS_MAGIC: &[u8; 4] = b"OVFS";
-// Legacy turbovec-era magics — still accepted on load for backward
-// compatibility, never written. Files produced before the ordvec rebrand carry
-// these; loaders accept either the `OV*` or the matching `TV*` magic.
-const TVR_MAGIC: &[u8; 4] = b"TVR1";
-const TVRQ_MAGIC: &[u8; 4] = b"TVRQ";
-const TVBM_MAGIC: &[u8; 4] = b"TVBM";
-const TVSB_MAGIC: &[u8; 4] = b"TVSB";
+use crate::format::{
+    self, PersistedFormat, ProbeCoverage, OVBM_MAGIC, OVFS_MAGIC, OVRQ_MAGIC, OVR_MAGIC,
+    OVSB_MAGIC, TVBM_MAGIC, TVRQ_MAGIC, TVR_MAGIC, TVSB_MAGIC,
+};
+
 const VERSION: u8 = 1;
 
 /// Persisted index family identified from an on-disk ordvec index header.
@@ -98,6 +88,7 @@ pub enum IndexKind {
     RankQuant,
     Bitmap,
     SignBitmap,
+    RankQuantFastscan,
 }
 
 /// Format-specific parameters declared by an on-disk ordvec index header.
@@ -108,6 +99,7 @@ pub enum IndexParams {
     RankQuant { bits: u8 },
     Bitmap { n_top: usize },
     SignBitmap,
+    RankQuantFastscan { bits: u8 },
 }
 
 /// Header-derived metadata for a persisted ordvec index.
@@ -378,22 +370,16 @@ pub fn probe_index_metadata(path: impl AsRef<Path>) -> io::Result<IndexMetadata>
     let file_size_bytes = file.metadata()?.len();
     let mut f = BufReader::new(file);
     let magic = read_magic(&mut f, "ordvec index")?;
-    match &magic {
-        OVR_MAGIC | TVR_MAGIC => probe_rank_metadata(&mut f, file_size_bytes),
-        OVRQ_MAGIC | TVRQ_MAGIC => probe_rankquant_metadata(&mut f, file_size_bytes),
-        OVBM_MAGIC | TVBM_MAGIC => probe_bitmap_metadata(&mut f, file_size_bytes),
-        OVSB_MAGIC | TVSB_MAGIC => probe_sign_bitmap_metadata(&mut f, file_size_bytes),
-        // `OVFS` (RankQuantFastscan) is a recognized magic, but metadata probing
-        // is intentionally NOT wired up here yet. `.ovfs` files still
-        // round-trip via `RankQuantFastscan::{write,load}`; only this
-        // metadata-probe path is pending. Return a specific, actionable error
-        // rather than letting it fall through to the generic unknown-magic case
-        // (which would be misleading, since the magic *is* known).
-        OVFS_MAGIC => Err(invalid(
-            "OVFS (RankQuantFastscan) metadata probing is not supported in this \
-             version; load the index with RankQuantFastscan::load (tracked in #232)",
-        )),
-        _ => Err(invalid("unknown ordvec index magic")),
+    let spec = format::lookup_magic(&magic).ok_or_else(|| invalid("unknown ordvec index magic"))?;
+    match spec.format {
+        PersistedFormat::Rank => probe_rank_metadata(&mut f, file_size_bytes),
+        PersistedFormat::RankQuant => probe_rankquant_metadata(&mut f, file_size_bytes),
+        PersistedFormat::Bitmap => probe_bitmap_metadata(&mut f, file_size_bytes),
+        PersistedFormat::SignBitmap => probe_sign_bitmap_metadata(&mut f, file_size_bytes),
+        PersistedFormat::RankQuantFastscan => match spec.probe {
+            ProbeCoverage::Covered => unreachable!("FastScan probe is not wired yet"),
+            ProbeCoverage::NotCovered { reason, .. } => Err(invalid(reason)),
+        },
     }
 }
 
@@ -1906,8 +1892,8 @@ mod tests {
     // Probing a valid `.ovfs` file returns a specific, actionable error — NOT the
     // generic "unknown ordvec index magic" (which would be misleading, since the
     // magic *is* recognized). Metadata-probe support for OVFS is deferred to #232;
-    // this pins the deferral contract so it can't silently regress to the generic
-    // case. See `probe_index_metadata`'s `OVFS_MAGIC` arm.
+    // this pins the registry-backed deferral contract so it can't silently
+    // regress to the generic case.
     #[test]
     fn probe_rejects_ovfs_with_specific_unsupported_error() {
         use super::{probe_index_metadata, write_fastscan};
