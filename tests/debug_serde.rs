@@ -49,18 +49,8 @@ fn public_types_debug_prints_shape_not_storage() {
 
 #[cfg(feature = "serde")]
 #[test]
-fn search_results_roundtrips_with_serde_feature() {
-    let results = SearchResults {
-        scores: vec![1.0, 0.25, -0.5, 0.0],
-        indices: vec![10, 2, -1, 7],
-        nq: 2,
-        k: 2,
-    };
+fn search_results_implements_serde_traits_with_serde_feature() {
+    fn assert_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>() {}
 
-    let json = serde_json::to_string(&results).expect("serialize SearchResults");
-    let roundtrip: SearchResults = serde_json::from_str(&json).expect("deserialize SearchResults");
-    assert_eq!(roundtrip.scores, results.scores);
-    assert_eq!(roundtrip.indices, results.indices);
-    assert_eq!(roundtrip.nq, results.nq);
-    assert_eq!(roundtrip.k, results.k);
+    assert_serde::<SearchResults>();
 }

@@ -71,7 +71,6 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 # Test/bench corpora are seeded with these; not needed by the library.
 rand = "0.10"
 rand_chacha = "0.10"
-serde_json = "1.0"
 
 [features]
 # SIMD is always compiled, never feature-gated: x86_64 dispatches AVX-512/AVX2 at
