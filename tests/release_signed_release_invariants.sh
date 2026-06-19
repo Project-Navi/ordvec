@@ -43,7 +43,7 @@
 # It is intentionally a structural lint on release.yml (greps the YAML), not a
 # runtime exercise of the pipeline — that's the fork dry-run's job.
 set -euo pipefail
-fail() { echo "::error::signed-release invariant violated: $*"; exit 1; }
+fail() { echo "::error::signed-release invariant violated: $*" >&2; exit 1; }
 
 wf=".github/workflows/release.yml"
 [ -f "$wf" ] || fail "$wf: workflow file not found"
@@ -55,7 +55,7 @@ matches_regex() {
 
 contains_literal() {
   local text="$1" needle="$2"
-  grep -q -- "$needle" <<<"$text"
+  grep -Fq -- "$needle" <<<"$text"
 }
 
 # Extract the body of a job (from `  <name>:` to the next 2-space-indented job key).
@@ -81,7 +81,10 @@ job_line() {
   local jobname="$1" pattern="$2" body line
   body="$(job_body "$jobname")"
   line="$(grep -nE -m 1 -- "$pattern" <<<"$body" || true)"
-  [ -n "$line" ] && printf '%s\n' "${line%%:*}"
+  if [ -n "$line" ]; then
+    printf '%s\n' "${line%%:*}"
+  fi
+  return 0
 }
 
 require_job_line() {
