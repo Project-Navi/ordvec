@@ -534,6 +534,15 @@ pub struct RankQuantFastscan {
     packed_fs: Vec<u8>,
 }
 
+impl std::fmt::Debug for RankQuantFastscan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RankQuantFastscan")
+            .field("dim", &self.dim)
+            .field("n_vectors", &self.n_vectors)
+            .finish()
+    }
+}
+
 impl RankQuantFastscan {
     /// Construct an empty FastScan b=2 index.
     ///

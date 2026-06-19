@@ -217,6 +217,17 @@ pub struct RankQuant {
     pub(crate) packed: Vec<u8>,
 }
 
+impl std::fmt::Debug for RankQuant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RankQuant")
+            .field("dim", &self.dim)
+            .field("bits", &self.bits)
+            .field("n_vectors", &self.n_vectors)
+            .field("capability", &self.capability)
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TwoStageCandidatePolicy {
     pub min_candidates: usize,
