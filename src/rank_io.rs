@@ -37,6 +37,9 @@
 //!   rejected (v1 formats have no footer or reserved trailing section).
 //! * Per-index invariants (e.g., `dim % (1 << bits) == 0` for RankQuant)
 //!   are returned as `Err(InvalidData)`, never `assert!`'d.
+//! * FastScan `.ovfs` payloads are decoded far enough to reject invalid
+//!   nibbles, non-canonical tail padding, and rows that violate b=2 constant
+//!   composition before any search path can observe the bytes.
 //!
 //! Any malformed input returns `io::Error` rather than panicking.
 //!
@@ -60,13 +63,11 @@
 //! validates its parameters (matching the loaders' `dim` / `n_top` / `bits` /
 //! divisibility bounds), `add` caps `n_vectors` at [`MAX_VECTORS`], and the
 //! types emit only loader-valid data — so anything `T::write` produces,
-//! `T::load` reloads. The raw `write_*` helpers are trusted serializers: they
-//! assume loader-valid inputs (which only the index types construct) and do
-//! *not* re-validate `dim` / `n_vectors` / structure / data semantics. The
-//! 128 GiB `MAX_PAYLOAD` cap is the one loader bound they also enforce
-//! (checked before `File::create`, so a rejected oversized write never
-//! truncates an existing file) — defense-in-depth, and belt-and-braces now
-//! that the helpers are no longer reachable with arbitrary external input.
+//! `T::load` reloads. The raw `write_*` helpers are trusted serializers for
+//! the private in-memory buffers; they still enforce the same header, length,
+//! and size-cap guards as the loaders (and `.ovfs` also revalidates its public
+//! payload bytes) before `File::create`, so a rejected write never truncates an
+//! existing file.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -91,6 +92,7 @@ const VERSION: u8 = 1;
 
 /// Persisted index family identified from an on-disk ordvec index header.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndexKind {
     Rank,
     RankQuant,
@@ -100,6 +102,7 @@ pub enum IndexKind {
 
 /// Format-specific parameters declared by an on-disk ordvec index header.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndexParams {
     Rank,
     RankQuant { bits: u8 },
@@ -381,14 +384,11 @@ pub fn probe_index_metadata(path: impl AsRef<Path>) -> io::Result<IndexMetadata>
         OVBM_MAGIC | TVBM_MAGIC => probe_bitmap_metadata(&mut f, file_size_bytes),
         OVSB_MAGIC | TVSB_MAGIC => probe_sign_bitmap_metadata(&mut f, file_size_bytes),
         // `OVFS` (RankQuantFastscan) is a recognized magic, but metadata probing
-        // is intentionally NOT wired up here yet: surfacing it would need a new
-        // `IndexKind` variant, and `IndexKind` is not `#[non_exhaustive]`, so
-        // adding one is a breaking change — deferred to the 0.8.0 API
-        // re-architecture (#232). `.ovfs` files still round-trip via
-        // `RankQuantFastscan::{write,load}`; only this metadata-probe path is
-        // pending. Return a specific, actionable error rather than letting it
-        // fall through to the generic unknown-magic case (which would be
-        // misleading, since the magic *is* known).
+        // is intentionally NOT wired up here yet. `.ovfs` files still
+        // round-trip via `RankQuantFastscan::{write,load}`; only this
+        // metadata-probe path is pending. Return a specific, actionable error
+        // rather than letting it fall through to the generic unknown-magic case
+        // (which would be misleading, since the magic *is* known).
         OVFS_MAGIC => Err(invalid(
             "OVFS (RankQuantFastscan) metadata probing is not supported in this \
              version; load the index with RankQuantFastscan::load (tracked in #232)",
@@ -1069,6 +1069,67 @@ fn fastscan_payload_bytes(dim: usize, vector_count: usize) -> io::Result<usize> 
         .ok_or_else(|| invalid("OVFS payload size overflows usize"))
 }
 
+fn validate_fastscan_payload(dim: usize, n_vectors: usize, packed_fs: &[u8]) -> io::Result<()> {
+    if n_vectors == 0 {
+        if packed_fs.is_empty() {
+            return Ok(());
+        }
+        return Err(invalid(format!(
+            "OVFS payload is {} bytes but empty index implies 0",
+            packed_fs.len()
+        )));
+    }
+
+    let pairs = dim / 2;
+    let n_blocks = n_vectors.div_ceil(32);
+    let bytes_per_block = pairs * 32;
+    let expected_per_bucket = dim / 4;
+
+    for block in 0..n_blocks {
+        let doc_base = block * 32;
+        let docs_in_block = (n_vectors - doc_base).min(32);
+        let block_offset = block * bytes_per_block;
+
+        for lane in 0..docs_in_block {
+            let doc = doc_base + lane;
+            let mut bucket_counts = [0usize; 4];
+            for pair in 0..pairs {
+                let offset = block_offset + pair * 32 + lane;
+                let byte = packed_fs[offset];
+                if byte & 0xf0 != 0 {
+                    return Err(invalid(format!(
+                        "OVFS payload byte at block {block}, pair {pair}, lane {lane} \
+                         (document {doc}) has invalid FastScan nibble 0x{byte:02x}"
+                    )));
+                }
+                bucket_counts[((byte >> 2) & 0x03) as usize] += 1;
+                bucket_counts[(byte & 0x03) as usize] += 1;
+            }
+            if bucket_counts != [expected_per_bucket; 4] {
+                return Err(invalid(format!(
+                    "OVFS document {doc} violates b=2 constant composition: \
+                     counts={bucket_counts:?}, expected {expected_per_bucket} per bucket"
+                )));
+            }
+        }
+
+        for lane in docs_in_block..32 {
+            for pair in 0..pairs {
+                let offset = block_offset + pair * 32 + lane;
+                let byte = packed_fs[offset];
+                if byte != 0 {
+                    return Err(invalid(format!(
+                        "OVFS tail padding byte at block {block}, pair {pair}, lane {lane} \
+                         must be zero, got 0x{byte:02x}"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn write_fastscan(
     path: impl AsRef<Path>,
     dim: usize,
@@ -1110,6 +1171,7 @@ fn check_fastscan_write(dim: usize, n_vectors: usize, packed_fs: &[u8]) -> io::R
             packed_fs.len()
         )));
     }
+    validate_fastscan_payload(dim, n_vectors, packed_fs)?;
     Ok(())
 }
 
@@ -1167,11 +1229,9 @@ fn load_fastscan_from_stream<R: Read + Seek>(
     let payload_bytes = fastscan_payload_bytes(dim, n_vectors)?;
     check_payload_bytes(payload_bytes)?;
     check_payload_matches_file(&mut f, "OVFS", file_len, payload_bytes)?;
-    // The packed FastScan payload is opaque pre-encoded nibbles in the block-32
-    // transpose: any byte value is valid, so there is no per-row invariant to
-    // check beyond the exact payload length validated above.
     let mut packed_fs = try_alloc_zeroed(payload_bytes)?;
     f.read_exact(&mut packed_fs)?;
+    validate_fastscan_payload(dim, n_vectors, &packed_fs)?;
     Ok((dim, n_vectors, packed_fs))
 }
 
@@ -1803,7 +1863,13 @@ mod tests {
         use super::{load_fastscan, write_fastscan};
         // dim=8 (multiple of 4), 4 vectors -> ceil(4/32)*(8/2)*32 = 128-byte payload.
         let (dim, n) = (8usize, 4usize);
-        let payload = vec![0u8; 128];
+        let mut payload = vec![0u8; 128];
+        for lane in 0..n {
+            payload[lane] = 0x00;
+            payload[32 + lane] = 0x05;
+            payload[64 + lane] = 0x0a;
+            payload[96 + lane] = 0x0f;
+        }
         let p = temp_index_path("ovfs_ok");
         write_fastscan(&p, dim, n, &payload).unwrap();
         let (ld, ln, lbytes) = load_fastscan(&p).unwrap();
@@ -1822,6 +1888,19 @@ mod tests {
         let e = write_fastscan(&p3, dim, n, &payload[..100]).unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
         assert!(!p3.exists(), "rejected write must not create a file");
+
+        // A byte that is not a real FastScan nibble is rejected on write, before
+        // a file can be created for the safe load/search APIs to observe.
+        let p4 = temp_index_path("ovfs_badnibble");
+        let mut invalid_payload = payload.clone();
+        invalid_payload[32] = 0x10;
+        let e = write_fastscan(&p4, dim, n, &invalid_payload).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            e.to_string().contains("invalid FastScan nibble"),
+            "unexpected error: {e}"
+        );
+        assert!(!p4.exists(), "rejected write must not create a file");
     }
 
     // Probing a valid `.ovfs` file returns a specific, actionable error — NOT the
@@ -1833,7 +1912,13 @@ mod tests {
     fn probe_rejects_ovfs_with_specific_unsupported_error() {
         use super::{probe_index_metadata, write_fastscan};
         let (dim, n) = (8usize, 4usize);
-        let payload = vec![0u8; 128];
+        let mut payload = vec![0u8; 128];
+        for lane in 0..n {
+            payload[lane] = 0x00;
+            payload[32 + lane] = 0x05;
+            payload[64 + lane] = 0x0a;
+            payload[96 + lane] = 0x0f;
+        }
         let p = temp_index_path("ovfs_probe");
         write_fastscan(&p, dim, n, &payload).unwrap();
         let err = probe_index_metadata(&p);

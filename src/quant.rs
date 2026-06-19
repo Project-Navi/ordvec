@@ -204,7 +204,11 @@ pub enum RankQuantCapability {
 /// surface — but it is capability-gated: construct an asymmetric-only
 /// `b=8` index for non-`256`-aligned dims via [`Self::new_asymmetric`]
 /// and check [`Self::symmetric_supported`] before calling
-/// [`Self::search`]. See [`RankQuantCapability`].
+/// [`Self::search`]. The b=8 asymmetric query LUT has `dim * 256` `f32`
+/// entries per prepared query/worker, about 64 MiB at the maximum dimension.
+/// In v0.5.0 this width is Rust-only and in-memory: the Python `RankQuant`
+/// constructor rejects it and `.ovrq` persistence supports only
+/// `bits ∈ {1, 2, 4}`. See [`RankQuantCapability`].
 pub struct RankQuant {
     pub(crate) dim: usize,
     pub(crate) bits: u8,

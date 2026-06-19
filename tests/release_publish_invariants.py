@@ -28,6 +28,11 @@ COVERAGE_WORKFLOW_PATH = os.environ.get("COVERAGE_WORKFLOW_PATH", ".github/workf
 SDE_ACTION_PATH = os.environ.get(
     "SDE_ACTION_PATH", ".github/actions/setup-intel-sde/action.yml"
 )
+PR_ONLY_SDE_ALLOW_UNAVAILABLE = "${{ github.event_name == 'pull_request' }}"
+SDE_AVAILABLE_IF = "${{ steps.sde.outputs.sde-available == 'true' }}"
+PR_SDE_UNAVAILABLE_IF = (
+    "${{ github.event_name == 'pull_request' && steps.sde.outputs.sde-available != 'true' }}"
+)
 PYPI_CANONICAL_EXPECTED_ARGS = (
     "--expected-wheels 4",
     "--expected-sdists 1",
@@ -103,6 +108,10 @@ def norm_path(value: Any) -> str:
 
 def boolish_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.lower() == "true")
+
+
+def boolish_false(value: Any) -> bool:
+    return value is False or (isinstance(value, str) and value.lower() == "false")
 
 
 def step_label(index: int, step: dict[str, Any]) -> str:
@@ -1808,20 +1817,24 @@ def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> N
         fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_VERSION")
     if setup_with.get("sha256") != "${{ env.SDE_SHA256 }}":
         fail(f"{path}: jobs.{job_name} setup-intel-sde must receive env.SDE_SHA256")
-    if not boolish_true(setup_with.get("allow-unavailable")):
-        fail(f"{path}: jobs.{job_name} must explicitly opt into the temporary SDE outage valve")
+    if setup_with.get("allow-unavailable") != PR_ONLY_SDE_ALLOW_UNAVAILABLE:
+        fail(
+            f"{path}: jobs.{job_name} may soften Intel SDE outages only on pull_request; "
+            "push and workflow_dispatch runs must fail closed"
+        )
 
-    available_if = "steps.sde.outputs.sde-available == 'true'"
-    unavailable_if = "steps.sde.outputs.sde-available != 'true'"
     outage_notice_steps = []
     for index, raw_step in enumerate(steps):
         step = mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
-        if step.get("if") == unavailable_if and contains_text(
+        if step.get("if") == PR_SDE_UNAVAILABLE_IF and contains_text(
             step.get("run"), "Intel SDE archive unavailable"
         ):
             outage_notice_steps.append(step)
     if len(outage_notice_steps) != 1:
-        fail(f"{path}: jobs.{job_name} must emit exactly one notice when Intel SDE is unavailable")
+        fail(
+            f"{path}: jobs.{job_name} must emit exactly one PR-only Intel SDE outage notice; "
+            "release-gated runs must not green-skip AVX-512 coverage"
+        )
 
     sde_guarded_names = {
         "Install cargo-llvm-cov (pinned)",
@@ -1839,10 +1852,10 @@ def check_sde_cache_job(workflow: dict[str, Any], path: str, job_name: str) -> N
             or contains_nested_text(step.get("env"), "steps.sde.outputs.sde-path")
             or contains_text(step.get("run"), "SDE_PATH")
         ):
-            if step.get("if") != available_if:
+            if step.get("if") != SDE_AVAILABLE_IF:
                 fail(
-                    f"{path}: {step_label(index, step)} must be guarded by "
-                    "steps.sde.outputs.sde-available"
+                    f"{path}: {step_label(index, step)} must run after SDE setup succeeds, "
+                    "and may be skipped only when PR-only SDE setup reports unavailable"
                 )
 
 

@@ -28,8 +28,8 @@
 //!   candidate generation.
 //!
 //! For b=2 specifically, [`RankQuantFastscan`] is a specialized companion to
-//! [`RankQuant`] — a block-32 FastScan kernel (nibble LUT; AVX-512 → AVX2 →
-//! scalar dispatch) for absolute-minimum stage-1 scan latency, trading 2× the
+//! [`RankQuant`] — a block-32 FastScan kernel (nibble LUT; AVX-512 → scalar
+//! dispatch) for absolute-minimum stage-1 scan latency, trading 2× the
 //! b=2 storage and 8-bit LUT scoring noise. Reach for it only when scan latency
 //! is the binding constraint.
 //!
@@ -171,7 +171,7 @@ pub use const_weight_bitmap::{
 };
 
 // `RankQuantFastscan` is a specialized b=2 FastScan scan path (block-32 nibble
-// LUT, AVX-512 → AVX2 → scalar dispatch) for absolute-minimum stage-1 scan
+// LUT, AVX-512 → scalar dispatch) for absolute-minimum stage-1 scan
 // latency, at the cost of 2× the `RankQuant` b=2 storage and 8-bit LUT scoring
 // noise. It is a stable, documented public type, but a *specialized* one — the
 // headline retrieval surface is still `RankQuant` / `Bitmap` / two-stage; reach

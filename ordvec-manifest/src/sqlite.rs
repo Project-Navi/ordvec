@@ -399,7 +399,7 @@ fn current_cache_key(
     ) else {
         return Ok(None);
     };
-    let artifact_sha256 = match sha256_file(&artifact.resolved_path) {
+    let artifact_sha256 = match sha256_file(&artifact.canonical_path) {
         Ok(hash) => hash.sha256,
         Err(_) => return Ok(None),
     };
@@ -424,7 +424,7 @@ fn current_cache_key(
             };
             let mut row_errors = Vec::new();
             let stats = match validate_jsonl_rows(
-                &row_identity.resolved_path,
+                &row_identity.canonical_path,
                 options.allow_duplicate_db_ids,
                 &options.limits,
                 Some(*row_count),
@@ -616,7 +616,12 @@ fn current_calibration_profile_sha256(
     ) else {
         return Ok(None);
     };
-    match sha256_file(&resolved.resolved_path) {
+    match sha256_file_bounded(
+        &resolved.canonical_path,
+        options.limits.max_calibration_profile_bytes,
+        "calibration_profile_too_large",
+        "calibration profile",
+    ) {
         Ok(hash) => Ok(Some(hash.sha256)),
         Err(_) => Ok(None),
     }
@@ -646,7 +651,7 @@ fn current_encoder_distortion_profile_sha256(
         return Ok(None);
     };
     match sha256_file_bounded(
-        &resolved.resolved_path,
+        &resolved.canonical_path,
         options.limits.max_encoder_distortion_profile_bytes,
         "encoder_distortion_profile_too_large",
         "encoder distortion profile",

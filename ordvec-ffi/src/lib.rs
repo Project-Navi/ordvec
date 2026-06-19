@@ -373,6 +373,12 @@ fn info_for_metadata(meta: &IndexMetadata) -> Result<ordvec_index_info_t, FfiErr
                 "ABI v1 supports metadata probes only for RankQuant and Bitmap indexes",
             ))
         }
+        _ => {
+            return Err(FfiError::new(
+                ORDVEC_STATUS_UNSUPPORTED_FORMAT,
+                "ABI v1 does not support this index kind",
+            ))
+        }
     };
     info.format_version = u32::from(meta.format_version);
     info.dim = meta.dim as u64;
@@ -387,6 +393,12 @@ fn info_for_metadata(meta: &IndexMetadata) -> Result<ordvec_index_info_t, FfiErr
             info.n_top = n_top as u32;
         }
         IndexParams::Rank | IndexParams::SignBitmap => {}
+        _ => {
+            return Err(FfiError::new(
+                ORDVEC_STATUS_UNSUPPORTED_FORMAT,
+                "ABI v1 does not support these index parameters",
+            ))
+        }
     }
     info.capabilities = ORDVEC_CAP_FULL_SEARCH
         | ORDVEC_CAP_SUBSET_SEARCH

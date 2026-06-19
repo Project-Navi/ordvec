@@ -1765,6 +1765,19 @@ fn calibration_profile_artifact_checks_are_enforced() {
         Some(profile_hash.sha256.as_str())
     );
 
+    let report = verify_manifest_with_base(
+        manifest.clone(),
+        case.path(),
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_calibration_profile_bytes: 16,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(error_codes(&report).contains(&"calibration_profile_too_large"));
+
     let mut missing_profile = manifest.clone();
     missing_profile.calibration.as_mut().unwrap().profile = None;
     let report = verify_manifest_with_base(missing_profile, case.path(), VerifyOptions::default());
@@ -3660,6 +3673,26 @@ fn sqlite_cache_key_includes_calibration_profile_bytes() {
     )
     .unwrap();
     assert!(report.ok, "{:?}", report.errors);
+
+    let limited = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions {
+            limits: ResourceLimits {
+                max_calibration_profile_bytes: 16,
+                ..ResourceLimits::default()
+            },
+            ..VerifyOptions::default()
+        },
+        true,
+    )
+    .unwrap();
+    assert!(
+        error_codes(&limited).contains(&"calibration_profile_too_large"),
+        "{:?}",
+        limited.errors
+    );
 
     fs::write(
         &profile_path,

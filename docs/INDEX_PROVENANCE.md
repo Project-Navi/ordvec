@@ -96,7 +96,8 @@ The manifest verifier checks:
   path/hash integrity for side artifacts, and optional calibration-profile
   linkage;
 - optional `calibration` profile references, checking profile identity,
-  path/hash integrity, encoder identity, and ordinalization compatibility;
+  path/hash integrity, configured byte ceiling, encoder identity, and
+  ordinalization compatibility;
 - attestation **shape** only: predicate type, builder id when present, and at
   least one subject SHA-256 matching the artifact when attestations are
   supplied.
@@ -104,7 +105,10 @@ The manifest verifier checks:
 The v1 verifier intentionally does not create or verify `.ovfs` FastScan
 artifacts yet. If a `RankQuantFastscan` artifact crosses a trust boundary in
 v0.5.0, bind the bytes with a caller-owned checksum, artifact-store control, or
-attestation and load it directly only after that policy check succeeds.
+attestation and load it directly only after that policy check succeeds. The
+direct `.ovfs` loader still rejects invalid nibbles, non-canonical block-tail
+padding, and rows that violate b=2 constant composition; manifest v1 simply
+does not bind or probe those bytes yet.
 
 Auxiliary artifacts are for application-owned sidecars such as metadata,
 secondary indexes, or stores that a caller intends to load together with the
@@ -135,8 +139,9 @@ manifest's `calibration.profile_id`.
 
 When present, `calibration` binds an index artifact to a hashed ordinal profile
 used to interpret overlap, bucket, sign, or rank evidence under a calibrated
-null. The verifier checks profile identity, path/hash integrity, encoder
-identity, and ordinalization compatibility; it does not judge whether the null
+null. The verifier checks profile identity, path/hash integrity, configured
+byte ceiling, encoder identity, and ordinalization compatibility; it does not
+judge whether the null
 model is scientifically adequate and does not compute likelihood ratios or tail
 probabilities. Calibration profiles must match the encoder identity declared by
 `embedding`; cross-encoder calibration is rejected by default. The
