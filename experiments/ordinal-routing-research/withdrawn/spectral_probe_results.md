@@ -6,7 +6,7 @@
 > The numbers below are RETAINED ONLY as the record of the failure. Fixing needs
 > the estimator calibrated against a process with known closed-form Σ²(L). The
 > theory (rigidity_impossibility_proofs.md) does NOT depend on this probe. Full
-> account: benchmarks/ADVERSARIAL_REVIEW.md.
+> account: ../ADVERSARIAL_REVIEW.md.
 
 # Number-variance probe: is a 1-D routing key rigid or Poisson?
 

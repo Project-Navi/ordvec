@@ -3,7 +3,7 @@
 > linearized CDF (F=(i+1)/N), the biased non-MLE variant; some of the "finite-
 > sample deflation" attributed to sampling is actually estimator bias. Treat the
 > low-tens ID as indicative, and prefer the MLE TwoNN estimator before quoting
-> exact values. See benchmarks/ADVERSARIAL_REVIEW.md.
+> exact values. See ADVERSARIAL_REVIEW.md.
 
 # TwoNN intrinsic dimension probe
 

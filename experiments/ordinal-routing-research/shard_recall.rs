@@ -82,11 +82,19 @@ fn load_npy_f32(path: &str) -> (Vec<f32>, usize, usize) {
     let bytes = std::fs::read(path).expect("read npy");
     assert!(bytes.len() >= 10 && &bytes[..6] == b"\x93NUMPY", "not a numpy file");
     let major = bytes[6];
+    assert!(
+        major == 1 || major == 2,
+        "unsupported numpy .npy major version {major}"
+    );
+    if major == 2 {
+        assert!(bytes.len() >= 12, "truncated numpy v2 header");
+    }
     let (hlen, hstart) = if major == 1 {
         (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10)
     } else {
         (u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize, 12)
     };
+    assert!(hstart + hlen <= bytes.len(), "truncated numpy header");
     let header = std::str::from_utf8(&bytes[hstart..hstart + hlen]).expect("utf8 header");
     assert!(header.contains("'descr': '<f4'"), "expected <f4 dtype");
     assert!(header.contains("'fortran_order': False"), "expected C order");
@@ -331,7 +339,7 @@ fn build_index(projs: &[Proj], corpus: &[f32], dim: usize) -> BucketIndex {
 
 /// For one query at a given probe radius `rad` (probe buckets b-rad..=b+rad on
 /// each projection), return the candidate union and its size (candidates
-/// scanned). Recall is measured against `truth_set`.
+/// scanned). Recall is measured against the ground-truth ids.
 fn probe_recall(
     projs: &[Proj],
     index: &BucketIndex,

@@ -6,8 +6,9 @@
 //! recovers d. No binning, no manifold reconstruction — two distances/point.
 //!
 //! Metric: embeddings are L2-normalized and retrieval is ANGULAR, so NN
-//! distances here are cosine distance (1 - cos). Measuring Euclidean ID on
-//! normalized vectors would estimate the ID of the wrong metric.
+//! distances here use chord / Euclidean distance between unit vectors
+//! (`sqrt(2 - 2cos)`). Cosine distance (`1 - cos`) is squared-angle locally
+//! and biases TwoNN estimates downward.
 //!
 //! Validation control: the synthetic corpus is a latent_dim-D manifold
 //! projected into dim-D, so TwoNN should recover ID ≈ latent_dim. Run the
@@ -67,11 +68,19 @@ fn load_npy_f32(path: &str) -> (Vec<f32>, usize, usize) {
     let bytes = std::fs::read(path).expect("read npy");
     assert!(bytes.len() >= 10 && &bytes[..6] == b"\x93NUMPY", "not a numpy file");
     let major = bytes[6];
+    assert!(
+        major == 1 || major == 2,
+        "unsupported numpy .npy major version {major}"
+    );
+    if major == 2 {
+        assert!(bytes.len() >= 12, "truncated numpy v2 header");
+    }
     let (hlen, hstart) = if major == 1 {
         (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10)
     } else {
         (u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize, 12)
     };
+    assert!(hstart + hlen <= bytes.len(), "truncated numpy header");
     let header = std::str::from_utf8(&bytes[hstart..hstart + hlen]).expect("utf8 header");
     assert!(header.contains("'descr': '<f4'"), "expected <f4 dtype");
     assert!(header.contains("'fortran_order': False"), "expected C order");
@@ -168,8 +177,7 @@ fn nn_ratios(corpus: &[f32], n: usize, dim: usize) -> Vec<f64> {
         .par_iter()
         .filter_map(|&ai| {
             let a = &corpus[ai * dim..(ai + 1) * dim];
-            // cosine distance = 1 - dot (vectors are unit norm). Track the two
-            // smallest distances to OTHER points.
+            // Track the two smallest chord distances to OTHER points.
             let (mut d1, mut d2) = (f64::INFINITY, f64::INFINITY);
             for bi in 0..n {
                 if bi == ai {

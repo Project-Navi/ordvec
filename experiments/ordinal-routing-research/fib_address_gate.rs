@@ -52,6 +52,13 @@ fn load_npy_f32(path: &str) -> (Vec<f32>, usize, usize) {
         "not a numpy file"
     );
     let major = bytes[6];
+    assert!(
+        major == 1 || major == 2,
+        "unsupported numpy .npy major version {major}"
+    );
+    if major == 2 {
+        assert!(bytes.len() >= 12, "truncated numpy v2 header");
+    }
     let (hlen, hstart) = if major == 1 {
         (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10)
     } else {
@@ -60,6 +67,7 @@ fn load_npy_f32(path: &str) -> (Vec<f32>, usize, usize) {
             12,
         )
     };
+    assert!(hstart + hlen <= bytes.len(), "truncated numpy header");
     let header = std::str::from_utf8(&bytes[hstart..hstart + hlen]).expect("utf8 header");
     assert!(header.contains("'descr': '<f4'"), "expected <f4 dtype");
     let after = &header[header.find("'shape':").expect("shape")..];
