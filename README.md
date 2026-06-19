@@ -4,7 +4,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](#minimum-supported-rust-version)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Project-Navi/ordvec/badge)](https://scorecard.dev/viewer/?uri=github.com/Project-Navi/ordvec)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12977/badge)](https://www.bestpractices.dev/projects/12977)
+[![OpenSSF Best Practices: Silver](https://www.bestpractices.dev/projects/12977/badge)](https://www.bestpractices.dev/en/projects/12977/silver)
 [![codecov](https://codecov.io/gh/Project-Navi/ordvec/graph/badge.svg)](https://codecov.io/gh/Project-Navi/ordvec)
 
 [![Crates.io](https://img.shields.io/crates/v/ordvec.svg)](https://crates.io/crates/ordvec)
