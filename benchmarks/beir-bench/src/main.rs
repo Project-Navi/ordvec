@@ -144,6 +144,19 @@ fn parse_args() -> Config {
     assert!(batch >= 1, "--batch must be >= 1");
     assert!(top_k >= 1, "--top-k must be >= 1");
     assert!(candidates >= 1, "--candidates must be >= 1");
+    // hnsw_rs requires ef_search >= the requested neighbour count (it internally
+    // clamps ef = max(ef, knbn)). An --ef-search below --top-k would otherwise be
+    // silently bumped, flattening an ef sweep at the low end. Clamp explicitly +
+    // warn so the sweep stays meaningful and the recorded ef matches what ran.
+    let ef_search = if ef_search < top_k {
+        eprintln!(
+            "warning: --ef-search {ef_search} < --top-k {top_k}; clamping ef_search to {top_k} \
+             (hnsw_rs requires ef >= k)"
+        );
+        top_k
+    } else {
+        ef_search
+    };
 
     Config {
         cache_dir,
@@ -1040,7 +1053,10 @@ fn run_hnsw(
     write_topk: bool,
     timing_writer: &mut dyn Write,
 ) {
-    let slug = "hnsw";
+    // ef in the slug so an ef-sweep does not overwrite topk/summary/timing rows
+    // (each operating point on the recall/latency frontier is recorded distinctly).
+    let slug = format!("hnsw_ef{}", cfg.ef_search);
+    let slug = slug.as_str();
     eprintln!("  building HNSW M={HNSW_M} ef_c={HNSW_EF_CONSTRUCTION} ef_s={} ({n_docs} docs) ...", cfg.ef_search);
     // DistL2 (not DistDot): embeddings are unit-normalized, so min-L2 ≡ max-dot ≡
     // max-cosine — identical neighbors — but DistL2 avoids anndists' DistDot
