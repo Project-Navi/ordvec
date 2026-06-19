@@ -18,7 +18,7 @@ any migration note.
 
 | Surface | Default features | Stable default-off features | Optional dependency features | Experimental/internal features |
 | --- | --- | --- | --- | --- |
-| `ordvec` | none | none | none | `experimental` exposes `MultiBucketBitmap`; `test-utils` is repo-test-only and has no public stability promise. |
+| `ordvec` | none | `serde` derives `Serialize`/`Deserialize` for `SearchResults` only | `serde` | `experimental` exposes `MultiBucketBitmap`; `test-utils` is repo-test-only and has no public stability promise. |
 | `ordvec-manifest` | none | none | `cli`, `sqlite`, `sqlite-bundled` | none |
 | `ordvec-python` | n/a | n/a | n/a | n/a |
 | `ordvec-manifest-python` | n/a | n/a | n/a | n/a |

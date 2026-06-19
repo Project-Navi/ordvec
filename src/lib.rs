@@ -305,11 +305,23 @@ pub fn validate_candidate_ids(candidates: &[u32], n_vectors: usize) -> Result<()
 /// exposing the flat buffers as the stable representation is the trade-off for
 /// that zero-copy interop.
 #[must_use = "search runs the full scan to produce these results; dropping them discards that work"]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SearchResults {
     pub scores: Vec<f32>,
     pub indices: Vec<i64>,
     pub nq: usize,
     pub k: usize,
+}
+
+impl fmt::Debug for SearchResults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SearchResults")
+            .field("nq", &self.nq)
+            .field("k", &self.k)
+            .field("scores_len", &self.scores.len())
+            .field("indices_len", &self.indices.len())
+            .finish()
+    }
 }
 
 impl SearchResults {

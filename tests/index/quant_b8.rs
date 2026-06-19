@@ -117,7 +117,7 @@ fn b124_constructors_are_always_full_capability() {
 fn b8_new_panics_for_non_256_aligned_dim_directing_to_new_asymmetric() {
     let res = std::panic::catch_unwind(|| RankQuant::new(384, 8));
     assert!(res.is_err(), "new(384, 8) must panic (384 % 256 != 0)");
-    let payload = res.err().expect("panic payload present");
+    let payload = res.expect_err("panic payload present");
     let msg = *payload
         .downcast::<String>()
         .expect("panic payload should be a String");

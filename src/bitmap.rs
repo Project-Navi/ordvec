@@ -56,6 +56,18 @@ pub struct Bitmap {
     bitmaps: Vec<u64>,
 }
 
+impl std::fmt::Debug for Bitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes_per_vector = self.qwords_per_vec * std::mem::size_of::<u64>();
+        f.debug_struct("Bitmap")
+            .field("dim", &self.dim)
+            .field("n_top", &self.n_top)
+            .field("n_vectors", &self.n_vectors)
+            .field("bytes_per_vector", &bytes_per_vector)
+            .finish()
+    }
+}
+
 impl Bitmap {
     pub fn validate_params(dim: usize, n_top: usize) -> Result<(), OrdvecError> {
         if dim == 0 {

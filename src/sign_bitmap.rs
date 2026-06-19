@@ -98,6 +98,17 @@ pub struct SignBitmap {
     bitmaps: Vec<u64>,
 }
 
+impl std::fmt::Debug for SignBitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes_per_vector = self.qwords_per_vec * std::mem::size_of::<u64>();
+        f.debug_struct("SignBitmap")
+            .field("dim", &self.dim)
+            .field("n_vectors", &self.n_vectors)
+            .field("bytes_per_vector", &bytes_per_vector)
+            .finish()
+    }
+}
+
 impl SignBitmap {
     pub fn validate_dim(dim: usize) -> Result<(), OrdvecError> {
         if dim == 0 {
@@ -1073,8 +1084,8 @@ mod tests {
     fn load_rejects_bad_magic() {
         let tmp = std::env::temp_dir().join("ordvec_sign_bitmap_bad_magic.tvsb");
         std::fs::write(&tmp, b"BAD!\x01\x00\x00\x01\x00\x00\x00\x00\x00").expect("write tmp");
-        // SignBitmap does not derive Debug (matches the convention of
-        // other rank-mode types), so unwrap_err / expect_err do not apply;
+        // SignBitmap implements a params-only Debug that intentionally avoids
+        // dumping packed buffers, so keep this explicit match for the error arm;
         // use a match to inspect the Err arm instead.
         match SignBitmap::load(&tmp) {
             Ok(_) => {
