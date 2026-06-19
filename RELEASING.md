@@ -246,6 +246,8 @@ filename. Until a record is updated, the corresponding gated publish fails
      `*.intoto.jsonl` all present);
    - `gh attestation verify <file> -R Fieldnote-Echo/ordvec` on a downloaded
      artifact;
+   - compare the observed release assets against
+     [`docs/artifact-platform-matrix.md`](docs/artifact-platform-matrix.md);
    - for a coordinated release, the Zenodo deposit.
 
 ## Coordinated release note

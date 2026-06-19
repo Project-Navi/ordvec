@@ -261,6 +261,8 @@ The runtime dependency floor is `numpy>=2.2`.
 ### Threading / concurrency
 
 `ordvec` supports concurrent read-only/search use. Mutation is exclusive.
+The consolidated cross-language ownership and lifetime contract is in
+[`docs/bindings-safety.md`](docs/bindings-safety.md).
 
 Python search, candidate-generation, and scoring methods release the GIL and
 read NumPy inputs in place. Callers must not mutate query, corpus, candidate,
@@ -288,6 +290,10 @@ candidate slices passed to `Search` until the call returns.
   through its own package gate; use the GitHub checkout for `ordvec-ffi/`,
   `ordvec-go/`, and
   [`docs/c-api.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/c-api.md).
+- **Bindings safety and ownership contract:**
+  [`docs/bindings-safety.md`](docs/bindings-safety.md)
+- **Artifact and platform matrix:**
+  [`docs/artifact-platform-matrix.md`](docs/artifact-platform-matrix.md)
 - **Pre-1.0 compatibility policy:**
   [`docs/compatibility-policy.md`](docs/compatibility-policy.md) defines the
   stable, experimental, repo-local sidecar, persisted-format, examples/docs,
