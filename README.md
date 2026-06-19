@@ -207,8 +207,7 @@ generation → `RankQuant` rerank) and the full mode comparison, see
 For runtimes that own their own parallelism — an embedded vector DB driving a
 bounded thread pool, or a binding releasing the GIL — ordvec exposes a
 **no-rayon** serial two-stage path so the *caller* schedules the work, with an
-**allocation-free rerank step** (`_into`, on the AVX-512/AVX2 path) for the
-steady-state hot loop:
+**allocation-free rerank step** (`_into`) for the steady-state hot loop:
 
 ```rust
 use ordvec::{RankQuant, SignBitmap, SubsetScratch};
@@ -235,12 +234,11 @@ Contract: candidates are **CSR** (`offsets.len() == nq + 1`; row `qi` is
 underfull rows — size both buffers to `nq * k.min(index.len())`. Scores, row ids,
 and the deterministic tie policy (`score desc, global row-id asc`) match the
 single-query `search_asymmetric_subset`. **Only the `_into` rerank step is
-allocation-free** — on the **AVX-512 / AVX2** SIMD path, and only on repeated
-calls of the *same* batch shape — reusing the warmed `SubsetScratch` and your
-output buffers (no per-row alloc, no whole-buffer preclear). The scalar fallback
-(no AVX2, e.g. aarch64) allocates a per-query scoring LUT. Stage 1
-(`top_m_candidates_batched_serial_csr`) also allocates a fresh `CandidateBatch`
-each call. Neither primitive enters rayon —
+allocation-free** — SIMD or scalar — on repeated calls of the *same* batch
+shape, reusing the warmed `SubsetScratch` and your output buffers (no per-row
+alloc, no scalar-LUT alloc, no whole-buffer preclear). Stage 1
+(`top_m_candidates_batched_serial_csr`) still allocates a fresh
+`CandidateBatch` each call. Neither primitive enters rayon —
 partition the query batch and call `_into` once per worker range from your own
 pool. A focused decomposition benchmark lives in
 [`examples/two_stage_bench.rs`](examples/two_stage_bench.rs).
