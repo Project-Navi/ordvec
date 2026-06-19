@@ -1,10 +1,11 @@
 name: OpenHands PR Review
 
-# Automated and on-demand review. This workflow uses pull_request_target so the
-# OpenHands agent can post PR review comments through GitHub Actions.
+# Label-triggered review. This workflow uses pull_request_target so the
+# OpenHands agent can post PR review comments through GitHub Actions, but it
+# only receives secrets after a maintainer applies `review-this`.
 on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] on-demand label/reviewer gate; secrets are not exposed on PR-open/synchronize
-    types: [opened, labeled, ready_for_review, review_requested]
+    types: [labeled]
 
 permissions:
   contents: read
@@ -16,17 +17,12 @@ concurrency:
 jobs:
   pr-review:
     name: openhands PR review
-    if: |
-      (github.event.action == 'opened' && github.event.pull_request.draft == false) ||
-      github.event.action == 'ready_for_review' ||
-      (github.event.action == 'labeled' && github.event.label.name == 'review-this') ||
-      (github.event.action == 'review_requested' && github.event.requested_reviewer.login == 'openhands-agent')
+    if: github.event.label.name == 'review-this'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
-      issues: write
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
