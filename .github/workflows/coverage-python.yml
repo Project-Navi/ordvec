@@ -10,7 +10,8 @@ name: coverage-python
 # line. Informational like the core coverage job: no floor yet (the FFI glue
 # has guard branches unreachable on 64-bit, e.g. the usize-overflow arms), and
 # fail_ci_if_error is false so a failed or absent upload never blocks a PR.
-# The upload runs without credentials (supported for public repos).
+# The upload uses OIDC so Codecov authenticates the current GitHub repository
+# identity after transfers instead of depending on a repo-token slug.
 on:
   push:
     branches: [main]
@@ -42,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write # authenticate Codecov upload to the current repo via OIDC
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -85,3 +87,4 @@ jobs:
           files: binding-lcov.info
           flags: python-binding
           fail_ci_if_error: false
+          use_oidc: true

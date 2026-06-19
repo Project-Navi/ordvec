@@ -7,6 +7,7 @@
 #
 #   @Fieldnote-Echo   — repository owner (admin)
 #   @project-navi-bot — write collaborator
+#   @toadkicker       — write collaborator
 
 # Default owners for everything in the repo.
-* @Fieldnote-Echo @project-navi-bot
+* @Fieldnote-Echo @project-navi-bot @toadkicker

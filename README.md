@@ -501,6 +501,10 @@ zero-system-dependency crate.
 is credited as the project it grew within, with thanks; ordvec's
 development history is in this repository's git log.
 
+The ordvec project is jointly maintained by
+[@Project-Navi](https://github.com/Project-Navi) and
+[@Baur-Software](https://github.com/Baur-Software).
+
 ## Acknowledgements
 
 Thanks to Todd Baur ([@toadkicker](https://github.com/toadkicker)) for the

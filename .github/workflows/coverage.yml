@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      id-token: write # authenticate Codecov upload to the current repo via OIDC
     env:
       SDE_VERSION: sde-external-10.8.0-2026-03-15-lin
       SDE_SHA256: 50b320cd226acef7a491f5b321fc1be3c3c7984f9e27a456e64894b5b0979dd3
@@ -110,4 +111,4 @@ jobs:
         with:
           files: lcov.info
           fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
