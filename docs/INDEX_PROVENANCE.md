@@ -50,7 +50,7 @@ loading. The lockstep `ordvec-manifest` crate provides a sidecar verifier for
 that pre-load step:
 
 ```sh
-cargo run -p ordvec-manifest --features cli -- verify --manifest path/to/index.manifest.json
+cargo run -p ordvec-manifest -- verify --manifest path/to/index.manifest.json
 ```
 
 The `create` command emits default-verifiable manifests by default: artifact

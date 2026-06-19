@@ -11,10 +11,10 @@ index files, decide deployment trust policy, estimate encoder geometry, compute
 calibration statistics, or change the C ABI.
 
 `ordvec-manifest` is versioned in lockstep with the core `ordvec` crate. From a
-workspace checkout, use the optional CLI with
-`cargo run -p ordvec-manifest --features cli --`; from a published release,
-install the binary with `cargo install ordvec-manifest --features cli`. The
-library default feature set is empty and does not depend on `clap`.
+published release, install the binary with `cargo install ordvec-manifest`.
+From a workspace checkout, use the CLI with `cargo run -p ordvec-manifest --`.
+Library-only consumers that do not need the CLI can depend on the crate with
+`default-features = false`.
 
 ```sh
 ordvec-manifest create \
@@ -28,7 +28,7 @@ ordvec-manifest verify --manifest path/to/index.manifest.json
 ```
 
 From a workspace checkout, prefix the same commands with
-`cargo run -p ordvec-manifest --features cli --`.
+`cargo run -p ordvec-manifest --`.
 
 The schema version is `ordvec.index_manifest.v1`. Relative paths resolve from
 the manifest file's directory, absolute paths are rejected by default, and
@@ -94,14 +94,14 @@ fn write_bundle(
 Then create and verify a manifest that binds both files:
 
 ```sh
-cargo run -p ordvec-manifest --features cli -- create \
+cargo run -p ordvec-manifest -- create \
   --index docs.odb/index.ovrq \
   --row-id-is-identity \
   --aux app.ids=docs.odb/ids.bin \
   --embedding-model bge-small-en-v1.5 \
   --out docs.odb/manifest.json
 
-cargo run -p ordvec-manifest --features cli -- verify \
+cargo run -p ordvec-manifest -- verify \
   --manifest docs.odb/manifest.json \
   --json
 ```

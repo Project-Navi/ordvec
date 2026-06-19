@@ -455,6 +455,10 @@ def check_release_compatibility_sync() -> None:
         if rust_version != core_msrv:
             fail(f"{path}: package.rust-version is {rust_version}, expected {core_msrv}")
 
+    fuzz_rust_version = package_rust_version("fuzz/Cargo.toml")
+    if fuzz_rust_version != core_msrv:
+        fail(f"fuzz/Cargo.toml: package.rust-version is {fuzz_rust_version}, expected {core_msrv}")
+
     readme = read_text("README.md")
     minor_req = semver_minor_requirement(core_version)
     quickstart = re.search(r"(?ms)^## Quickstart\b.*?```toml\n(?P<block>.*?)\n```", readme)
@@ -532,6 +536,42 @@ def check_registry_metadata_parity() -> None:
         docs_rs = mapping(docs.get("rs"), f"{path}: package.metadata.docs.rs")
         if docs_rs.get("all-features") is not False:
             fail(f"{path}: package.metadata.docs.rs.all-features must be false")
+        if path == "ordvec-manifest/Cargo.toml":
+            features = string_sequence(
+                docs_rs.get("features"), f"{path}: package.metadata.docs.rs.features"
+            )
+            if features != ["cli", "sqlite-bundled"]:
+                fail(
+                    f"{path}: package.metadata.docs.rs.features is {features!r}, "
+                    "expected ['cli', 'sqlite-bundled']"
+                )
+        elif "features" in docs_rs:
+            fail(f"{path}: package.metadata.docs.rs.features must not be set")
+
+
+def check_manifest_cli_defaults() -> None:
+    manifest = load_toml("ordvec-manifest/Cargo.toml")
+    features = mapping(manifest.get("features"), "ordvec-manifest/Cargo.toml: features")
+    default_features = string_sequence(
+        features.get("default"), "ordvec-manifest/Cargo.toml: features.default"
+    )
+    if default_features != ["cli"]:
+        fail("ordvec-manifest/Cargo.toml: default features must be ['cli']")
+    cli_features = string_sequence(
+        features.get("cli"), "ordvec-manifest/Cargo.toml: features.cli"
+    )
+    if "dep:clap" not in cli_features:
+        fail("ordvec-manifest/Cargo.toml: features.cli must enable dep:clap")
+
+    text = read_text("ordvec-manifest/Cargo.toml")
+    if 'name = "ordvec-manifest"' not in text or 'required-features = ["cli"]' not in text:
+        fail("ordvec-manifest/Cargo.toml: binary must remain gated on the cli feature")
+
+    readme = read_text("ordvec-manifest/README.md")
+    if "cargo install ordvec-manifest --features cli" in readme:
+        fail("ordvec-manifest/README.md: install instructions must not require --features cli")
+    if "cargo install ordvec-manifest" not in readme:
+        fail("ordvec-manifest/README.md: must document default cargo install")
 
 
 def check_publication_model() -> None:
@@ -1933,6 +1973,7 @@ def main() -> None:
     check_release_version_sync()
     check_release_compatibility_sync()
     check_registry_metadata_parity()
+    check_manifest_cli_defaults()
     check_publication_model()
     check_python_package_metadata()
     check_release_docs_include_manifest_pypi_lane()

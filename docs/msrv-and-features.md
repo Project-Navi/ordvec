@@ -9,9 +9,9 @@ target inventory lives in [artifact-platform-matrix.md](artifact-platform-matrix
 Current MSRV: Rust 1.89.
 
 The MSRV applies to all Rust crates in this repository: `ordvec`,
-`ordvec-manifest`, `ordvec-python`, `ordvec-manifest-python`, and
-`ordvec-ffi`. The CI MSRV job, each `Cargo.toml` `rust-version`, and the
-README MSRV badge/section must stay synchronized. Raising the MSRV is a
+`ordvec-manifest`, `ordvec-python`, `ordvec-manifest-python`, `ordvec-ffi`, and
+the standalone `ordvec-fuzz` crate. The CI MSRV job, each `Cargo.toml` `rust-version`,
+and the README MSRV badge/section must stay synchronized. Raising the MSRV is a
 minor-version compatibility change and release notes must state the reason and
 any migration note.
 
@@ -20,7 +20,7 @@ any migration note.
 | Surface | Default features | Stable default-off features | Optional dependency features | Experimental/internal features |
 | --- | --- | --- | --- | --- |
 | `ordvec` | none | `serde` derives `Serialize`/`Deserialize` for `SearchResults` only | `serde` | `experimental` exposes `MultiBucketBitmap`; `test-utils` is repo-test-only and has no public stability promise. |
-| `ordvec-manifest` | none | none | `cli`, `sqlite`, `sqlite-bundled` | none |
+| `ordvec-manifest` | `cli` | none | `cli`, `sqlite`, `sqlite-bundled` | none |
 | `ordvec-python` | n/a | n/a | n/a | n/a |
 | `ordvec-manifest-python` | n/a | n/a | n/a | n/a |
 | `ordvec-ffi` | none | none | none | none |
@@ -31,10 +31,11 @@ built with that target feature, and other targets use the scalar fallback.
 Host systems should not need BLAS, LAPACK, `ndarray`, `faer`, or a native graph
 library to embed the core crate.
 
-`ordvec-manifest` keeps its library default feature set empty. The `cli`
-feature enables the `ordvec-manifest` binary and its `clap` dependency. The
-`sqlite` feature enables the local cache/audit subcommands; `sqlite-bundled`
-adds the bundled SQLite build through `rusqlite`.
+`ordvec-manifest` enables `cli` by default so `cargo install
+ordvec-manifest` installs the command-line utility without extra flags. Library
+consumers that do not need the CLI can use `default-features = false` to avoid
+the `clap` dependency. The `sqlite` feature enables the local cache/audit
+subcommands; `sqlite-bundled` adds the bundled SQLite build through `rusqlite`.
 
 ## Change Policy
 

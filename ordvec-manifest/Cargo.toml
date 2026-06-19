@@ -14,6 +14,7 @@ categories = ["algorithms", "command-line-utilities", "data-structures"]
 
 [package.metadata.docs.rs]
 all-features = false
+features = ["cli", "sqlite-bundled"]
 
 [lib]
 name = "ordvec_manifest"
@@ -39,7 +40,7 @@ uuid = { version = "1.23.2", features = ["v4"] }
 tempfile = "3.27.0"
 
 [features]
-default = []
+default = ["cli"]
 cli = ["dep:clap"]
 sqlite = ["dep:rusqlite"]
 sqlite-bundled = ["sqlite", "rusqlite/bundled"]
