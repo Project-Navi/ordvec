@@ -986,8 +986,9 @@ fn run_hnsw(
     let build_seconds = t0.elapsed().as_secs_f64();
     eprintln!("  build done in {build_seconds:.2}s");
 
-    // HNSW graph size is implementation-internal; report the stored-vector bytes
-    // (full float) as the index footprint, matching the dense baseline accounting.
+    // HNSW graph size is implementation-internal to hnsw_rs; the numeric field
+    // reports stored float-vector bytes only. Public docs label this as
+    // "4096 B + graph" so the side structure is not silently counted as zero.
     let bytes_per_vector = dim * 4;
     let index_total_mib = (n_docs * bytes_per_vector) as f64 / 1024.0 / 1024.0;
     let warmup = 5.min(n_queries);

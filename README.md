@@ -34,9 +34,9 @@ append-friendly, and graph-optional.
 
 > **ordvec matches dense retrieval quality within BEIR qrel noise at 8–16× smaller
 > vector storage — with no training and no graph build — and sub-millisecond
-> single-query retrieval on 171K Harrier embeddings. A threaded HNSW graph still
-> wins highly-parallel batched serving; ordvec wins the lightweight
-> compressed-substrate lane.**
+> single-query retrieval on 171K Harrier embeddings. In the committed
+> default-method run, a threaded HNSW graph still wins highly-parallel batched
+> serving; ordvec wins the lightweight compressed-substrate lane.**
 
 On **trec-covid** (171,332 documents, the public [BEIR](https://github.com/beir-cellar/beir)
 benchmark) with **Harrier-Q8** 1024-d embeddings, ordvec's two-stage retrieval
@@ -130,9 +130,12 @@ Two further paths, for callers who need them:
   type: an optional b=2 FastScan kernel (block-32 nibble/PQ-LUT, AVX-512 → AVX2
   → scalar dispatch) for absolute-minimum stage-1 scan latency, at 2× the
   RankQuant b=2 footprint (`dim/2` bytes/doc) and 8-bit LUT scoring noise. It
-  persists to `.ovfs` (magic `OVFS`). Reach for it only when scan latency at
-  b=2 is the binding constraint; the headline retrieval surface is still
-  `RankQuant` / `Bitmap` / two-stage.
+  persists to `.ovfs` (magic `OVFS`) through direct
+  `RankQuantFastscan::{write,load}` calls. In v0.5.0, `.ovfs` is not yet part
+  of the `probe_index_metadata()` / `ordvec-manifest` v1 contract; bind it with
+  an application-owned digest or attestation if it crosses a trust boundary.
+  Reach for it only when scan latency at b=2 is the binding constraint; the
+  headline retrieval surface is still `RankQuant` / `Bitmap` / two-stage.
 - **`MultiBucketBitmap`** *(behind `--features experimental`)* — the
   multi-bucket bilinear-overlap probe behind the research-side decomposition;
   an algebraic scaffold, not the top-bucket theorem surface or a production
@@ -326,6 +329,12 @@ thread count, no Python/FFI in the hot path:
 - **`hnsw`** — pure-Rust HNSW (`hnsw_rs`, M=32, ef_construction=200,
   ef_search=128) — the portable stand-in for the C++ hnswlib.
 
+The committed figures use the default method set in `Makefile`. They do not
+yet include the newer `sign-rq2-threaded` probe row. Read HNSW byte labels as
+stored float-vector bytes plus an implementation-owned graph side structure;
+the tables and plot generator now spell that caveat out rather than treating
+the graph as zero.
+
 Reproduce end-to-end (downloads the data, embeds, runs every method, renders the
 figures, and emits the summary tables transcribed below):
 
@@ -347,12 +356,12 @@ run; regenerate your own with `make benchmark-beir`.
 | Dataset | Method | Bytes/vec | nDCG@10 | Δ vs flat (95% CI) |
 |---|---|--:|--:|---|
 | scifact (5,183) | `flat` (exact) | 4096 | 0.7551 | (baseline) |
-| | `hnsw` M=32 | 4096 | 0.7554 | +0.0003 * |
+| | `hnsw` M=32 | 4096 + graph | 0.7554 | +0.0003 * |
 | | **ordvec rq4** | **512** | **0.7549** | −0.0003 * |
 | | ordvec rq2 | 256 | 0.7471 | −0.0080 * |
 | | ordvec sign→rq2 | 384 | 0.7471 | −0.0080 * |
 | trec-covid (171,332) | `flat` (exact) | 4096 | 0.7574 | (baseline) |
-| | `hnsw` M=32 | 4096 | 0.7555 | −0.0019 * |
+| | `hnsw` M=32 | 4096 + graph | 0.7555 | −0.0019 * |
 | | ordvec rq2 | 256 | 0.7632 | +0.0057 * |
 | | **ordvec rq4** | **512** | **0.7636** | +0.0062 * |
 | | ordvec sign→rq2 | 384 | 0.7638 | +0.0064 * |
@@ -386,6 +395,9 @@ field compresses; `hnsw` threads best:
 ![threaded throughput bars](https://raw.githubusercontent.com/Fieldnote-Echo/ordvec/main/benchmarks/beir/figures/bars_threaded.png)
 
 `hnsw` 4.8× vs `flat`, ordvec `bitmap→rq2` 3.7×, `rq2` 2.5×, `sign→rq2` 2.1×.
+This committed chart uses the default `sign-rq2` row, not the newer
+within-query-threaded `sign-rq2-threaded` probe row; regenerate public figures
+before using that probe for release claims. In this default-method view,
 **HNSW wins this regime** — by a hair on threaded throughput. The honest
 ordvec-vs-HNSW tradeoff, all from this same run (trec-covid, 171,332 docs):
 
@@ -458,17 +470,19 @@ clean-checkout kernel sanity check.
 
 ## Security: index-file trust
 
-The on-disk formats (`.ovr` / `.ovrq` / `.ovbm` / `.ovsb` / `.ovfs`; legacy
-`.tvr` / `.tvrq` / `.tvbm` / `.tvsb` files still load) carry **no built-in
-checksum, MAC, or signature — by design.** The loaders validate *structure*
-(magic, version, bounds, exact-length payload) but not *origin*: a
-structurally valid file can still be untrusted. If an index file crosses a
+The probe/manifest-covered on-disk formats (`.ovr` / `.ovrq` / `.ovbm` /
+`.ovsb`; legacy `.tvr` / `.tvrq` / `.tvbm` / `.tvsb` files still load) carry
+**no built-in checksum, MAC, or signature — by design.** The loaders validate
+*structure* (magic, version, bounds, exact-length payload) but not *origin*: a
+structurally valid file can still be untrusted. `RankQuantFastscan` also writes
+and loads `.ovfs` directly, but in v0.5.0 that format is not yet covered by
+`probe_index_metadata()` or `ordvec-manifest` v1. If an index file crosses a
 trust boundary (network transfer, shared storage), verify it before loading.
-`ordvec-manifest` binds an index file to a JSON manifest by SHA-256, header
-metadata, row identity, named auxiliary sidecars, and attestation shape checks.
-It does not sign artifacts, manage keys, or decide deployment trust policy. No
-in-format crypto is shipped because it would add key management the library
-can't own. See
+`ordvec-manifest` binds supported index files to a JSON manifest by SHA-256,
+header metadata, row identity, named auxiliary sidecars, and attestation shape
+checks. It does not sign artifacts, manage keys, or decide deployment trust
+policy. No in-format crypto is shipped because it would add key management the
+library can't own. See
 [`docs/PERSISTED_FORMAT.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/PERSISTED_FORMAT.md),
 [`docs/INDEX_PROVENANCE.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/INDEX_PROVENANCE.md),
 and [`THREAT_MODEL.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/THREAT_MODEL.md)

@@ -62,7 +62,10 @@ The `experimental` feature is a default-off research surface. Today it exposes
 `MultiBucketBitmap`; it is not patch-stable before 1.0.
 
 `RankQuantFastscan` is a stable, public (but specialized) type, covered by the
-normal pre-1.0 compatibility policy above. `#[doc(hidden)]` exports such as
+normal pre-1.0 compatibility policy above. Its direct `.ovfs`
+`RankQuantFastscan::{write,load}` path is supported, but in v0.5.0 `.ovfs` is
+not yet part of the primitive persisted-format, `probe_index_metadata()`, or
+`ordvec-manifest` v1 contract. `#[doc(hidden)]` exports such as
 `search_asymmetric_byte_lut` are reachable for internal benchmarks and parity
 tests, but are not part of the stable default API.
 
@@ -130,6 +133,11 @@ types:
 Legacy files using the old turbovec-era magics (`TVR1`, `TVRQ`, `TVBM`, `TVSB`
 and extensions `.tvr`, `.tvrq`, `.tvbm`, `.tvsb`) are still accepted by current
 loaders. Writers no longer emit those magics.
+
+`RankQuantFastscan` writes and loads `.ovfs` / `OVFS` directly, but that
+specialized format is not included in the primitive probe/manifest contract for
+v0.5.0. Promoting `.ovfs` into `probe_index_metadata()` and `ordvec-manifest`
+requires an explicit future compatibility review.
 
 Patch releases should keep valid files from the same minor series loadable.
 Loader hardening may reject malformed files, forged sizes, trailing bytes, bad

@@ -20,7 +20,7 @@
 # --- core ---
 numpy>=1.26.0
 scipy>=1.11.0
-requests>=2.32.4          # GHSA-9hjg-9r4m-mvj7 (.netrc leak) + all older requests CVEs
+requests>=2.33.0          # GHSA-gc5v-m9x4-r6x2 + older requests CVEs
 tqdm>=4.66.3              # CVE-2024-34062
 pandas>=2.2.0
 tabulate>=0.9.0

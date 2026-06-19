@@ -70,7 +70,7 @@ against the host CUDA toolkit (`CMAKE_ARGS="-DGGML_CUDA=on"`; override
 | Method            | Bytes/vec | Description |
 |-------------------|----------:|-------------|
 | `flat`            | 4096      | Exact inner product (== FAISS `IndexFlatIP` math), pure-Rust SIMD GEMM. **Baseline, not ground truth.** |
-| `hnsw`            | 4096      | Pure-Rust HNSW (`hnsw_rs`, M=32, ef=128) — portable stand-in for C++ hnswlib. |
+| `hnsw`            | 4096 + graph | Pure-Rust HNSW (`hnsw_rs`, M=32, ef=128) — portable stand-in for C++ hnswlib. The graph is implementation-owned side storage, not included in the 4096-byte float-vector payload. |
 | `rq2`             | 256       | RankQuant 2 bits/dim, asymmetric float-query LUT scan. |
 | `rq4`             | 512       | RankQuant 4 bits/dim, asymmetric float-query LUT scan. |
 | `bitmap-rq2`      | 384       | Two-stage: Bitmap candidate-gen → RankQuant-2 rerank. |
@@ -79,6 +79,10 @@ against the host CUDA toolkit (`CMAKE_ARGS="-DGGML_CUDA=on"`; override
 Thread/batch knobs (per `beir-bench`): `--threads N` pins query latency to a
 rayon pool of N threads (index build still uses all cores); `--max-docs M`
 sub-samples the corpus for the scaling sweep; `--batch` sets the matched batch.
+The committed README figures use the default method set from the top-level
+`Makefile`; they do not yet include the newer `sign-rq2-threaded` probe row.
+Regenerate and review the public tables before using that probe for release
+claims.
 
 ## Cache layout
 

@@ -59,10 +59,13 @@ SCALE_SIZES := 1000 3000 10000 30000 100000 170000
 
 # ── methods (all measured in the single Rust process) ─────────────────────────
 #   flat       exact inner product (== FAISS IndexFlatIP math), 4096 B/vec
-#   hnsw       pure-Rust HNSW M=32 (Malkov–Yashunin), 4096 B/vec
+#   hnsw       pure-Rust HNSW M=32 (Malkov–Yashunin), 4096 B/vec + graph
 #   rq2/rq4    ordvec RankQuant b=2 / b=4 (256 / 512 B/vec)
 #   bitmap-rq2 ordvec Bitmap → RankQuant b=2 (two-stage)
 #   sign-rq2   ordvec SignBitmap → RankQuant b=2 (two-stage)
+# The committed README figures use this default set; they intentionally do not
+# include the newer sign-rq2-threaded probe row until the public artifacts are
+# regenerated and reviewed together.
 BENCH_METHODS := flat,hnsw,rq2,rq4,bitmap-rq2,sign-rq2
 
 # ── encoder (canonical: GGUF Q8_0 via llama-cpp-python / CUDA) ────────────────

@@ -48,6 +48,16 @@ fail() { echo "::error::signed-release invariant violated: $*"; exit 1; }
 wf=".github/workflows/release.yml"
 [ -f "$wf" ] || fail "$wf: workflow file not found"
 
+matches_regex() {
+  local text="$1" pattern="$2"
+  grep -qE -- "$pattern" <<<"$text"
+}
+
+contains_literal() {
+  local text="$1" needle="$2"
+  grep -q -- "$needle" <<<"$text"
+}
+
 # Extract the body of a job (from `  <name>:` to the next 2-space-indented job key).
 job_body() {
   local jobname="$1" start end
@@ -64,12 +74,14 @@ job_needs() {
   local body escaped
   body="$(job_body "$jobname")"
   escaped="$(printf '%s' "$needed" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
-  printf '%s\n' "$body" | grep -qE "(^[[:space:]]+needs:[[:space:]]*\\[[^]]*(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|$)|^[[:space:]]+-[[:space:]]+${escaped}[[:space:]]*$)"
+  matches_regex "$body" "(^[[:space:]]+needs:[[:space:]]*\\[[^]]*(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|$)|^[[:space:]]+-[[:space:]]+${escaped}[[:space:]]*$)"
 }
 
 job_line() {
-  local jobname="$1" pattern="$2"
-  job_body "$jobname" | grep -nE "$pattern" | head -1 | cut -d: -f1
+  local jobname="$1" pattern="$2" body line
+  body="$(job_body "$jobname")"
+  line="$(grep -nE -m 1 -- "$pattern" <<<"$body" || true)"
+  [ -n "$line" ] && printf '%s\n' "${line%%:*}"
 }
 
 require_job_line() {
@@ -112,14 +124,14 @@ done
 body_draft="$(job_body release-assets-draft)"
 github_repo_env_re='^[[:space:]]+GH_REPO:[[:space:]]*"?\$\{\{[[:space:]]*github\.repository[[:space:]]*\}\}"?[[:space:]]*$'
 for ext in '\.crate' '\.whl' '\.tar\.gz' '\.sigstore\.json' '\.intoto\.jsonl'; do
-  printf '%s\n' "$body_draft" | grep -qE "dist/\*${ext}([^a-zA-Z]|$)" \
+  matches_regex "$body_draft" "dist/\*${ext}([^a-zA-Z]|$)" \
     || fail "release-assets-draft must \`gh release upload\` dist/*$(printf '%s' "$ext" | sed 's/\\//g')"
 done
-printf '%s\n' "$body_draft" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
+matches_regex "$body_draft" 'name:[[:space:]]*pypi-canonical-dist' \
   || fail "release-assets-draft must upload canonical Python dist, not raw rebuilt wheel/sdist artifacts"
 job_downloads_artifact_to_path release-assets-draft dist-crate dist \
   || fail "release-assets-draft must download the core dist-crate artifact into dist"
-printf '%s\n' "$body_draft" | grep -qE "$github_repo_env_re" \
+matches_regex "$body_draft" "$github_repo_env_re" \
   || fail "release-assets-draft must set \`GH_REPO: \${{ github.repository }}\` (no checkout, so gh release upload needs explicit repo context)"
 
 body_manifest_draft="$(job_body release-manifest-assets-draft)"
@@ -139,17 +151,17 @@ job_downloads_artifact_to_path release-manifest-assets-draft sigstore-bundle-man
   || fail "release-manifest-assets-draft must download the manifest Sigstore bundle into dist"
 job_downloads_artifact_to_path release-manifest-assets-draft pypi-manifest-canonical-dist dist \
   || fail "release-manifest-assets-draft must download the canonical manifest Python dist into dist"
-printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.crate([^a-zA-Z]|$)' \
+matches_regex "$body_manifest_draft" 'dist/\*\.crate([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.crate"
-printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.whl([^a-zA-Z]|$)' \
+matches_regex "$body_manifest_draft" 'dist/\*\.whl([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.whl"
-printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.tar\.gz([^a-zA-Z]|$)' \
+matches_regex "$body_manifest_draft" 'dist/\*\.tar\.gz([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.tar.gz"
-printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.sigstore\.json([^a-zA-Z]|$)' \
+matches_regex "$body_manifest_draft" 'dist/\*\.sigstore\.json([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.sigstore.json"
-printf '%s\n' "$body_manifest_draft" | grep -qE 'dist/\*\.intoto\.jsonl([^a-zA-Z]|$)' \
+matches_regex "$body_manifest_draft" 'dist/\*\.intoto\.jsonl([^a-zA-Z]|$)' \
   || fail "release-manifest-assets-draft must upload dist/*.intoto.jsonl"
-printf '%s\n' "$body_manifest_draft" | grep -qE "$github_repo_env_re" \
+matches_regex "$body_manifest_draft" "$github_repo_env_re" \
   || fail "release-manifest-assets-draft must set \`GH_REPO: \${{ github.repository }}\`"
 
 # ----------------------------------------------------------------------
@@ -157,10 +169,10 @@ printf '%s\n' "$body_manifest_draft" | grep -qE "$github_repo_env_re" \
 #     that; un-drafting here would re-introduce the public-release-before-
 #     publish failure mode).
 # ----------------------------------------------------------------------
-if printf '%s\n' "$body_draft" | grep -qE 'gh release edit.*--draft=false'; then
+if matches_regex "$body_draft" 'gh release edit.*--draft=false'; then
   fail "release-assets-draft must NOT un-draft the Release (un-drafting belongs in publish-github-release, after all registry publishes succeed)"
 fi
-if printf '%s\n' "$body_manifest_draft" | grep -qE 'gh release edit.*--draft=false'; then
+if matches_regex "$body_manifest_draft" 'gh release edit.*--draft=false'; then
   fail "release-manifest-assets-draft must NOT un-draft the Release (un-drafting belongs in publish-github-release, after all registry publishes succeed)"
 fi
 
@@ -169,42 +181,42 @@ fi
 #     (NOT a SHA — SLSA trust model requires the tag for its self-verification)
 # ----------------------------------------------------------------------
 prov="$(job_body provenance)"
-printf '%s\n' "$prov" | grep -qE 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
+matches_regex "$prov" 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
   || fail "provenance must \`uses: slsa-framework/slsa-github-generator/.../generator_generic_slsa3.yml@vX.Y.Z\` (tag-pinned per SLSA trust model)"
 manifest_prov="$(job_body manifest-provenance)"
-printf '%s\n' "$manifest_prov" | grep -qE 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
+matches_regex "$manifest_prov" 'uses:[[:space:]]*slsa-framework/slsa-github-generator/.+/generator_generic_slsa3\.yml@v[0-9]+\.[0-9]+\.[0-9]+' \
   || fail "manifest-provenance must \`uses: slsa-framework/slsa-github-generator/.../generator_generic_slsa3.yml@vX.Y.Z\` (tag-pinned per SLSA trust model)"
 
 # ----------------------------------------------------------------------
 # (5) provenance must have `upload-assets: false` — asset-staging jobs, not
 #     SLSA generator workflows, own Release uploads.
 # ----------------------------------------------------------------------
-printf '%s\n' "$prov" | grep -qE '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
+matches_regex "$prov" '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
   || fail "provenance must set \`upload-assets: false\` (release-assets-draft uploads the collected .intoto.jsonl from the workflow-artifact path)"
-printf '%s\n' "$manifest_prov" | grep -qE '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
+matches_regex "$manifest_prov" '^[[:space:]]+upload-assets:[[:space:]]*false[[:space:]]*$' \
   || fail "manifest-provenance must set \`upload-assets: false\` (release-manifest-assets-draft uploads the collected .intoto.jsonl from the workflow-artifact path)"
 
 # ----------------------------------------------------------------------
 # (6) provenance-name MUST end in `.intoto.jsonl` — Scorecard's provenance
 #     probe is a pure filename-suffix match.
 # ----------------------------------------------------------------------
-printf '%s\n' "$prov" | grep -qE '^[[:space:]]+provenance-name:.*\.intoto\.jsonl[[:space:]]*$' \
+matches_regex "$prov" '^[[:space:]]+provenance-name:.*\.intoto\.jsonl[[:space:]]*$' \
   || fail "provenance must set \`provenance-name: <name>.intoto.jsonl\` (Scorecard Signed-Releases provenance probe matches this suffix only)"
-printf '%s\n' "$manifest_prov" | grep -qE '^[[:space:]]+provenance-name:.*ordvec-manifest-.*\.intoto\.jsonl[[:space:]]*$' \
+matches_regex "$manifest_prov" '^[[:space:]]+provenance-name:.*ordvec-manifest-.*\.intoto\.jsonl[[:space:]]*$' \
   || fail "manifest-provenance must set \`provenance-name: ordvec-manifest-<version>.intoto.jsonl\`"
 
 # ----------------------------------------------------------------------
 # (7) attest job grants id-token: write + attestations: write
 # ----------------------------------------------------------------------
 att="$(job_body attest)"
-printf '%s\n' "$att" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+matches_regex "$att" '^[[:space:]]+id-token:[[:space:]]*write' \
   || fail "attest job must grant \`id-token: write\` (Sigstore OIDC signing cert)"
-printf '%s\n' "$att" | grep -qE '^[[:space:]]+attestations:[[:space:]]*write' \
+matches_regex "$att" '^[[:space:]]+attestations:[[:space:]]*write' \
   || fail "attest job must grant \`attestations: write\` (persist to the GitHub attestation store)"
 att_manifest="$(job_body attest-manifest)"
-printf '%s\n' "$att_manifest" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+matches_regex "$att_manifest" '^[[:space:]]+id-token:[[:space:]]*write' \
   || fail "attest-manifest job must grant \`id-token: write\` (Sigstore OIDC signing cert)"
-printf '%s\n' "$att_manifest" | grep -qE '^[[:space:]]+attestations:[[:space:]]*write' \
+matches_regex "$att_manifest" '^[[:space:]]+attestations:[[:space:]]*write' \
   || fail "attest-manifest job must grant \`attestations: write\` (persist to the GitHub attestation store)"
 job_needs attest-manifest build-manifest-crate \
   || fail "attest-manifest must \`needs: build-manifest-crate\`"
@@ -229,9 +241,9 @@ job_downloads_artifact_to_path combine-manifest-hash pypi-manifest-canonical-dis
 build_manifest="$(job_body build-manifest-crate)"
 job_needs build-manifest-crate publish-crate \
   || fail "build-manifest-crate must \`needs: publish-crate\` so lockstep ordvec exists on crates.io"
-printf '%s\n' "$build_manifest" | grep -qE 'cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+ordvec-manifest[[:space:]]+--locked([^[:alnum:]_-]|$)' \
+matches_regex "$build_manifest" 'cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+ordvec-manifest[[:space:]]+--locked([^[:alnum:]_-]|$)' \
   || fail "build-manifest-crate must package ordvec-manifest with Cargo registry verification"
-if printf '%s\n' "$build_manifest" | grep -q -- '--no-verify'; then
+if contains_literal "$build_manifest" '--no-verify'; then
   fail "build-manifest-crate must not use --no-verify after publish-crate"
 fi
 
@@ -240,20 +252,20 @@ fi
 # ----------------------------------------------------------------------
 for pub in publish-crate publish-pypi; do
   body="$(job_body "$pub")"
-  printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+  matches_regex "$body" '^[[:space:]]+id-token:[[:space:]]*write' \
     || fail "$pub must grant \`id-token: write\` (Trusted Publishing OIDC)"
   job_needs "$pub" release-assets-draft \
     || fail "$pub must \`needs: release-assets-draft\` (gated by attest + provenance via the draft-assets edge)"
 done
 body="$(job_body publish-manifest-crate)"
-printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+matches_regex "$body" '^[[:space:]]+id-token:[[:space:]]*write' \
   || fail "publish-manifest-crate must grant \`id-token: write\` (Trusted Publishing OIDC)"
 job_needs publish-manifest-crate release-manifest-assets-draft \
   || fail "publish-manifest-crate must \`needs: release-manifest-assets-draft\`"
 job_needs publish-manifest-crate publish-crate \
   || fail "publish-manifest-crate must \`needs: publish-crate\`"
 body="$(job_body publish-manifest-pypi)"
-printf '%s\n' "$body" | grep -qE '^[[:space:]]+id-token:[[:space:]]*write' \
+matches_regex "$body" '^[[:space:]]+id-token:[[:space:]]*write' \
   || fail "publish-manifest-pypi must grant \`id-token: write\` (Trusted Publishing OIDC)"
 job_needs publish-manifest-pypi release-manifest-assets-draft \
   || fail "publish-manifest-pypi must \`needs: release-manifest-assets-draft\`"
@@ -276,17 +288,17 @@ job_needs publish-pypi publish-crate \
 check_crate_publish_job() {
   local jobname="$1" package="$2" artifact="$3" body pre_line oidc_line publish_line post_line
   body="$(job_body "$jobname")"
-  printf '%s\n' "$body" | grep -qE 'uses:[[:space:]]*actions/download-artifact' \
+  matches_regex "$body" 'uses:[[:space:]]*actions/download-artifact' \
     || fail "$jobname must download the attested $artifact artifact (byte-identity gate)"
-  printf '%s\n' "$body" | grep -qE "name:[[:space:]]*${artifact}" \
+  matches_regex "$body" "name:[[:space:]]*${artifact}" \
     || fail "$jobname must download the artifact named \`$artifact\` (the attested .crate)"
-  printf '%s\n' "$body" | grep -qE "cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+${package}[[:space:]]+--locked" \
+  matches_regex "$body" "cargo[[:space:]]+package[[:space:]]+-p[[:space:]]+${package}[[:space:]]+--locked" \
     || fail "$jobname must re-run \`cargo package -p $package --locked\` so it can sha256-compare to the attested .crate (pre-publish gate)"
-  printf '%s\n' "$body" | grep -qE "cargo[[:space:]]+publish[[:space:]]+-p[[:space:]]+${package}[[:space:]]+--locked" \
+  matches_regex "$body" "cargo[[:space:]]+publish[[:space:]]+-p[[:space:]]+${package}[[:space:]]+--locked" \
     || fail "$jobname must run \`cargo publish -p $package --locked\`"
-  printf '%s\n' "$body" | grep -qE 'sha256sum' \
+  matches_regex "$body" 'sha256sum' \
     || fail "$jobname must sha256sum-compare the repackaged .crate vs the attested .crate before publishing"
-  printf '%s\n' "$body" | grep -qE "crates\.io/api/v1/crates/${package}|static\.crates\.io/crates/${package}" \
+  matches_regex "$body" "crates\.io/api/v1/crates/${package}|static\.crates\.io/crates/${package}" \
     || fail "$jobname must download the just-published .crate from crates.io after \`cargo publish\` (post-publish byte-identity proof; pre-publish alone cannot inspect cargo publish's internal packaging)"
 
   pre_line="$(require_job_line "$jobname" '^[[:space:]]+- name:[[:space:]]*Verify byte-identity vs the attested \.crate' 'a pre-publish byte-identity verification step')"
@@ -308,8 +320,8 @@ job_needs publish-manifest-crate publish-crate \
 manifest_pre_line="$(require_job_line publish-manifest-crate '^[[:space:]]+- name:[[:space:]]*Verify byte-identity vs the attested \.crate' 'a manifest pre-publish byte-identity verification step')"
 manifest_dry_line="$(require_job_line publish-manifest-crate '^[[:space:]]+- name:[[:space:]]*Validate manifest publish dry-run' 'a manifest publish dry-run step')"
 manifest_oidc_line="$(require_job_line publish-manifest-crate '^[[:space:]]+- name:[[:space:]]*Mint a short-lived crates\.io credential' 'a manifest OIDC credential mint step')"
-printf '%s\n' "$(job_body publish-manifest-crate)" \
-  | awk '/cargo[[:space:]]+publish/ && /ordvec-manifest/ && /--dry-run/ && /--locked/ { found = 1 } END { exit found ? 0 : 1 }' \
+awk '/cargo[[:space:]]+publish/ && /ordvec-manifest/ && /--dry-run/ && /--locked/ { found = 1 } END { exit found ? 0 : 1 }' \
+  <<<"$(job_body publish-manifest-crate)" \
   || fail "publish-manifest-crate must dry-run \`cargo publish -p ordvec-manifest --dry-run --locked\` after byte-identity and before OIDC"
 [ "$manifest_pre_line" -lt "$manifest_dry_line" ] \
   || fail "publish-manifest-crate must dry-run publish AFTER byte-identity verification"
@@ -317,33 +329,33 @@ printf '%s\n' "$(job_body publish-manifest-crate)" \
   || fail "publish-manifest-crate must dry-run publish BEFORE minting the crates.io OIDC credential"
 
 pcd="$(job_body pypi-canonical-dist)"
-printf '%s\n' "$pcd" | grep -qE 'release_pypi_canonical_dist\.py canonicalize' \
+matches_regex "$pcd" 'release_pypi_canonical_dist\.py canonicalize' \
   || fail "pypi-canonical-dist must canonicalize Python artifacts before attestation/release upload"
-printf '%s\n' "$pcd" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
+matches_regex "$pcd" 'name:[[:space:]]*pypi-canonical-dist' \
   || fail "pypi-canonical-dist must upload the canonical Python dist artifact"
 pcd_manifest="$(job_body pypi-manifest-canonical-dist)"
-printf '%s\n' "$pcd_manifest" | grep -qE 'release_pypi_canonical_dist\.py canonicalize' \
+matches_regex "$pcd_manifest" 'release_pypi_canonical_dist\.py canonicalize' \
   || fail "pypi-manifest-canonical-dist must canonicalize manifest Python artifacts before attestation/release upload"
-printf '%s\n' "$pcd_manifest" | grep -qE -- '--project[[:space:]]+ordvec-manifest' \
+matches_regex "$pcd_manifest" '--project[[:space:]]+ordvec-manifest' \
   || fail "pypi-manifest-canonical-dist must canonicalize the ordvec-manifest PyPI project"
-printf '%s\n' "$pcd_manifest" | grep -qE 'name:[[:space:]]*pypi-manifest-canonical-dist' \
+matches_regex "$pcd_manifest" 'name:[[:space:]]*pypi-manifest-canonical-dist' \
   || fail "pypi-manifest-canonical-dist must upload the canonical manifest Python dist artifact"
 
 ppb="$(job_body publish-pypi)"
 job_needs publish-pypi pypi-canonical-dist \
   || fail "publish-pypi must \`needs: pypi-canonical-dist\` (publish/verify exactly the canonical files)"
-printf '%s\n' "$ppb" | grep -qE 'name:[[:space:]]*pypi-canonical-dist' \
+matches_regex "$ppb" 'name:[[:space:]]*pypi-canonical-dist' \
   || fail "publish-pypi must consume pypi-canonical-dist, not raw rebuilt wheel/sdist artifacts"
-printf '%s\n' "$ppb" | grep -qE 'release_pypi_canonical_dist\.py verify' \
+matches_regex "$ppb" 'release_pypi_canonical_dist\.py verify' \
   || fail "publish-pypi must verify PyPI-served wheel/sdist hashes against canonical dist"
 mppb="$(job_body publish-manifest-pypi)"
 job_needs publish-manifest-pypi pypi-manifest-canonical-dist \
   || fail "publish-manifest-pypi must \`needs: pypi-manifest-canonical-dist\` (publish/verify exactly the canonical manifest files)"
-printf '%s\n' "$mppb" | grep -qE 'name:[[:space:]]*pypi-manifest-canonical-dist' \
+matches_regex "$mppb" 'name:[[:space:]]*pypi-manifest-canonical-dist' \
   || fail "publish-manifest-pypi must consume pypi-manifest-canonical-dist, not raw rebuilt wheel/sdist artifacts"
-printf '%s\n' "$mppb" | grep -qE 'release_pypi_canonical_dist\.py verify' \
+matches_regex "$mppb" 'release_pypi_canonical_dist\.py verify' \
   || fail "publish-manifest-pypi must verify PyPI-served manifest wheel/sdist hashes against canonical dist"
-printf '%s\n' "$mppb" | grep -qE -- '--project[[:space:]]+ordvec-manifest' \
+matches_regex "$mppb" '--project[[:space:]]+ordvec-manifest' \
   || fail "publish-manifest-pypi must verify the ordvec-manifest PyPI project"
 grep -q 'pypi.org/pypi' tests/release_pypi_canonical_dist.py \
   || fail "release_pypi_canonical_dist.py must query PyPI for served file hashes"
@@ -356,9 +368,9 @@ for dep in publish-crate publish-manifest-crate publish-pypi publish-manifest-py
     || fail "publish-github-release must \`needs: $dep\` (un-draft only after all registry publishes succeed)"
 done
 unp="$(job_body publish-github-release)"
-printf '%s\n' "$unp" | grep -qE 'gh release edit.*--draft=false' \
+matches_regex "$unp" 'gh release edit.*--draft=false' \
   || fail "publish-github-release must \`gh release edit <tag> --draft=false\` (this is the sole un-draft point)"
-printf '%s\n' "$unp" | grep -qE "$github_repo_env_re" \
+matches_regex "$unp" "$github_repo_env_re" \
   || fail "publish-github-release must set \`GH_REPO: \${{ github.repository }}\` (no checkout, so gh release edit needs explicit repo context)"
 
 echo "OK: signed-release invariants hold."
