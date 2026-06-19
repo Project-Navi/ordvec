@@ -31,8 +31,21 @@ retained after the function returns.
 - Query, corpus, candidate, output, hit, and stats buffers remain caller-owned
   unless a specific API says otherwise.
 - Candidate lists are entry lists, not sets. Duplicate candidate IDs are scored
-  as duplicate entries and can produce duplicate hits. Deduplicate before
-  calling when unique row IDs are required.
+  independently, count toward candidate and vector-scored statistics, and can
+  produce duplicate hits. Deduplicate before calling when unique row IDs or
+  waste-free scoring matter.
+
+## Returned Memory
+
+Current C ABI search calls do not return heap-owned result buffers. Callers
+allocate and retain ownership of `hits_out`, `returned_out`, and `stats_out`.
+`ordvec_index_load` returns an opaque handle that must be freed exactly once
+with `ordvec_index_free` after all concurrent calls using that handle have
+finished; ABI v1 has no general `ordvec_free` for result memory.
+
+The Go wrapper copies C search hits into Go-owned slices. It frees temporary
+`C.CString` values internally and releases the C index handle through `Close`
+or its finalizer; Go callers do not free C result buffers.
 
 ## Rows and External IDs
 
@@ -52,10 +65,14 @@ sanitization or sandboxing.
 
 Services that derive paths from user input should canonicalize and constrain
 paths before calling `ordvec`, or use an application storage layer that never
-exposes raw path choice to callers. For artifact integrity and sidecar binding,
-use `ordvec-manifest`; it verifies hashes, declared metadata, auxiliary
-artifacts, and attestation shape, but it does not sign files or decide key
-policy.
+exposes raw path choice to callers. Resolve paths against an allowed base
+directory after symlink resolution, then reject any resolved path outside that
+base. In Rust, use `std::fs::canonicalize`; in Python, use `pathlib.Path.resolve`;
+in Go, combine lexical cleanup such as `filepath.Clean` with symlink-aware
+resolution such as `filepath.EvalSymlinks`. For artifact integrity and sidecar
+binding, use `ordvec-manifest`; it verifies hashes, declared metadata,
+auxiliary artifacts, and attestation shape, but it does not sign files or
+decide key policy.
 
 ## Errors and Panics
 
@@ -65,9 +82,13 @@ policy.
 - Python validates dimensions, dtypes, contiguity where required, finite
   values, candidate ranges, and capacities at the boundary so common invalid
   inputs raise typed Python exceptions instead of surfacing opaque Rust panics.
-- The C ABI catches Rust panics and returns `ORDVEC_STATUS_PANIC`; no Rust
-  unwind crosses the ABI boundary. Fallible C functions set the calling
-  thread's `ordvec_last_error()` detail string.
+- The C ABI catches Rust panics at status-returning FFI boundaries and returns
+  `ORDVEC_STATUS_PANIC`; no Rust unwind crosses the ABI boundary. The same
+  thread's `ordvec_last_error()` is set to the panic payload when it is a string
+  or to fallback panic text otherwise. Successful status-returning calls clear
+  that thread-local error. Non-status helpers such as `ordvec_last_error()`,
+  version/status accessors, and `ordvec_index_free` do not report fallible
+  status.
 - The Go wrapper maps C status values to Go errors and preserves the C ABI
   pointer and lifetime rules.
 

@@ -68,7 +68,8 @@ The Python binding releases the GIL while Rust searches, scores, and mutates
 indexes. NumPy arrays passed to those methods are read in place while the call
 is active; do not mutate them from another thread until the method returns.
 The cross-language ownership and lifetime contract is maintained in
-[`docs/bindings-safety.md`](https://github.com/Fieldnote-Echo/ordvec/blob/main/docs/bindings-safety.md).
+[`docs/bindings-safety.md`](https://github.com/Fieldnote-Echo/ordvec/blob/v0.5.0/docs/bindings-safety.md)
+for this release line.
 
 ## Type stubs
 
