@@ -337,6 +337,15 @@ pub struct Rank {
     ranks: Vec<u16>,
 }
 
+impl std::fmt::Debug for Rank {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rank")
+            .field("dim", &self.dim)
+            .field("n_vectors", &self.n_vectors)
+            .finish()
+    }
+}
+
 impl Rank {
     pub fn new(dim: usize) -> Self {
         assert!(dim >= 2, "dim must be >= 2");

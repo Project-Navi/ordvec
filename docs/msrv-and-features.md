@@ -3,7 +3,8 @@
 This matrix is the release-facing build contract for downstream embedders,
 packagers, and host systems. It complements the
 [pre-1.0 compatibility policy](compatibility-policy.md), which defines how
-compatibility-impacting changes are classified.
+compatibility-impacting changes are classified. The release artifact and wheel
+target inventory lives in [artifact-platform-matrix.md](artifact-platform-matrix.md).
 
 Current MSRV: Rust 1.89.
 
@@ -18,7 +19,7 @@ any migration note.
 
 | Surface | Default features | Stable default-off features | Optional dependency features | Experimental/internal features |
 | --- | --- | --- | --- | --- |
-| `ordvec` | none | none | none | `experimental` exposes `MultiBucketBitmap`; `test-utils` is repo-test-only and has no public stability promise. |
+| `ordvec` | none | `serde` derives `Serialize`/`Deserialize` for `SearchResults` only | `serde` | `experimental` exposes `MultiBucketBitmap`; `test-utils` is repo-test-only and has no public stability promise. |
 | `ordvec-manifest` | none | none | `cli`, `sqlite`, `sqlite-bundled` | none |
 | `ordvec-python` | n/a | n/a | n/a | n/a |
 | `ordvec-manifest-python` | n/a | n/a | n/a | n/a |

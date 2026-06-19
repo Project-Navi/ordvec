@@ -62,6 +62,15 @@ Wheels target CPython 3.10+ (abi3) and require `numpy>=2.2`. Building from
 source needs a Rust toolchain (MSRV 1.89) and
 [maturin](https://www.maturin.rs/).
 
+## Safety contract
+
+The Python binding releases the GIL while Rust searches, scores, and mutates
+indexes. NumPy arrays passed to those methods are read in place while the call
+is active; do not mutate them from another thread until the method returns.
+The cross-language ownership and lifetime contract is maintained in
+[`docs/bindings-safety.md`](https://github.com/Fieldnote-Echo/ordvec/blob/v0.5.0/docs/bindings-safety.md)
+for this release line.
+
 ## Type stubs
 
 The package ships hand-written type stubs (`_ordvec.pyi`) and a `py.typed`
