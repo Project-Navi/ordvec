@@ -1,7 +1,7 @@
 # CRT seam oracle — corrected vernier theorem (exhaustive finite proof)
 
 > Lean 4 formalization of this theorem lives in the companion repo:
-> [ordvec-formalization#17](https://github.com/Fieldnote-Echo/ordvec-formalization/pull/17)
+> [ordvec-formalization#17](https://github.com/Project-Navi/ordvec-formalization/pull/17)
 > (open PR, `sorry`-free).
 
 `examples/crt_seam_oracle.rs` enumerates the full ring Z/M to verify the

@@ -59,12 +59,62 @@ def test_hash_and_limits(tmp_path):
     }
     limits = ordvec_manifest.default_resource_limits()
     assert limits["max_manifest_bytes"] == ordvec_manifest.DEFAULT_MAX_MANIFEST_BYTES
+    assert (
+        limits["max_calibration_profile_bytes"]
+        == ordvec_manifest.DEFAULT_MAX_CALIBRATION_PROFILE_BYTES
+    )
     assert "max_row_map_line_bytes" in limits
     assert "max_row_identity_jsonl_line_bytes" not in limits
 
     _, manifest_path = write_unloadable_manifest(tmp_path)
     report = ordvec_manifest.verify_manifest(manifest_path, **limits)
     assert report["ok"] is False
+
+
+def test_verify_manifest_enforces_calibration_profile_limit(tmp_path):
+    index = tmp_path / "index.ovrq"
+    manifest_path = tmp_path / "manifest.json"
+    profile_path = tmp_path / "calibration.f64"
+    write_rankquant_index(index)
+    profile_path.write_bytes(b"\0" * (16 * 8))
+    profile_hash = ordvec_manifest.sha256_file(profile_path)
+
+    manifest = ordvec_manifest.create_manifest(
+        index,
+        manifest_path,
+        "model",
+        row_id_is_identity=True,
+    )
+    manifest["calibration"] = {
+        "schema_version": ordvec_manifest.CALIBRATION_SCHEMA_VERSION,
+        "profile_id": "urn:uuid:7c66ad6e-bdde-49a8-b420-f1136d04f5bd",
+        "calibrated_for": {"model": "model", "dim": 16},
+        "ordinalization": {"kind": "top_k", "dim": 16, "k": 4},
+        "profile": {
+            "path": profile_path.name,
+            "sha256": profile_hash["sha256"],
+            "file_size_bytes": profile_hash["size_bytes"],
+            "dim": 16,
+            "sample_count": 16,
+            "parameterization": "marginal_topk_frequency",
+            "format": "raw_f64_le",
+            "shape": [16],
+        },
+        "null_model": {
+            "kind": "weighted_marginal_profile",
+            "parameterization": "marginal_topk_frequency",
+        },
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = ordvec_manifest.verify_manifest(
+        manifest_path,
+        max_calibration_profile_bytes=16,
+    )
+
+    assert "calibration_profile_too_large" in {
+        error["code"] for error in report["errors"]
+    }
 
 
 def test_inspect_and_verify_return_dicts(tmp_path):

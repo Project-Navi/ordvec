@@ -49,14 +49,16 @@ See also: [`SECURITY.md`](SECURITY.md) (reporting), [`RELEASING.md`](RELEASING.m
 
 ## Maintenance budget
 
-`ordvec` is maintained by a single primary contributor. Mitigations are
-prioritized when they are (1) low-maintenance once merged, (2) enforceable by
-tests or CI, (3) local to the library boundary, and (4) unlikely to add
-operational burden downstream. Heavyweight controls (mandatory index signing,
-long-running fuzz farms, service-level admission control) are documented as
-**deployment guidance** until there is maintainer capacity to own them. The
-absence of a second maintainer is itself a tracked supply-chain residual
-(see THREAT-SUPPLY-001).
+`ordvec` has one project lead plus an additional maintainer / release
+approver. Mitigations are prioritized when they are (1) low-maintenance once
+merged, (2) enforceable by tests or CI, (3) local to the library boundary, and
+(4) unlikely to add operational burden downstream. Heavyweight controls
+(mandatory index signing, long-running fuzz farms, service-level admission
+control) are documented as **deployment guidance** unless the project has
+maintainer capacity to own them. Release publication requires a non-triggering
+approver through protected GitHub Environments; the residual release
+supply-chain risk is approver account compromise / collusion, not a
+single-owner project structure (see THREAT-SUPPLY-001).
 
 ---
 

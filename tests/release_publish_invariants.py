@@ -631,7 +631,7 @@ def check_python_package_metadata() -> None:
         "Homepage": "https://github.com/Project-Navi/ordvec",
         "Repository": "https://github.com/Project-Navi/ordvec",
         "Issues": "https://github.com/Project-Navi/ordvec/issues",
-        "Formalization": "https://github.com/Fieldnote-Echo/ordvec-formalization",
+        "Formalization": "https://github.com/Project-Navi/ordvec-formalization",
     }.items():
         if urls.get(key) != expected:
             fail(f"ordvec-python/pyproject.toml: project.urls.{key} must be {expected!r}")

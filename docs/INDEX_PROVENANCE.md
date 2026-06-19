@@ -25,10 +25,13 @@ files without panicking, aborting, or silently accepting garbage:
 - an exact file-length match (trailing bytes or short files are rejected);
 - per-row **structural** invariants: `Rank` rows must be a true permutation of
   `[0, dim)`, `RankQuant` rows must satisfy constant composition, `Bitmap` rows
-  must have exactly `n_top` bits set.
+  must have exactly `n_top` bits set, and direct `RankQuantFastscan` `.ovfs`
+  rows must use valid FastScan nibbles, satisfy b=2 constant composition, and
+  have zero block-tail padding.
 
-A file that survives all of this is **structurally well-formed**. The four
-loaders are exercised by `cargo fuzz` (the `load_*` targets).
+A file that survives all of this is **structurally well-formed**. The five
+loaders are exercised by `cargo fuzz` (the `load_*` targets, including
+`load_fastscan` for `.ovfs`).
 
 ## What the loaders do NOT validate
 

@@ -47,7 +47,7 @@ assuming `k` rows back.
 ## Theory and calibration
 
 `Bitmap` exposes the constant-weight top-bucket overlap statistic formalized in
-[`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization).
+[`ordvec-formalization`](https://github.com/Project-Navi/ordvec-formalization).
 In that finite Lean model, literal bitmap overlap is the query-preserving
 quotient statistic, an overlap threshold is Bayes-optimal under explicit
 monotone-overlap assumptions, and the idealized uniform constant-weight null

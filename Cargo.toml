@@ -58,9 +58,9 @@ exclude = [
     "tests/release_signed_release_invariants.sh",
 ]
 
-# docs.rs build configuration: build with default features only, so the
-# experimental MultiBucketBitmap scaffold stays off the published docs.
-# (The `#[doc(hidden)]` FastScan path is hidden by its attribute either way.)
+# docs.rs build configuration: build with default features only. Stable default
+# APIs, including `RankQuantFastscan`, are documented; the experimental
+# MultiBucketBitmap scaffold stays off the published docs.
 [package.metadata.docs.rs]
 all-features = false
 

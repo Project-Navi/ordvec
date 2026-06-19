@@ -118,7 +118,7 @@ pub fn rank_to_bucket(rank: u16, d: usize, bits: u8) -> u8 {
 /// Bucket every entry of a full rank vector.
 ///
 /// # Panics
-/// Panics if `bits > 7` (validated up front, so this holds for empty input
+/// Panics if `bits > 8` (validated up front, so this holds for empty input
 /// too), or — via [`rank_to_bucket`] — if any entry is `>= ranks.len()`. A
 /// valid rank vector is a permutation of `[0, ranks.len())`, so well-formed
 /// input never trips the per-entry guard.

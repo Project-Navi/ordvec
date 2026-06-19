@@ -49,7 +49,7 @@ dependencies = [
 Homepage = "https://github.com/Project-Navi/ordvec"
 Repository = "https://github.com/Project-Navi/ordvec"
 Issues = "https://github.com/Project-Navi/ordvec/issues"
-Formalization = "https://github.com/Fieldnote-Echo/ordvec-formalization"
+Formalization = "https://github.com/Project-Navi/ordvec-formalization"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"

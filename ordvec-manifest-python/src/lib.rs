@@ -6,10 +6,11 @@ use ordvec_manifest_core::{
     CreateRowIdentity, ManifestError, ResourceLimits, VerifiedLoadPlanError, VerifyOptions,
     CALIBRATION_SCHEMA_VERSION, DEFAULT_MAX_AUXILIARY_ARTIFACTS,
     DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES, DEFAULT_MAX_CACHED_REPORT_BYTES,
-    DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES, DEFAULT_MAX_MANIFEST_BYTES,
-    DEFAULT_MAX_REPORT_ISSUES, DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES,
-    DEFAULT_MAX_ROW_IDENTITY_ROWS, DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES,
-    ENCODER_DISTORTION_SCHEMA_VERSION, SCHEMA_VERSION,
+    DEFAULT_MAX_CALIBRATION_PROFILE_BYTES, DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES,
+    DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_REPORT_ISSUES,
+    DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES, DEFAULT_MAX_ROW_IDENTITY_ROWS,
+    DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES, ENCODER_DISTORTION_SCHEMA_VERSION,
+    SCHEMA_VERSION,
 };
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
@@ -91,6 +92,7 @@ fn resource_limits(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -114,6 +116,9 @@ fn resource_limits(
     if let Some(value) = max_auxiliary_artifact_bytes {
         limits.max_auxiliary_artifact_bytes = value;
     }
+    if let Some(value) = max_calibration_profile_bytes {
+        limits.max_calibration_profile_bytes = value;
+    }
     if let Some(value) = max_encoder_distortion_profile_bytes {
         limits.max_encoder_distortion_profile_bytes = value;
     }
@@ -134,6 +139,7 @@ struct PythonResourceLimits {
     max_row_map_tracked_id_bytes: usize,
     max_auxiliary_artifacts: usize,
     max_auxiliary_artifact_bytes: u64,
+    max_calibration_profile_bytes: u64,
     max_encoder_distortion_profile_bytes: u64,
     max_report_issues: usize,
     max_cached_report_bytes: u64,
@@ -148,6 +154,7 @@ impl From<ResourceLimits> for PythonResourceLimits {
             max_row_map_tracked_id_bytes: limits.max_row_identity_tracked_db_id_bytes,
             max_auxiliary_artifacts: limits.max_auxiliary_artifacts,
             max_auxiliary_artifact_bytes: limits.max_auxiliary_artifact_bytes,
+            max_calibration_profile_bytes: limits.max_calibration_profile_bytes,
             max_encoder_distortion_profile_bytes: limits.max_encoder_distortion_profile_bytes,
             max_report_issues: limits.max_report_issues,
             max_cached_report_bytes: limits.max_cached_report_bytes,
@@ -167,6 +174,7 @@ fn verify_options(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -183,6 +191,7 @@ fn verify_options(
             max_row_map_tracked_id_bytes,
             max_auxiliary_artifacts,
             max_auxiliary_artifact_bytes,
+            max_calibration_profile_bytes,
             max_encoder_distortion_profile_bytes,
             max_report_issues,
             max_cached_report_bytes,
@@ -200,6 +209,7 @@ fn create_options(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -215,6 +225,7 @@ fn create_options(
             max_row_map_tracked_id_bytes,
             max_auxiliary_artifacts,
             max_auxiliary_artifact_bytes,
+            max_calibration_profile_bytes,
             max_encoder_distortion_profile_bytes,
             max_report_issues,
             max_cached_report_bytes,
@@ -273,6 +284,7 @@ fn sha256_file(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
     max_row_map_tracked_id_bytes = None,
     max_auxiliary_artifacts = None,
     max_auxiliary_artifact_bytes = None,
+    max_calibration_profile_bytes = None,
     max_encoder_distortion_profile_bytes = None,
     max_report_issues = None,
     max_cached_report_bytes = None
@@ -287,6 +299,7 @@ fn inspect_manifest(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -302,6 +315,7 @@ fn inspect_manifest(
         max_row_map_tracked_id_bytes,
         max_auxiliary_artifacts,
         max_auxiliary_artifact_bytes,
+        max_calibration_profile_bytes,
         max_encoder_distortion_profile_bytes,
         max_report_issues,
         max_cached_report_bytes,
@@ -326,6 +340,7 @@ fn inspect_manifest(
     max_row_map_tracked_id_bytes = None,
     max_auxiliary_artifacts = None,
     max_auxiliary_artifact_bytes = None,
+    max_calibration_profile_bytes = None,
     max_encoder_distortion_profile_bytes = None,
     max_report_issues = None,
     max_cached_report_bytes = None
@@ -344,6 +359,7 @@ fn verify_manifest(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -359,6 +375,7 @@ fn verify_manifest(
         max_row_map_tracked_id_bytes,
         max_auxiliary_artifacts,
         max_auxiliary_artifact_bytes,
+        max_calibration_profile_bytes,
         max_encoder_distortion_profile_bytes,
         max_report_issues,
         max_cached_report_bytes,
@@ -416,6 +433,7 @@ struct PythonVerifiedAuxiliaryArtifactPlan {
     max_row_map_tracked_id_bytes = None,
     max_auxiliary_artifacts = None,
     max_auxiliary_artifact_bytes = None,
+    max_calibration_profile_bytes = None,
     max_encoder_distortion_profile_bytes = None,
     max_report_issues = None,
     max_cached_report_bytes = None
@@ -434,6 +452,7 @@ fn verify_for_load(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -449,6 +468,7 @@ fn verify_for_load(
         max_row_map_tracked_id_bytes,
         max_auxiliary_artifacts,
         max_auxiliary_artifact_bytes,
+        max_calibration_profile_bytes,
         max_encoder_distortion_profile_bytes,
         max_report_issues,
         max_cached_report_bytes,
@@ -503,6 +523,7 @@ fn verify_for_load(
     max_row_map_tracked_id_bytes = None,
     max_auxiliary_artifacts = None,
     max_auxiliary_artifact_bytes = None,
+    max_calibration_profile_bytes = None,
     max_encoder_distortion_profile_bytes = None,
     max_report_issues = None,
     max_cached_report_bytes = None
@@ -524,6 +545,7 @@ fn create_manifest(
     max_row_map_tracked_id_bytes: Option<usize>,
     max_auxiliary_artifacts: Option<usize>,
     max_auxiliary_artifact_bytes: Option<u64>,
+    max_calibration_profile_bytes: Option<u64>,
     max_encoder_distortion_profile_bytes: Option<u64>,
     max_report_issues: Option<usize>,
     max_cached_report_bytes: Option<u64>,
@@ -552,6 +574,7 @@ fn create_manifest(
         max_row_map_tracked_id_bytes,
         max_auxiliary_artifacts,
         max_auxiliary_artifact_bytes,
+        max_calibration_profile_bytes,
         max_encoder_distortion_profile_bytes,
         max_report_issues,
         max_cached_report_bytes,
@@ -601,6 +624,10 @@ fn _ordvec_manifest(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES",
         DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES,
+    )?;
+    m.add(
+        "DEFAULT_MAX_CALIBRATION_PROFILE_BYTES",
+        DEFAULT_MAX_CALIBRATION_PROFILE_BYTES,
     )?;
     m.add(
         "DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES",

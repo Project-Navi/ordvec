@@ -80,9 +80,9 @@ impl SubsetScratch {
     }
 
     /// Test-only capacity probe (scratch reuse / allocation-free assertions).
-    /// `#[doc(hidden)]` rather than `#[cfg(test)]` so the integration tests in
-    /// `tests/` (which compile the crate without `cfg(test)`) can reach it; it
-    /// is hidden from the public docs surface.
+    /// Gated behind `test-utils` so integration tests can opt in without
+    /// exposing this helper on the default public API surface.
+    #[cfg(feature = "test-utils")]
     #[doc(hidden)]
     pub fn capacities_for_test(&self) -> (usize, usize, usize, usize) {
         (

@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates-io` / `pypi` GitHub Environment gates: `Fieldnote-Echo` and
   `toadkicker` are listed as required reviewers, self-review is blocked, and a
   30-minute wait timer applies before registry publish jobs can proceed.
+- Exposed the calibration-profile byte limit through the `ordvec-manifest`
+  Python bindings, including the default constant, `default_resource_limits()`,
+  and verifier/create keyword arguments.
+- Aligned `.ovfs` / `OVFS` security and provenance docs with the now-public
+  `RankQuantFastscan` persistence loader and fuzz target.
+- Updated formalization links and release invariants after the companion
+  `ordvec-formalization` repository moved under `Project-Navi`.
+
+### Fixed
+
+- Hid the `SubsetScratch::capacities_for_test` helper behind the non-default
+  `test-utils` feature and cleaned stale release-doc comments around FastScan
+  and b=8 bucket rustdoc.
 
 ## 0.5.0 - 2026-06-19
 

@@ -117,9 +117,9 @@ fn check_bits_124(bits: u8) -> PyResult<()> {
     Ok(())
 }
 
-/// Reject a `bits` value the bucket primitives can't represent: `rank_to_bucket`
-/// / `bucket_centre` cap at 7 so `1 << bits` fits the result and never overflows
-/// the shift. Mirrors the core asserts as a typed `ValueError`.
+/// Reject a `bits` value outside the Python constructor surface. The Rust core
+/// has b=8 evidence/refinement helpers, but Python `RankQuant` exposes only the
+/// byte-aligned persisted widths through this constructor path.
 fn check_bits_max7(bits: u8) -> PyResult<()> {
     if bits > 7 {
         return Err(pyo3::exceptions::PyValueError::new_err("bits must be <= 7"));
@@ -747,11 +747,6 @@ impl RankQuant {
     /// candidate IDs are scored as separate entries and can produce duplicate
     /// hits; callers that require unique row IDs should deduplicate before
     /// calling.
-    ///
-    /// ``candidates`` may be unsorted and may contain duplicate global doc IDs.
-    /// Each candidate entry is scored independently, so duplicate IDs may
-    /// produce duplicate returned global IDs. Deduplicate the array before
-    /// calling this method when unique hits are required.
     ///
     /// If the shortlist came from [`Bitmap`], this is the exact RankQuant
     /// rerank stage over that survivor set; it does not itself apply or

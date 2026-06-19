@@ -130,7 +130,7 @@ unknown embedding distribution.
 **Checked finite model: symmetry, quotient sufficiency, threshold,
 calibration.** The proof chain now has a larger machine-checked middle
 than the implementation docs used to claim. In
-[`ordvec-formalization`](https://github.com/Fieldnote-Echo/ordvec-formalization),
+[`ordvec-formalization`](https://github.com/Project-Navi/ordvec-formalization),
 Lean proves that literal bitmap overlap is the canonical invariant
 under query-preserving coordinate relabelings; finite quotient
 sufficiency reduces the admission decision to ordered overlap

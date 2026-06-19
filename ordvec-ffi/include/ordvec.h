@@ -234,6 +234,10 @@ void ordvec_index_free(ordvec_index_t *index);
  * and may be unsorted or duplicated. Duplicate candidates are scored as
  * separate entries and can produce duplicate hits; callers that need unique
  * output rows must deduplicate before calling.
+ * Full search is represented by `candidate_count == 0 && candidate_rows == NULL`.
+ * ABI v1 treats `candidate_count == 0 && candidate_rows != NULL` as
+ * `ORDVEC_STATUS_BAD_ARGUMENT`; callers should short-circuit explicit empty
+ * survivor sets before crossing the ABI.
  *
  * # Safety
  *
