@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## 0.5.0 - 2026-06-19
+
 ### Security
 
 - Hardened the Python binding's GIL-released search, candidate, scoring, and
@@ -24,23 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and verifier/create keyword arguments.
 - Aligned `.ovfs` / `OVFS` security and provenance docs with the now-public
   `RankQuantFastscan` persistence loader and fuzz target.
-- Updated formalization links and release invariants after the companion
-  `ordvec-formalization` repository moved under `Project-Navi`.
-
-### Fixed
-
-- Added a persisted-format registry that drives probe, manifest-coverage, and
-  C-ABI load decisions from one table; `.ovfs` now remains explicitly
-  known-but-not-probeable/not-manifest-covered, and the C ABI reports it as an
-  unsupported format rather than a corrupt index.
-- Hid the `SubsetScratch::capacities_for_test` helper behind the non-default
-  `test-utils` feature and cleaned stale release-doc comments around FastScan
-  and b=8 bucket rustdoc.
-
-## 0.5.0 - 2026-06-19
-
-### Security
-
 - **Hardened `.ovfs` FastScan loading before the format's first stable
   release.** `RankQuantFastscan` now rejects invalid FastScan payload bytes
   (`byte & 0xf0 != 0`), rows that violate b=2 constant composition, and
@@ -114,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated formalization links and release invariants after the companion
+  `ordvec-formalization` repository moved under `Project-Navi`.
 - **Clarified BEIR benchmark release claims.** The committed README figures use
   the default method set and do not yet include the newer
   `sign-rq2-threaded` probe row; the docs and plot generator now distinguish
@@ -151,6 +140,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Added a persisted-format registry that drives probe, manifest-coverage, and
+  C-ABI load decisions from one table; `.ovfs` now remains explicitly
+  known-but-not-probeable/not-manifest-covered, and the C ABI reports it as an
+  unsupported format rather than a corrupt index.
+- Hid the `SubsetScratch::capacities_for_test` helper behind the non-default
+  `test-utils` feature and cleaned stale release-doc comments around FastScan
+  and b=8 bucket rustdoc.
 - **Made Intel SDE AVX-512 coverage fail closed for release publishes.** Pull
   requests and main pushes may emit a visible warning and skip SDE-dependent
   steps during an Intel mirror outage, but the tag-triggered release workflow
@@ -334,11 +330,12 @@ these aliases in a future release.
 ## [0.1.0] - 2026-05-22
 
 Initial release. `ordvec` is the training-free ordinal & sign quantization
-substrate for vector retrieval, developed within the
-[turbovec](https://github.com/RyanCodrai/turbovec) project (MIT, by Ryan
-Codrai) and factored out here as a standalone crate. It is data-oblivious (no
-training, rotation, or codebook), uses analytical norms, and carries **no
-system dependencies** — no BLAS, no `ndarray`, no `faer`.
+substrate for vector retrieval. It was developed using the early
+[turbovec](https://github.com/RyanCodrai/turbovec) project context as a
+rapid-development scaffold, but ordvec's implementation history lives in this
+repository. It is data-oblivious (no training, rotation, or codebook), uses
+analytical norms, and carries **no system dependencies** — no BLAS, no
+`ndarray`, no `faer`.
 
 ### Added
 

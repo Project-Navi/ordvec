@@ -496,11 +496,13 @@ in the full repository.
 
 ## Provenance
 
-ordvec was developed within turbovec, factored out into this standalone,
-zero-system-dependency crate.
-[turbovec](https://github.com/RyanCodrai/turbovec) (MIT, by Ryan Codrai)
-is credited as the project it grew within, with thanks; ordvec's
-development history is in this repository's git log.
+ordvec's active upstream, implementation history, issues, releases, and
+governance live in `Project-Navi/ordvec`.
+
+Courtesy note: ordvec was developed using the early
+[turbovec](https://github.com/RyanCodrai/turbovec) project context as a
+rapid-development scaffold, with thanks to that lineage. It is not a source
+fork of turbovec.
 
 The ordvec project is jointly maintained by
 [@Project-Navi](https://github.com/Project-Navi) and

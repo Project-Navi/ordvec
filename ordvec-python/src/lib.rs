@@ -8,8 +8,10 @@
 //! The core crate is aliased as `ordvec_core` throughout, so the Rust namespace
 //! never collides with the `ordvec` Python package name.
 //!
-//! Provenance: developed within turbovec
-//! (MIT, by Ryan Codrai), factored out. Dual-licensed MIT OR Apache-2.0.
+//! Provenance: developed using the early turbovec project context as a
+//! rapid-development scaffold, with thanks to that lineage. ordvec's
+//! implementation history and active upstream live in Project-Navi/ordvec.
+//! Dual-licensed MIT OR Apache-2.0.
 //!
 //! Every FFI entry point validates its inputs at the boundary so the core's
 //! `assert!`/`assert_all_finite` panics surface as typed Python exceptions, not

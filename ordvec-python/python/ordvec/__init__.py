@@ -1,7 +1,9 @@
 """ordvec — training-free ordinal & sign vector quantization (Python bindings).
 
-Developed within the turbovec project
-(MIT, by Ryan Codrai) and factored out. Dual-licensed MIT OR Apache-2.0.
+ordvec was developed using the early turbovec project context as a
+rapid-development scaffold, with thanks to that lineage. ordvec's implementation
+history, active development, issues, releases, and governance live in
+Project-Navi/ordvec. Dual-licensed MIT OR Apache-2.0.
 
 Public API: the four index classes ``Rank``, ``RankQuant``, ``Bitmap``,
 ``SignBitmap``, plus the module-level rank-math primitives (``rank_transform``,
@@ -48,11 +50,14 @@ Threading: the contract is read-concurrent, mutation-exclusive. ``search``,
 candidate generator methods release the GIL during the heavy Rust scan, so
 other Python threads run concurrently. ``add`` also releases the GIL while
 mutating an index, but mutable index operations must be treated as exclusive.
-The input arrays are *read in place* (not copied) for that window — do not
-mutate an array from another thread while a call that received it is in
-progress, including subset candidate arrays, or the scan races the write and
-may return inconsistent results. This is the standard contract for
-GIL-releasing numeric extensions (NumPy itself behaves this way).
+GIL-released search, candidate-generation, scoring, and ``add`` methods copy
+NumPy inputs into Rust-owned buffers before detaching, so ordinary Python
+in-place NumPy mutation in another thread cannot race detached Rust reads. This
+intentionally trades zero-copy detached reads for race-free snapshots; large
+calls may temporarily require an additional input-sized buffer. Callers still
+own object-level scheduling: do not overlap mutable index operations such as
+``add`` with searches on the same index unless the binding method explicitly
+documents that pattern.
 """
 
 from ._ordvec import (

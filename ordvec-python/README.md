@@ -86,10 +86,13 @@ native module is otherwise opaque to static analysis.
 
 ## Provenance & license
 
-The `ordvec` Python bindings were developed within turbovec, factored out
-into this standalone package. turbovec
-([MIT](https://github.com/RyanCodrai/turbovec), by Ryan Codrai) is credited as
-the origin project.
+The `ordvec` Python package's active upstream, implementation history, issues,
+releases, and governance live in `Project-Navi/ordvec`.
+
+Courtesy note: ordvec was developed using the early
+[turbovec](https://github.com/RyanCodrai/turbovec) project context as a
+rapid-development scaffold, with thanks to that lineage. It is not a source
+fork of turbovec.
 
 Dual-licensed under either of
 [MIT](https://github.com/Project-Navi/ordvec/blob/main/LICENSE-MIT) or

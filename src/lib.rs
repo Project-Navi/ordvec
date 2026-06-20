@@ -1,11 +1,12 @@
 //! Training-free ordinal & sign quantization for vector retrieval.
 //!
-//! `ordvec` is a training-free ordinal/sign retrieval
-//! substrate, developed within the
-//! [turbovec](https://github.com/RyanCodrai/turbovec) project (MIT, by
-//! Ryan Codrai) and factored out here as a standalone crate. It carries
-//! no system dependencies — no BLAS, no `ndarray`, no `faer` — and needs
-//! no training, rotation, or codebook. Norms are analytical.
+//! `ordvec` is a training-free ordinal/sign retrieval substrate. It was
+//! developed using the early
+//! [turbovec](https://github.com/RyanCodrai/turbovec) project context as a
+//! rapid-development scaffold, with thanks to that lineage; ordvec's
+//! implementation history and active upstream live in this repository. It
+//! carries no system dependencies — no BLAS, no `ndarray`, no `faer` — and
+//! needs no training, rotation, or codebook. Norms are analytical.
 //!
 //! Four substrate families, all data-oblivious:
 //!
@@ -140,19 +141,17 @@ pub use quant::subset_rerank_uses_simd;
 #[cfg(feature = "experimental")]
 pub use multi_bucket::MultiBucketBitmap;
 
-// `Contingency` / `Projection` are the **stable** stateless dense-code
-// contingency-table surface added in this release (issue #219): the full
+// `Contingency` / `Projection` are intended-to-stabilize stateless dense-code
+// contingency-table analysis APIs added in this release (issue #219): the full
 // `nb × nb` bucket-overlap table for two `&[u8]` code slices, plus its named
 // projections (diagonal agreement, band agreement, top-bucket overlap, L1
 // distance, etc.). This is a research/analysis primitive — it is *not* a
 // retrieval index and is never wired into any search path.
 //
-// Although `Contingency` and `Projection` are gated behind the same
-// `experimental` feature as `MultiBucketBitmap` (they complement the bilinear
-// decomposition that surface exposes), they are the **stable** side of the
-// `experimental` gate: the stateless dense API is the intended long-term
-// surface and is covered by semver guarantees from this release forward.
-// `MultiBucketBitmap` is the unstable counterpart — see the note above.
+// They remain behind the same non-default `experimental` feature as
+// `MultiBucketBitmap`, so they are not yet part of the patch-stable default
+// Rust surface. The stateless dense API is the intended long-term surface, but
+// graduating it to a stable feature is a later compatibility decision.
 #[cfg(feature = "experimental")]
 pub use contingency::{Contingency, Projection};
 
