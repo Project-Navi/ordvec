@@ -32,26 +32,49 @@ append-friendly, and graph-optional.
 
 ## Benchmark at a glance
 
-> **ordvec matches dense retrieval quality within BEIR qrel noise at 8–16× smaller
-> vector storage — with no training and no graph build — and sub-millisecond
-> single-query retrieval on 171K Harrier embeddings. In the committed
-> default-method run, a threaded HNSW graph still wins highly-parallel batched
-> serving; ordvec wins the lightweight compressed-substrate lane.**
+> **On the public Harrier-Q8 BEIR harness, ordvec matches exact dense `nDCG@10`
+> within bootstrap noise at 8–16× smaller vector storage — with no training and
+> no graph build. The committed evidence is the reproducible scifact +
+> trec-covid run below; the harness also supports nfcorpus and fiqa. ordvec wins
+> single-query latency against exact `flat` on the committed 171K-doc run and on
+> operability (no build, no tuning, append-only); in the committed default-method
+> threaded view, HNSW still wins highly-parallel batched serving. Larger-corpus
+> and alternate-encoder studies are active research, not public release claims
+> until their artifacts land in this repository.**
+
+**Public evidence snapshot.** The load-bearing result in this README is narrower
+than the research backlog: Harrier-Q8 embeddings on public BEIR data, scored
+against official qrels. The default `make benchmark-beir` reproduces scifact
+(quality) and trec-covid (quality + latency/scaling); the harness also supports
+nfcorpus and fiqa via `QUALITY_DATASETS=...`. Do not read this page as a public
+larger-corpus or alternate-encoder claim; those need checked-in run artifacts
+before they become release evidence.
 
 On **trec-covid** (171,332 documents, the public [BEIR](https://github.com/beir-cellar/beir)
-benchmark) with **Harrier-Q8** 1024-d embeddings, ordvec's two-stage retrieval
-keeps a near-flat per-query cost as the corpus grows, while exact brute-force
-(`flat`, identical math to FAISS `IndexFlatIP`) is O(n) — so the speedup
-*widens* with scale:
+benchmark) with **Harrier-Q8** 1024-d embeddings, ordvec's two-stage retrieval has a
+far smaller per-query cost than exact brute-force (`flat`, identical math to FAISS
+`IndexFlatIP`). Both are O(n) scans, but the public ordvec rows stream compressed
+codes instead of the 4096-byte float vectors, so their lines sit well below `flat`
+and the gap widens over the committed subsampling sweep:
 
 ![ordvec speedup over exact search grows with corpus size](https://raw.githubusercontent.com/Project-Navi/ordvec/main/benchmarks/beir/figures/scaling_curve.png)
 
-- **~100× faster, single query.** At 171K docs, single-query latency: exact
-  `flat` 56 ms vs ordvec `Sign→rq2` **0.53 ms** — and the gap grows with the
-  corpus (it is ~5× at 1K docs).
-- **8–16× smaller.** 256–384 bytes/vector vs 4096 for full float, at
-  **nDCG@10 within bootstrap noise of exact** (on trec-covid the ordinal rows
-  even edge ahead; see [Benchmarks](#benchmarks)).
+- **~100× faster than exact `flat`, single query, at 171K docs.** Single-query
+  latency: exact `flat` 56 ms vs ordvec `Sign→rq2` **0.53 ms** — the gap over `flat`
+  grows with the corpus (it is ~5× at 1K docs).
+- **8–16× smaller for the reported qrel rows.** The b=2 rank code is 256 B/vector
+  (16× smaller than 4096 B floats), b=4 is 512 B (8×), and the reported two-stage
+  `sign→rq2` row accounts for both stage-1 sign codes and the RankQuant reranker
+  (384 B/vector). These rows do **not** retain or rescore against the original
+  float corpus; the public two-stage path is sign/bitmap candidate generation
+  followed by RankQuant b=2 rerank. At **nDCG@10 within bootstrap noise of exact**
+  (on trec-covid the ordinal rows even edge ahead; see [Benchmarks](#benchmarks)).
+- **vs HNSW (the honest public scale story).** On the committed trec-covid run,
+  ordvec wins single-query latency while HNSW wins the highly-parallel threaded
+  view. That is the public comparison here. At larger corpora, graph or shard
+  layers are the right comparison target; this README does not claim public
+  million-scale HNSW crossover or GPU bandwidth numbers until the underlying run
+  artifacts are committed.
 - **Reproducible on your machine, one command:**
 
   ```sh
@@ -103,8 +126,8 @@ structure of each vector on its own:
   not persistable to `.ovrq`; each prepared asymmetric query owns a
   `dim * 256` `f32` LUT, about 64 MiB at the maximum dimension.)
 - **Two-stage retrieval, built in.** A cheap bitmap / sign-popcount
-  prefilter feeds an exact rerank — the coarse→fine pipeline ships as
-  library primitives. The coarse-scan→exact-rerank pattern, and the
+  prefilter feeds a RankQuant rerank — the coarse→fine pipeline ships as
+  library primitives. The coarse-scan→fine-rerank pattern, and the
   `RankQuantFastscan` block-32 4-bit LUT path, follow the FAISS FastScan and
   binary-quantization-plus-rescore lineage; ordvec ships them
   batteries-included and dependency-free, not as new techniques.
@@ -127,7 +150,7 @@ large-scale serving rather than competing with one.
 - **`Bitmap`** — a top-bucket bitmap per document (one bit per
   coordinate); scoring is `popcount(Q AND D)`, a coarsened rank overlap.
 - **`SignBitmap`** — a sign bitmap per document for sign-cosine
-  candidate generation, feeding an exact rerank stage.
+  candidate generation, feeding a caller-owned second-stage rerank.
 
 Two further paths, for callers who need them:
 
@@ -377,9 +400,10 @@ storage; on trec-covid the ordinal codes even edge slightly ahead.
 
 #### Latency — three honest views
 
-ordvec never touches the float corpus, so its per-query cost is tiny and grows
-slowly with `n`; `flat`'s cost is dominated by streaming the 4096-byte vectors,
-which is O(n) and **memory-bandwidth-bound**. That single fact explains all three
+The reported ordvec rows do not stream the float corpus, so their per-query cost
+has a much smaller constant than `flat`; they are still O(n) compressed-code
+scans. `flat`'s cost is dominated by streaming the 4096-byte vectors, which is
+also O(n) and **memory-bandwidth-bound**. That single fact explains all three
 views (trec-covid, 171,332 docs, 1024-d):
 
 **1. Single query (batch = 1, 1 thread)** — latency-sensitive serving, where
@@ -389,7 +413,8 @@ views (trec-covid, 171,332 docs, 1024-d):
 
 `flat` 56 ms → ordvec `sign→rq2` **0.53 ms (≈106×)**, `bitmap→rq2` 0.62 ms (≈91×),
 `hnsw` 1.5 ms (37×). The scaling curve [above](#benchmark-at-a-glance) is this
-view swept over corpus size — the speedup *grows* with `n`.
+view swept over the committed subsamples — the speedup over `flat` grows across
+that public sweep.
 
 **2. Batched throughput (batch = 32, 1 thread)** — when many queries arrive at
 once, `flat`'s GEMM amortizes the corpus stream across the batch (56→4 ms),
@@ -422,13 +447,17 @@ ties or edges quality. And the two aren't mutually exclusive: ordvec's codes are
 index-agnostic, so they compose *under* an HNSW/sharding layer (see
 [Scope](#scope)) rather than replacing it.
 
-**Read it honestly:** ordvec's huge latency win is a single-query / low-batch
-phenomenon (and grows with corpus size); under large-batch throughput a batched
-exact GEMM is a strong baseline and HNSW threads very well. The durable wins are
-**compression at iso-quality** and **single-query latency that stays flat as the
-corpus grows**. `flat` is a comparison reference, not ground truth; nDCG@10 is
-the qrel-based metric. Numbers vary with encoder, dataset, hardware, and batch —
-the point is that you can regenerate all of them with `make benchmark-beir`.
+**Read it honestly:** ordvec's latency win over exact `flat` is a single-query /
+low-batch phenomenon in the committed BEIR run; under large-batch throughput a
+batched exact GEMM is a strong baseline, and HNSW wins the committed threaded
+default-method view. ordvec's scan is O(n) — the same class as `flat`, but over an
+8–16× smaller reported working set, so its constant is far lower. Its per-query
+latency is **not** flat in `n`; an earlier "near-flat" claim was an artifact of
+small (≤57K) corpora and is retracted. The durable wins are **compression at
+iso-quality** and **operability** (training-free, no graph build, no tuning,
+append-only). `flat` is a comparison reference, not ground truth; nDCG@10 is the
+qrel-based metric. Numbers vary with encoder, dataset, hardware, and batch —
+regenerate them with `make benchmark-beir`.
 
 ### Synthetic stress test
 

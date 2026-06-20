@@ -13,8 +13,8 @@
 //! story; N>1 the throughput story. Batch is matched across every method.
 //!
 //! `--max-docs M`: truncate the corpus to its first M vectors. Sweeping M
-//! produces the speedup-vs-corpus-size curve (brute force is O(n); ordvec
-//! sign/rank candidate-gen is near-flat in n).
+//! produces the speedup-vs-corpus-size curve (both brute force and ordvec scans
+//! are O(n), but ordvec streams many fewer bytes per document).
 //!
 //! Output: `<out>/<dataset>/timing.jsonl` gets one record per
 //! (method, n_docs, threads) run, appended every invocation — the plotter

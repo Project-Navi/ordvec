@@ -8,8 +8,8 @@ Inputs (produced by `beir-bench`, written to `<runs-dir>/<dataset>/timing.jsonl`
 
 Outputs (PNG + SVG) to `<out-dir>`:
   1. `scaling_curve.{png,svg}`   speedup-vs-`flat` as the corpus grows — the
-     bands climb because exact brute force is O(n) while ordvec sign/rank
-     candidate-gen is near-flat in n.
+     bands climb because both paths are O(n), but `flat` streams 4096-byte
+     vectors while ordvec streams much smaller sign/rank codes.
   2. `bars_single_thread.{png,svg}`  per-method query latency at 1 thread,
      full corpus — the controlled apples-to-apples bar.
   3. `bars_threaded.{png,svg}`   the same at N threads (matched batch).
