@@ -14,6 +14,9 @@ publish = false
 name = "_ordvec"
 crate-type = ["cdylib"]
 
+[features]
+bench-utils = ["ordvec_core/bench-utils"]
+
 [dependencies]
 # Alias the core crate as `ordvec_core` so binding code is unambiguous and never
 # mixes `ordvec::` with the Python-facing `ordvec` package name.

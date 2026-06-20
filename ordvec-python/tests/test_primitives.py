@@ -1,11 +1,9 @@
 """Tests for the module-level rank-math primitives and limit constants.
 
-These free functions mirror ``ordvec::rank::*``, the crate-root
-``search_asymmetric_byte_lut``, and the ``ordvec::rank_io`` limit constants,
-giving the Python package 1:1 parity with the Rust public surface. Algorithmic
-correctness is proven in the crate's Rust tests; these cover the FFI boundary,
-the numpy round-trips, and the argument guards (bad input → typed exception,
-never a PanicException).
+These free functions mirror ``ordvec::rank::*`` and the ``ordvec::rank_io``
+limit constants. Algorithmic correctness is proven in the crate's Rust tests;
+these cover the FFI boundary, the numpy round-trips, and the argument guards
+(bad input → typed exception, never a PanicException).
 """
 from __future__ import annotations
 
@@ -17,7 +15,6 @@ from ordvec import (
     MAX_DIM,
     MAX_SIGN_BITMAP_DIM,
     MAX_VECTORS,
-    RankQuant,
     bucket_centre,
     bucket_ranks,
     pack_buckets,
@@ -26,7 +23,6 @@ from ordvec import (
     rank_transform,
     rankquant_bytes_per_vec,
     rankquant_norm,
-    search_asymmetric_byte_lut,
     unpack_buckets,
 )
 
@@ -147,32 +143,6 @@ def test_primitive_bits_guards():
         rankquant_bytes_per_vec(1024, 3)
     with pytest.raises(ValueError, match="bits"):
         rank_to_bucket(0, 1024, 8)
-
-
-def test_search_asymmetric_byte_lut_self_retrieves_top1():
-    rng = np.random.default_rng(0)
-    vectors = rng.standard_normal((40, 128)).astype(np.float32)
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9
-    idx = RankQuant(dim=128, bits=2)
-    idx.add(vectors)
-    queries = vectors[:3]
-    s_lut, i_lut = search_asymmetric_byte_lut(idx, queries, k=10)
-    _, i_ref = idx.search_asymmetric(queries, k=10)
-    assert s_lut.shape == (3, 10)
-    # Both the byte-LUT and the production kernel are the asymmetric path, so a
-    # self-query must self-rank at top-1 in both.
-    for bi in range(3):
-        assert int(i_lut[bi][0]) == bi
-        assert int(i_ref[bi][0]) == bi
-
-
-def test_search_asymmetric_byte_lut_rejects_b1():
-    rng = np.random.default_rng(0)
-    vectors = rng.standard_normal((10, 128)).astype(np.float32)
-    idx = RankQuant(dim=128, bits=1)
-    idx.add(vectors)
-    with pytest.raises(ValueError, match="benchmark-only"):
-        search_asymmetric_byte_lut(idx, vectors[:2], k=5)
 
 
 def test_constants_exposed():

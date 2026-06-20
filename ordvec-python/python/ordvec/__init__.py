@@ -10,11 +10,10 @@ Public API: the four index classes ``Rank``, ``RankQuant``, ``Bitmap``,
 ``rank_to_bucket``, ``bucket_ranks``, ``pack_buckets``, ``unpack_buckets``,
 ``rankquant_bytes_per_vec``, ``bucket_centre``, ``rank_norm``,
 ``rankquant_norm``), the eval-only arbitrary-width scorer
-``rankquant_eval_search``, the byte-LUT scoring helper
-``search_asymmetric_byte_lut``, and the loader limit constants (``MAX_DIM``,
+``rankquant_eval_search``, and the loader limit constants (``MAX_DIM``,
 ``MAX_SIGN_BITMAP_DIM``, ``MAX_VECTORS``). Together with the four classes'
-methods this mirrors the headline Rust retrieval API. Rust-only metadata
-probing and manifest-verification helpers remain available through the Rust
+methods this mirrors the headline Rust retrieval API. Rust-only metadata,
+benchmark, and manifest-verification helpers remain available through the Rust
 crates and the ``ordvec-manifest`` CLI; the low-level ``rank_io`` read/write
 functions are reached through the classes' ``write()`` / ``load()`` methods
 rather than exposed as standalone free functions. The specialized
@@ -77,7 +76,6 @@ from ._ordvec import (
     rankquant_eval_search,
     rankquant_bytes_per_vec,
     rankquant_norm,
-    search_asymmetric_byte_lut,
     unpack_buckets,
 )
 
@@ -106,7 +104,6 @@ __all__ = [
     "rank_norm",
     "rankquant_norm",
     "rankquant_eval_search",
-    "search_asymmetric_byte_lut",
     # loader limit constants
     "MAX_DIM",
     "MAX_SIGN_BITMAP_DIM",

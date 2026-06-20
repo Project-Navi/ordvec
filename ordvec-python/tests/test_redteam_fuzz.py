@@ -20,8 +20,7 @@ subset ids); this one goes after the corners those tests do *not* touch —
   files and a forged-huge-dim DoS-allocation header;
 * exotic dtypes (bool / float16 / object / complex / int families) and NaN bit
   patterns (signaling + quiet) across every f32 entry point;
-* type confusion on the ``search_asymmetric_byte_lut`` ``PyRef<RankQuant>`` arg
-  and on every ``None`` / list / str argument;
+* type confusion on every ``None`` / list / str argument;
 * the documented PyO3 borrow-flag reentrancy contract (a ``__index__`` callback
   that re-enters a ``&mut self`` method on the object a ``&self`` method already
   borrowed → clean ``Already borrowed`` ``RuntimeError``, never a data race).
@@ -61,7 +60,6 @@ from ordvec import (
     rank_transform,
     rankquant_bytes_per_vec,
     rankquant_norm,
-    search_asymmetric_byte_lut,
     unpack_buckets,
 )
 
@@ -527,24 +525,8 @@ def test_signbitmap_batched_fortran_order_raises_value_error():
 
 # =====================================================================
 # Type confusion on non-array params: None / list / str must be a clean
-# TypeError everywhere, including the search_asymmetric_byte_lut PyRef arg.
+# TypeError everywhere.
 # =====================================================================
-
-
-@pytest.mark.parametrize("bad_first", [None, [1, 2, 3], "rq", 42])
-def test_byte_lut_wrong_index_type_raises_type_error(bad_first):
-    q = unit_vectors(2, 64)
-    with pytest.raises(TypeError):
-        search_asymmetric_byte_lut(bad_first, q, k=3)
-
-
-def test_byte_lut_rank_instead_of_rankquant_raises_type_error():
-    # A Rank (wrong index type) where RankQuant is required → TypeError, not a
-    # mis-cast that reads RankQuant fields off a Rank.
-    rk = Rank(dim=64)
-    rk.add(unit_vectors(10, 64))
-    with pytest.raises(TypeError):
-        search_asymmetric_byte_lut(rk, unit_vectors(2, 64), k=3)
 
 
 @pytest.mark.parametrize("bad", [None, [[1.0] * 64] * 4, "hello"])

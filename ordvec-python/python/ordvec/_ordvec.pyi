@@ -2,8 +2,8 @@
 
 Hand-written to mirror the PyO3 surface in ``ordvec-python/src/lib.rs`` exactly
 — the four index classes (``Rank``, ``RankQuant``, ``Bitmap``, ``SignBitmap``),
-the module-level rank-math primitives, the byte-LUT / eval scorers, and the
-``MAX_*`` loader limit constants. abi3 wheels carry no embedded type
+the module-level rank-math primitives, the eval scorer, and the ``MAX_*``
+loader limit constants. abi3 wheels carry no embedded type
 information, so without this stub (and the ``py.typed`` marker) editors and
 ``mypy`` see ``Any`` for the whole package.
 
@@ -171,7 +171,7 @@ class SignBitmap:
 
 # ---------------------------------------------------------------------------
 # Module-level rank-math primitives (parity with ``ordvec::rank::*``) and the
-# byte-LUT / eval scoring helpers.
+# eval scoring helper.
 # ---------------------------------------------------------------------------
 
 def rank_transform(v: NDArray[Any]) -> NDArray[np.uint16]: ...
@@ -183,9 +183,6 @@ def rankquant_bytes_per_vec(d: int, bits: int) -> int: ...
 def bucket_centre(bucket: int, bits: int) -> float: ...
 def rank_norm(d: int) -> float: ...
 def rankquant_norm(d: int, bits: int) -> float: ...
-def search_asymmetric_byte_lut(
-    index: RankQuant, queries: NDArray[Any], k: int
-) -> tuple[NDArray[np.float32], NDArray[np.int64]]: ...
 def rankquant_eval_search(
     corpus: NDArray[Any], queries: NDArray[Any], bits: int, k: int
 ) -> tuple[NDArray[np.float32], NDArray[np.int64]]: ...

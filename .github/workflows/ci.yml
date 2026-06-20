@@ -189,8 +189,8 @@ jobs:
         run: cargo test --features test-utils
       - name: cargo test (no default features)
         run: cargo test --no-default-features
-      - name: cargo build --release --example bench_rank
-        run: cargo build --release --example bench_rank
+      - name: cargo build --release --features bench-utils --example bench_rank
+        run: cargo build --release --features bench-utils --example bench_rank
 
   # ----------------------------------------------------------------------
   # Prove the declared MSRV (1.89.0) actually builds and tests. There is
@@ -542,4 +542,4 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: run bench_rank (scaled, seeded synthetic corpus)
-        run: cargo run --release --example bench_rank -- --n 10000 --queries 100
+        run: cargo run --release --features bench-utils --example bench_rank -- --n 10000 --queries 100

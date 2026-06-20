@@ -1483,9 +1483,8 @@ impl SignBitmap {
 // The four classes above give object-level parity with the Rust API; these
 // free functions expose the `ordvec::rank` math primitives (the data-oblivious
 // kernels the OrdVec/RankQuant paper's Python pipeline verifies against numpy)
-// and the byte-LUT scoring path, so the crate's `pub` surface is fully
-// reachable from Python. Each mirrors the core's argument asserts as a typed
-// `ValueError` instead of letting them surface as a `PanicException`.
+// and the eval-only scoring path. Each mirrors the core's argument asserts as a
+// typed `ValueError` instead of letting them surface as a `PanicException`.
 // =====================================================================
 
 /// Dimension-wise rank transform: `out[k]` = rank of `v[k]` among `v` (ties
@@ -1680,6 +1679,7 @@ fn rankquant_norm(d: usize, bits: u8) -> PyResult<f32> {
 /// Asymmetric search via the byte-LUT scoring path (a benchmark/parity helper;
 /// requires `bits ∈ {2, 4}`). Returns `(scores, indices)` matching
 /// `RankQuant.search_asymmetric`.
+#[cfg(feature = "bench-utils")]
 #[pyfunction]
 fn search_asymmetric_byte_lut<'py>(
     py: Python<'py>,
@@ -1773,8 +1773,7 @@ fn _ordvec(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Bitmap>()?;
     m.add_class::<SignBitmap>()?;
 
-    // Module-level rank-math primitives (parity with `ordvec::rank::*` and the
-    // crate-root `search_asymmetric_byte_lut`).
+    // Module-level rank-math primitives (parity with `ordvec::rank::*`).
     m.add_function(wrap_pyfunction!(rank_transform, m)?)?;
     m.add_function(wrap_pyfunction!(rank_to_bucket, m)?)?;
     m.add_function(wrap_pyfunction!(bucket_ranks, m)?)?;
@@ -1784,6 +1783,7 @@ fn _ordvec(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bucket_centre, m)?)?;
     m.add_function(wrap_pyfunction!(rank_norm, m)?)?;
     m.add_function(wrap_pyfunction!(rankquant_norm, m)?)?;
+    #[cfg(feature = "bench-utils")]
     m.add_function(wrap_pyfunction!(search_asymmetric_byte_lut, m)?)?;
     m.add_function(wrap_pyfunction!(rankquant_eval_search, m)?)?;
 
