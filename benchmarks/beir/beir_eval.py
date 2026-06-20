@@ -577,6 +577,11 @@ _METHOD_FAMILY: dict[str, dict[str, str]] = {
 
 def method_stem(method_slug: str) -> str:
     """Strip ``-m<N>`` / ``-b<N>`` parameter suffixes from a method slug."""
+    hnsw_ef_prefix = "hnsw_ef"
+    if method_slug.startswith(hnsw_ef_prefix):
+        suffix = method_slug[len(hnsw_ef_prefix):]
+        if suffix.isdigit():
+            return "hnsw"
     parts = method_slug.split("-")
     kept = [
         p

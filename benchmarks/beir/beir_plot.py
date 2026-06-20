@@ -47,6 +47,53 @@ COLOR = {s: c for s, _, c in METHOD_STYLE}
 ORDER = [s for s, _, _ in METHOD_STYLE]
 
 
+def _hnsw_ef(slug: str) -> int | None:
+    prefix = "hnsw_ef"
+    if not slug.startswith(prefix):
+        return None
+    suffix = slug[len(prefix):]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _method_family(slug: str) -> str:
+    if _hnsw_ef(slug) is not None:
+        return "hnsw"
+    return slug
+
+
+def _method_label(slug: str) -> str:
+    ef = _hnsw_ef(slug)
+    if ef is not None:
+        return f"HNSW M=32 ef={ef} (4096 B + graph)"
+    return LABEL.get(slug, slug)
+
+
+def _method_short_label(slug: str) -> str:
+    ef = _hnsw_ef(slug)
+    if ef is not None:
+        return f"HNSW ef={ef}"
+    return _method_label(slug).split(" (")[0]
+
+
+def _method_color(slug: str) -> str:
+    return COLOR.get(_method_family(slug), "#777777")
+
+
+def _method_order_key(slug: str) -> tuple[int, int, str]:
+    family = _method_family(slug)
+    try:
+        base_order = ORDER.index(family)
+    except ValueError:
+        base_order = len(ORDER)
+    ef = _hnsw_ef(slug)
+    return (base_order, ef if ef is not None else -1, slug)
+
+
+def _ordered_methods(records: list[dict]) -> list[str]:
+    slugs = {r["method"] for r in records if "method" in r}
+    return sorted(slugs, key=_method_order_key)
+
+
 def _read_timing(path: pathlib.Path) -> list[dict]:
     records: list[dict] = []
     with path.open("r", encoding="utf-8") as fh:
@@ -82,7 +129,7 @@ def plot_scaling(records: list[dict], dataset: str, threads: int, batch: int,
 
     mode = "single-query (batch=1)" if batch == 1 else f"batched (batch={batch})"
     fig, ax = plt.subplots(figsize=(8.2, 5.0))
-    for slug in ORDER:
+    for slug in _ordered_methods(recs):
         pts = sorted(
             ((r["n_docs"], r["query_latency_ms_p50"]) for r in recs if r["method"] == slug),
             key=lambda t: t[0],
@@ -92,9 +139,22 @@ def plot_scaling(records: list[dict], dataset: str, threads: int, batch: int,
         if len(xs) < 2:
             continue
         if slug == "flat":
-            ax.axhline(1.0, color=COLOR[slug], ls="--", lw=1.2, label=LABEL[slug])
+            ax.axhline(
+                1.0,
+                color=_method_color(slug),
+                ls="--",
+                lw=1.2,
+                label=_method_label(slug),
+            )
         else:
-            ax.plot(xs, ys, marker="o", lw=2.0, color=COLOR[slug], label=LABEL[slug])
+            ax.plot(
+                xs,
+                ys,
+                marker="o",
+                lw=2.0,
+                color=_method_color(slug),
+                label=_method_label(slug),
+            )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -124,15 +184,15 @@ def plot_bars(records: list[dict], dataset: str, threads: int, batch: int, n_doc
         lambda r: r["method"],
     )
     by_method = {r["method"]: r for r in recs}
-    slugs = [s for s in ORDER if s in by_method]
+    slugs = [s for s in _ordered_methods(recs) if s in by_method]
     if not slugs:
         print(f"[plot] no records for {fname} (threads={threads}, n={n_docs})", file=sys.stderr)
         return
 
     p50 = [by_method[s]["query_latency_ms_p50"] for s in slugs]
     qps = [by_method[s]["queries_per_second"] for s in slugs]
-    colors = [COLOR[s] for s in slugs]
-    labels = [LABEL[s].split(" (")[0] for s in slugs]
+    colors = [_method_color(s) for s in slugs]
+    labels = [_method_short_label(s) for s in slugs]
 
     flat_p50 = by_method.get("flat", {}).get("query_latency_ms_p50")
 

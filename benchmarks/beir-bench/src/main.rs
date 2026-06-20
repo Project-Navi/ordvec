@@ -38,7 +38,6 @@ use hnsw_rs::prelude::*;
 // HNSW hyper-parameters (faithful to the prior "hnswlib M=32" comparison).
 const HNSW_M: usize = 32;
 const HNSW_EF_CONSTRUCTION: usize = 200;
-const HNSW_EF_SEARCH: usize = 128;
 const HNSW_MAX_LAYER: usize = 16;
 
 // ---------------------------------------------------------------------------
@@ -56,6 +55,7 @@ struct Config {
     out_dir: String,
     threads: usize,          // 0 = all cores
     max_docs: Option<usize>, // None = full corpus
+    ef_search: usize,        // HNSW query-time recall/latency knob (default 128)
 }
 
 fn parse_args() -> Config {
@@ -76,10 +76,18 @@ fn parse_args() -> Config {
     let mut out_dir = String::from("results/beir");
     let mut threads = 0usize;
     let mut max_docs: Option<usize> = None;
+    let mut ef_search = 128usize;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--ef-search" => {
+                ef_search = args
+                    .next()
+                    .expect("--ef-search requires a value")
+                    .parse()
+                    .expect("--ef-search must be an integer")
+            }
             "--cache-dir" => cache_dir = args.next().expect("--cache-dir requires a value"),
             "--dataset" => dataset = args.next().expect("--dataset requires a value"),
             "--split" => split = args.next().expect("--split requires a value"),
@@ -136,6 +144,19 @@ fn parse_args() -> Config {
     assert!(batch >= 1, "--batch must be >= 1");
     assert!(top_k >= 1, "--top-k must be >= 1");
     assert!(candidates >= 1, "--candidates must be >= 1");
+    // hnsw_rs requires ef_search >= the requested neighbour count (it internally
+    // clamps ef = max(ef, knbn)). An --ef-search below --top-k would otherwise be
+    // silently bumped, flattening an ef sweep at the low end. Clamp explicitly +
+    // warn so the sweep stays meaningful and the recorded ef matches what ran.
+    let ef_search = if ef_search < top_k {
+        eprintln!(
+            "warning: --ef-search {ef_search} < --top-k {top_k}; clamping ef_search to {top_k} \
+             (hnsw_rs requires ef >= k)"
+        );
+        top_k
+    } else {
+        ef_search
+    };
 
     Config {
         cache_dir,
@@ -148,6 +169,7 @@ fn parse_args() -> Config {
         out_dir,
         threads,
         max_docs,
+        ef_search,
     }
 }
 
@@ -1031,8 +1053,14 @@ fn run_hnsw(
     write_topk: bool,
     timing_writer: &mut dyn Write,
 ) {
-    let slug = "hnsw";
-    eprintln!("  building HNSW M={HNSW_M} ef_c={HNSW_EF_CONSTRUCTION} ({n_docs} docs) ...");
+    // ef in the slug so an ef-sweep does not overwrite topk/summary/timing rows
+    // (each operating point on the recall/latency frontier is recorded distinctly).
+    let slug = format!("hnsw_ef{}", cfg.ef_search);
+    let slug = slug.as_str();
+    eprintln!(
+        "  building HNSW M={HNSW_M} ef_c={HNSW_EF_CONSTRUCTION} ef_s={} ({n_docs} docs) ...",
+        cfg.ef_search
+    );
     // DistL2 (not DistDot): embeddings are unit-normalized, so min-L2 ≡ max-dot ≡
     // max-cosine — identical neighbors — but DistL2 avoids anndists' DistDot
     // `1-dot` distance assert, which panics on near-duplicate pairs whose float
@@ -1070,7 +1098,7 @@ fn run_hnsw(
                 // Single-thread: serial search per query.
                 (bs..be)
                     .map(|qi| {
-                        hnsw.search(query_rows[qi], top_k, HNSW_EF_SEARCH)
+                        hnsw.search(query_rows[qi], top_k, cfg.ef_search)
                             .into_iter()
                             .map(|nb| (nb.d_id as i64, -nb.distance))
                             .collect()
@@ -1080,7 +1108,7 @@ fn run_hnsw(
                 // Threaded: batched parallel search (rayon, this pool).
                 let batch_slice: Vec<Vec<f32>> =
                     (bs..be).map(|qi| query_rows[qi].to_vec()).collect();
-                hnsw.parallel_search(&batch_slice, top_k, HNSW_EF_SEARCH)
+                hnsw.parallel_search(&batch_slice, top_k, cfg.ef_search)
                     .into_iter()
                     .map(|nbs| {
                         nbs.into_iter()
