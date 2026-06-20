@@ -39,7 +39,7 @@ fn rank_to_bucket_zero_d_panics() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[should_panic(expected = "bits must be 1,2,4")]
+#[should_panic(expected = "bits must be 1,2,4,8")]
 fn rankquant_bytes_per_vec_zero_bits_panics() {
     let _ = rankquant_bytes_per_vec(64, 0);
 }

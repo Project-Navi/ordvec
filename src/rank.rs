@@ -853,10 +853,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bits must be 1,2,4")]
+    #[should_panic(expected = "bits must be 1,2,4,8")]
     fn rankquant_norm_rejects_invalid_bits() {
-        // 3-bit packing has no RankQuant scheme; the norm must refuse it
-        // rather than return a value for a non-existent layout.
+        // Only byte-dividing RankQuant widths are valid; unsupported widths
+        // must fail loud instead of returning a norm for a non-existent layout.
         let _ = rankquant_norm(64, 3);
     }
 }
