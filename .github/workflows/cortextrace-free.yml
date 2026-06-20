@@ -1,0 +1,75 @@
+name: CortexTrace Free
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cortextrace:
+    name: Execution consequence review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node for CortexTrace CLI
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+
+      - name: Run CortexTrace Free advisory review
+        shell: bash
+        run: |
+          set +e
+
+          mkdir -p .cortextrace/reports
+
+          CORTEXTRACE_VERSION="0.1.0"
+
+          npm_config_ignore_scripts=true npx -y @blocksifr/cortextrace@${CORTEXTRACE_VERSION} doctor
+          doctor_status=$?
+
+          npm_config_ignore_scripts=true npx -y @blocksifr/cortextrace@${CORTEXTRACE_VERSION} run
+          run_status=$?
+
+          npm_config_ignore_scripts=true npx -y @blocksifr/cortextrace@${CORTEXTRACE_VERSION} report
+          report_status=$?
+
+          {
+            echo "### CortexTrace Free advisory run"
+            echo
+            echo "| Command | Exit status |"
+            echo "|---|---:|"
+            echo "| doctor | ${doctor_status} |"
+            echo "| run | ${run_status} |"
+            echo "| report | ${report_status} |"
+            echo
+            echo "This workflow is advisory-only. It does not receive a GitHub token and does not block merges."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit 0
+
+      - name: Upload CortexTrace reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cortextrace-free-report
+          path: |
+            .cortextrace/reports/**
+            cortextrace-report.*
+            !.cortextrace/**/*.env
+            !.cortextrace/**/*token*
+            !.cortextrace/**/*secret*
+            !.cortextrace/**/*credential*
+          include-hidden-files: true
+          if-no-files-found: warn
