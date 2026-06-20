@@ -1,0 +1,45 @@
+name: CortexTrace Free
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  cortextrace:
+    name: Execution consequence review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node for CortexTrace CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run CortexTrace Free
+        run: |
+          mkdir -p .cortextrace/reports
+          npx -y @blocksifr/cortextrace@latest doctor || true
+          npx -y @blocksifr/cortextrace@latest run || true
+          npx -y @blocksifr/cortextrace@latest report || true
+
+      - name: Upload CortexTrace reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cortextrace-free-report
+          path: |
+            .cortextrace/reports/**
+            cortextrace-report.*
+          if-no-files-found: ignore
