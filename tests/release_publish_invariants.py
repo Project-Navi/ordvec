@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import posixpath
@@ -24,6 +25,10 @@ WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/relea
 CI_WORKFLOW_PATH = os.environ.get("CI_WORKFLOW_PATH", ".github/workflows/ci.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 STRICT_STABLE_TAG_PATTERN = r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+CHANGELOG_RELEASE_HEADING_RE = re.compile(
+    r"^## (?:\[Unreleased\]|\[?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\]? - "
+    r"\d{4}-\d{2}-\d{2})\s*$"
+)
 COVERAGE_WORKFLOW_PATH = os.environ.get("COVERAGE_WORKFLOW_PATH", ".github/workflows/coverage.yml")
 SDE_ACTION_PATH = os.environ.get(
     "SDE_ACTION_PATH", ".github/actions/setup-intel-sde/action.yml"
@@ -383,15 +388,32 @@ def semver_minor_requirement(version: str) -> str:
     return f"{match.group(1)}.{match.group(2)}"
 
 
+def normalized_text(value: str) -> str:
+    return " ".join(value.split()).lower()
+
+
+def python_module_docstring(path: str) -> str:
+    text = read_text(path)
+    try:
+        module = ast.parse(text, filename=path)
+    except SyntaxError as exc:
+        fail(f"{path}: could not parse Python source for module docstring: {exc}")
+    docstring = ast.get_docstring(module)
+    if not docstring:
+        fail(f"{path}: must contain a module docstring")
+    return docstring
+
+
 def changelog_section_after_heading(changelog: str, heading: str) -> str:
     match = re.search(rf"^## {re.escape(heading)}\s*$", changelog, re.MULTILINE)
     if match is None:
         fail(f"CHANGELOG.md must contain a {heading} section")
-    following = changelog[match.end() :]
-    next_heading = re.search(r"^## ", following, re.MULTILINE)
-    if next_heading is not None:
-        return following[: next_heading.start()]
-    return following
+    section_lines: list[str] = []
+    for line in changelog[match.end() :].splitlines(keepends=True):
+        if CHANGELOG_RELEASE_HEADING_RE.match(line):
+            break
+        section_lines.append(line)
+    return "".join(section_lines)
 
 
 def check_unreleased_section_empty_for_dated_version(changelog: str, version: str) -> None:
@@ -476,10 +498,10 @@ def check_release_version_sync() -> None:
 
 
 def check_python_binding_safety_docs_sync() -> None:
-    package_doc = read_text("ordvec-python/python/ordvec/__init__.py")
+    package_doc = python_module_docstring("ordvec-python/python/ordvec/__init__.py")
     safety_doc = read_text("docs/bindings-safety.md")
-    package_doc_normalized = " ".join(package_doc.split()).lower()
-    safety_doc_normalized = " ".join(safety_doc.split()).lower()
+    package_doc_normalized = normalized_text(package_doc)
+    safety_doc_normalized = normalized_text(safety_doc)
 
     required_fragments = (
         "copy NumPy inputs into Rust-owned buffers before detaching",
@@ -499,7 +521,7 @@ def check_python_binding_safety_docs_sync() -> None:
         "do not mutate an array from another thread",
     )
     for fragment in forbidden_fragments:
-        if fragment in package_doc:
+        if fragment in package_doc_normalized:
             fail(
                 "ordvec-python/python/ordvec/__init__.py still contains stale "
                 f"zero-copy threading wording: {fragment!r}"
