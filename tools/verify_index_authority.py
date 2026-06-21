@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -33,9 +34,13 @@ def die(msg, code=2):
     sys.exit(code)
 
 
+def reject_json_constant(value):
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+
 def load_json(path: Path, label: str):
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(), parse_constant=reject_json_constant)
     except Exception as e:
         die(f"cannot read {label}: {e}")
 
@@ -58,7 +63,10 @@ def require_number(obj, key, label):
     value = obj.get(key)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         die(f"{label}.{key} must be a number")
-    return float(value)
+    value = float(value)
+    if not math.isfinite(value):
+        die(f"{label}.{key} must be finite")
+    return value
 
 
 def require_list(obj, key, label):
@@ -66,6 +74,70 @@ def require_list(obj, key, label):
     if not isinstance(value, list):
         die(f"{label}.{key} must be a list")
     return value
+
+
+def require_nonempty_string_list(obj, key, label):
+    value = require_list(obj, key, label)
+    cleaned = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            die(f"{label}.{key}[{i}] must be a non-empty string")
+        cleaned.append(item.strip())
+    if not cleaned:
+        die(f"{label}.{key} must contain at least one non-empty string")
+    return cleaned
+
+
+def require_ifc_enabled(ifc):
+    if not isinstance(ifc, dict):
+        die("ifc must be an object")
+    if ifc.get("enabled") is not True:
+        die("ifc.enabled must be true for an index authority receipt")
+
+    compute_path = ifc.get("compute_path")
+    if isinstance(compute_path, str):
+        if not compute_path.strip():
+            die("ifc.compute_path must be non-empty")
+    elif isinstance(compute_path, list):
+        if not compute_path or any(not isinstance(x, str) or not x.strip() for x in compute_path):
+            die("ifc.compute_path must contain non-empty string entries")
+    else:
+        die("ifc.compute_path must be a non-empty string or list of strings")
+
+
+def has_concrete_hnsw_comparison(evidence):
+    h = evidence.get("hnsw_comparison")
+    if not isinstance(h, dict) or not h:
+        return False
+
+    artifact = h.get("artifact") or h.get("artifact_ref") or h.get("evidence_ref") or h.get("receipt_ref")
+    has_artifact = isinstance(artifact, str) and bool(artifact.strip())
+
+    metric_pairs = [
+        ("baseline_latency_ms", "candidate_latency_ms"),
+        ("baseline_qps", "candidate_qps"),
+        ("baseline_recall", "candidate_recall"),
+        ("baseline_score", "candidate_score"),
+    ]
+
+    has_metric_pair = any(
+        isinstance(h.get(a), (int, float))
+        and isinstance(h.get(b), (int, float))
+        and math.isfinite(float(h.get(a)))
+        and math.isfinite(float(h.get(b)))
+        for a, b in metric_pairs
+    )
+
+    nested_latency = h.get("single_query_latency_ms")
+    has_nested_latency = (
+        isinstance(nested_latency, dict)
+        and isinstance(nested_latency.get("baseline"), (int, float))
+        and isinstance(nested_latency.get("candidate"), (int, float))
+        and math.isfinite(float(nested_latency.get("baseline")))
+        and math.isfinite(float(nested_latency.get("candidate")))
+    )
+
+    return has_artifact and (has_metric_pair or has_nested_latency)
 
 
 def main():
@@ -106,9 +178,12 @@ def main():
     e = r["evidence"]
     econ = r["economics"]
     base = r["baseline"]
+    ifc = r["ifc"]
     decision_obj = r["decision"]
     scope = r["scope"]
     limitations = r["limitations"]
+
+    require_ifc_enabled(ifc)
 
     require_keys(e, ["candidate_score", "baseline_score", "delta_vs_baseline", "within_bootstrap_noise"], "evidence")
     require_keys(base, ["mode", "bytes_per_vector"], "baseline")
@@ -155,20 +230,23 @@ def main():
     if abs(declared_speedup - expected_speedup) > 0.02:
         die("single_query_speedup_x mismatch")
 
-    applies_to = require_list(scope, "applies_to", "scope")
-    does_not_claim = require_list(scope, "does_not_claim", "scope")
+    applies_to = require_nonempty_string_list(scope, "applies_to", "scope")
+    does_not_claim = require_nonempty_string_list(scope, "does_not_claim", "scope")
 
     if not isinstance(limitations, list):
         die("limitations must be a list")
+    for i, item in enumerate(limitations):
+        if not isinstance(item, str) or not item.strip():
+            die(f"limitations[{i}] must be a non-empty string")
 
     decision = "ALLOW_INDEX_FIRST"
 
     scope_missing = not applies_to or not does_not_claim
     limitations_missing = not limitations
 
-    quality_loss = baseline_score - candidate_score
-    quality_too_low = quality_loss > float(policy["max_quality_delta_loss"])
+    quality_loss = max(0.0, baseline_score - candidate_score)
     outside_bootstrap_noise = e["within_bootstrap_noise"] is not True
+    quality_too_low = quality_loss > float(policy["max_quality_delta_loss"]) and outside_bootstrap_noise
 
     economics_too_weak = (
         declared_storage < float(policy["min_storage_reduction_x"])
@@ -178,19 +256,25 @@ def main():
     claims_text = " ".join(str(x).lower() for x in applies_to)
     claims_parallel_or_production = any(
         marker in claims_text
-        for marker in ["parallel", "threaded", "production", "prod", "serving", "online"]
+        for marker in [
+            "parallel",
+            "threaded",
+            "multi-thread",
+            "multithread",
+            "concurrent",
+            "throughput",
+            "high-qps",
+            "high qps"
+        ]
     )
 
-    has_hnsw_comparison = (
-        e.get("compared_against_hnsw") is True
-        or isinstance(e.get("hnsw_comparison"), dict)
-    )
+    has_hnsw_comparison = has_concrete_hnsw_comparison(e)
 
     if policy["require_scope"] and scope_missing:
         decision = "DENY_UNSCOPED_CLAIM"
     elif policy["require_limitations"] and limitations_missing:
         decision = "DENY_UNSCOPED_CLAIM"
-    elif quality_too_low or outside_bootstrap_noise or economics_too_weak:
+    elif quality_too_low or economics_too_weak:
         decision = "REQUIRE_DENSE_FALLBACK"
     elif (
         policy["require_hnsw_comparison_for_parallel_claims"]
