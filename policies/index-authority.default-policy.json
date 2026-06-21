@@ -1,0 +1,9 @@
+{
+  "schema": "ordvec.index_authority.verifier_policy.v0.1",
+  "min_storage_reduction_x": 4.0,
+  "min_single_query_speedup_x": 1.25,
+  "max_quality_delta_loss": 0.02,
+  "require_scope": true,
+  "require_limitations": true,
+  "require_hnsw_comparison_for_parallel_claims": true
+}
