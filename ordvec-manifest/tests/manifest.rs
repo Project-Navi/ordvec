@@ -2272,19 +2272,17 @@ fn verify_for_load_fails_closed_with_report_for_corrupted_artifact() {
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&index)
-        .unwrap()
-        .write_all(b"\0")
-        .unwrap();
+    // Corrupt in place (same size): the declared-size read bound is
+    // satisfied, so verification proceeds to the digest and fails there.
+    let mut bytes = fs::read(&index).unwrap();
+    bytes[0] ^= 0xFF;
+    fs::write(&index, &bytes).unwrap();
 
     let err = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap_err();
     let VerifiedLoadPlanError::VerificationFailed(report) = err else {
         panic!("expected verification failure");
     };
     assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
-    assert!(error_codes(&report).contains(&"artifact_file_size_mismatch"));
 }
 
 #[test]
@@ -2328,8 +2326,9 @@ fn verify_for_load_plan_is_not_a_byte_pin() {
     let VerifiedLoadPlanError::VerificationFailed(report) = err else {
         panic!("expected verification failure");
     };
-    assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
-    assert!(error_codes(&report).contains(&"artifact_file_size_mismatch"));
+    // The artifact grew past its declared size, so re-verification fails
+    // fast at the declared-size read bound.
+    assert!(error_codes(&report).contains(&"artifact_file_too_large"));
 }
 
 #[test]

@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+
+- **ordvec-manifest: derived artifact size bounds.** Verification now bounds
+  every artifact read by its manifest-declared `file_size_bytes` (the manifest
+  itself remains hard-capped at 1 MiB and SHA-256 pins content); manifest
+  creation bounds reads by the artifact's observed size. The flat
+  `ResourceLimits` byte caps (`max_auxiliary_artifact_bytes`,
+  `max_calibration_profile_bytes`, `max_encoder_distortion_profile_bytes`)
+  are now explicit opt-in ceilings and default to unbounded — previously the
+  64 MiB auxiliary default made legitimate large sign sidecars (>524,288 rows
+  at dim=1024) impossible to write with default options.
+- **ordvec-manifest: primary artifact reads are now bounded.** The primary
+  index artifact is hashed under its declared size (new
+  `artifact_file_too_large` reason code); previously this read was unbounded.
+  An artifact grown past its declaration now fails fast at the read bound
+  instead of surfacing as a digest mismatch after hashing the excess.
+- **ordvec-manifest: bounded hashing streams with constant memory.**
+  `sha256_file_bounded` no longer materialises the file in memory before
+  hashing.
 
 ## 0.5.0 - 2026-06-19
 
