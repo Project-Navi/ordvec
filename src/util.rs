@@ -124,8 +124,18 @@ pub(crate) fn l2_normalise_into(out: &mut Vec<f32>, v: &[f32]) {
 /// validate separately; this is the Rust-side backstop.
 #[inline]
 pub(crate) fn assert_all_finite(v: &[f32]) {
+    // Large ingest batches pay a full serial pass here (measured ~0.1s per
+    // GiB); split the scan across the pool once it dwarfs the fork cost.
+    const PARALLEL_THRESHOLD: usize = 1 << 20;
+    let all_finite = if v.len() >= PARALLEL_THRESHOLD {
+        use rayon::prelude::*;
+        v.par_chunks(1 << 18)
+            .all(|c| c.iter().all(|x| x.is_finite()))
+    } else {
+        v.iter().all(|x| x.is_finite())
+    };
     assert!(
-        v.iter().all(|x| x.is_finite()),
+        all_finite,
         "ordvec: input contains non-finite (NaN or ±Inf) values; embeddings must be finite"
     );
 }
