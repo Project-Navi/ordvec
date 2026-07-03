@@ -253,6 +253,13 @@ impl SignBitmap {
         let mut heaps: Vec<BinaryHeap<(u32, u32)>> = (0..nq)
             .map(|_| BinaryHeap::with_capacity(m_eff + 1))
             .collect();
+        // Cached copy of each full heap's worst kept hamming. Doc ids visit
+        // each heap strictly ascending (d ascends within a row, blocks
+        // ascend), so a candidate tying the worst hamming always loses the
+        // (hamming, doc_id) tie-break — once full, the boundary test
+        // reduces to one u32 compare against this register. u32::MAX while
+        // filling (hamming <= dim can never reach it).
+        let mut worst_bounds = vec![u32::MAX; nq];
 
         let mut block_start = 0usize;
         while block_start < n {
@@ -266,14 +273,18 @@ impl SignBitmap {
                 sign_scan_collect_batched(block, bn, qpv, qb_tile, tq, scores);
                 for ti in 0..tq {
                     let heap = &mut heaps[tile_start + ti];
+                    let worst = &mut worst_bounds[tile_start + ti];
                     let row = &scores[ti * bn..(ti + 1) * bn];
                     for (d, &hamming) in row.iter().enumerate() {
-                        let key = (hamming, (block_start + d) as u32);
-                        if heap.len() < m_eff {
-                            heap.push(key);
-                        } else if key < *heap.peek().expect("non-empty full collector") {
+                        if hamming >= *worst {
+                            continue;
+                        }
+                        heap.push((hamming, (block_start + d) as u32));
+                        if heap.len() > m_eff {
                             heap.pop();
-                            heap.push(key);
+                        }
+                        if heap.len() == m_eff {
+                            *worst = heap.peek().expect("full collector").0;
                         }
                     }
                 }
