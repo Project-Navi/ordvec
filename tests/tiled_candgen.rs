@@ -33,13 +33,7 @@ fn tie_heavy_corpus(dim: usize, n: usize) -> Vec<f32> {
     (0..n)
         .flat_map(|doc| {
             let pattern = doc % 4;
-            (0..dim).map(move |c| {
-                if (c + pattern) % 3 == 0 {
-                    -1.0
-                } else {
-                    1.0
-                }
-            })
+            (0..dim).map(move |c| if (c + pattern) % 3 == 0 { -1.0 } else { 1.0 })
         })
         .collect()
 }
@@ -64,7 +58,10 @@ fn assert_contract(dim: usize, vectors: &[f32], queries: &[f32], m: usize, label
         let q = &queries[qi * dim..(qi + 1) * dim];
         let got = sign.top_m_candidates(q, m);
         let want = oracle_top_m(&sign, q, m);
-        assert_eq!(got, want, "{label}: single-query mismatch at query {qi}, m={m}");
+        assert_eq!(
+            got, want,
+            "{label}: single-query mismatch at query {qi}, m={m}"
+        );
     }
 
     // Batched serial CSR path: row qi must equal the single-query result.
@@ -73,7 +70,11 @@ fn assert_contract(dim: usize, vectors: &[f32], queries: &[f32], m: usize, label
     for qi in 0..nq {
         let row = &cb.candidates[cb.offsets[qi]..cb.offsets[qi + 1]];
         let want = oracle_top_m(&sign, &queries[qi * dim..(qi + 1) * dim], m);
-        assert_eq!(row, &want[..], "{label}: CSR row mismatch at query {qi}, m={m}");
+        assert_eq!(
+            row,
+            &want[..],
+            "{label}: CSR row mismatch at query {qi}, m={m}"
+        );
     }
 }
 
@@ -81,7 +82,10 @@ fn assert_contract(dim: usize, vectors: &[f32], queries: &[f32], m: usize, label
 /// tile size, at a SIMD-friendly dim.
 #[test]
 fn random_corpus_matches_oracle_across_block_boundaries() {
-    let dim = 128;
+    // dim=512 -> 8 qwords/vec -> 4096-doc blocks; n=10240 spans three
+    // blocks including a final partial one (audit: the previous dim=128
+    // shape fit in a single block, so the loop never crossed a boundary).
+    let dim = 512;
     let n = 10_240;
     let vectors = random_corpus(dim, n, 0xC0FFEE);
     let queries = random_corpus(dim, 33, 0xBEEF);
@@ -153,5 +157,19 @@ fn dim_1024_shape_matches_oracle() {
     let queries = random_corpus(dim, 8, 0x5A5A);
     for m in [256, 320] {
         assert_contract(dim, &vectors, &queries, m, "dim1024");
+    }
+}
+
+/// AVX-512 tail residue (dim=768 -> qpv=12, rem=4) composed with
+/// multi-block crossing and a final partial block — the kernel-shape case
+/// the audit flagged as untested in the permanent suite.
+#[test]
+fn dim_768_tail_residue_crosses_blocks() {
+    let dim = 768;
+    let n = 3_200; // block_docs = 262144/96 = 2730 -> 2 blocks, partial tail
+    let vectors = random_corpus(dim, n, 0x7E57);
+    let queries = random_corpus(dim, 7, 0x7E58);
+    for m in [64, 320] {
+        assert_contract(dim, &vectors, &queries, m, "dim768-tail");
     }
 }

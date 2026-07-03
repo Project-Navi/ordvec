@@ -299,9 +299,31 @@ impl SignBitmap {
         if m_eff == 0 {
             return Vec::new();
         }
-        self.top_m_candidates_streamed(q, m_eff)
-            .pop()
-            .expect("streamed selection returns one row per query")
+        // Single-query stays on the dense partition path: with one query
+        // there is no scan to share, and select_nth_unstable_by (O(n)
+        // average) measurably beats an O(n log m) bounded heap for m in the
+        // hundreds at small/medium n (audit: +50-90% regression otherwise).
+        let qb = self.build_query_bitmap(q);
+        let mut scores = vec![0u32; self.n_vectors]; // Hamming distance per doc
+        sign_scan_collect(
+            &self.bitmaps,
+            self.n_vectors,
+            self.qwords_per_vec,
+            &qb,
+            &mut scores,
+        );
+        let mut idx: Vec<u32> = (0..self.n_vectors as u32).collect();
+        // Ascending Hamming = best candidates first. Composite key
+        // ensures deterministic partition at boundary ties.
+        let cmp = |a: &u32, b: &u32| {
+            scores[*a as usize]
+                .cmp(&scores[*b as usize])
+                .then_with(|| a.cmp(b))
+        };
+        idx.select_nth_unstable_by(m_eff - 1, cmp);
+        let mut head = idx[..m_eff].to_vec();
+        head.sort_unstable_by(cmp);
+        head
     }
 
     /// Batched variant: stream the sign bitmaps **once** and produce
