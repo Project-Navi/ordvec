@@ -363,6 +363,12 @@ fn validate_manifest_shape(
             "artifact.sha256 must be a lowercase 64-character hex SHA-256 digest",
         );
     }
+    if manifest.artifact.file_size_bytes == 0 {
+        report.error(
+            "artifact_file_size_zero",
+            "artifact.file_size_bytes must be greater than zero",
+        );
+    }
     if manifest.artifact.bytes_per_vec == 0 {
         report.error(
             "artifact_bytes_per_vec_zero",
@@ -562,6 +568,17 @@ fn validate_auxiliary_artifact_shape(
                 "auxiliary_artifact_sha256_invalid",
                 format!(
                     "auxiliary artifact {name:?} sha256 must be a lowercase 64-character hex SHA-256 digest"
+                ),
+            );
+        }
+        // Optional artifacts may legitimately be declared absent with a
+        // zero-size placeholder (see `AuxiliaryArtifactState::OptionalAbsent`);
+        // only required declarations must carry a real size.
+        if artifact.required && artifact.file_size_bytes == 0 {
+            report.error(
+                "auxiliary_artifact_file_size_zero",
+                format!(
+                    "required auxiliary artifact {name:?} file_size_bytes must be greater than zero"
                 ),
             );
         }
