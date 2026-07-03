@@ -765,8 +765,39 @@ fn load_rankquant_from_stream<R: Read + Seek>(
     let expected_per_bucket = dim / n_buckets;
     let mask = (1u8 << bits) - 1;
     let bits_u = bits as usize;
-    for (row_idx, row) in packed.chunks_exact(bytes_per_row).enumerate() {
-        let mut hist = [0usize; 16]; // n_buckets <= 2^4 = 16
+    // Per-byte bucket-count LUT: byte value -> how many of its packed codes
+    // land in each bucket. Replaces the per-code shift/mask loop (dim ops
+    // per row) with bytes_per_row table lookups, and rows check in parallel
+    // (they are independent). `find_first` preserves the serial contract of
+    // reporting the lowest offending row.
+    let mut lut = [[0u8; 16]; 256];
+    for (byte, counts) in lut.iter_mut().enumerate() {
+        for slot in 0..codes_per_byte {
+            let shift = (codes_per_byte - 1 - slot) * bits_u;
+            counts[((byte as u8 >> shift) & mask) as usize] += 1;
+        }
+    }
+    let row_is_valid = |row: &[u8]| {
+        let mut hist = [0u16; 16];
+        for &byte in row {
+            let counts = &lut[byte as usize];
+            for bucket in 0..n_buckets {
+                hist[bucket] += u16::from(counts[bucket]);
+            }
+        }
+        hist[..n_buckets]
+            .iter()
+            .all(|&count| count as usize == expected_per_bucket)
+    };
+    use rayon::prelude::*;
+    let first_bad = (0..n_vectors).into_par_iter().find_first(|&row_idx| {
+        !row_is_valid(&packed[row_idx * bytes_per_row..(row_idx + 1) * bytes_per_row])
+    });
+    if let Some(row_idx) = first_bad {
+        // Rerun the scalar histogram on the offending row for the exact
+        // bucket/count in the error message.
+        let row = &packed[row_idx * bytes_per_row..(row_idx + 1) * bytes_per_row];
+        let mut hist = [0usize; 16];
         for &byte in row {
             for slot in 0..codes_per_byte {
                 let shift = (codes_per_byte - 1 - slot) * bits_u;
@@ -781,6 +812,7 @@ fn load_rankquant_from_stream<R: Read + Seek>(
                 )));
             }
         }
+        unreachable!("row {row_idx} failed the LUT check but passed the scalar recheck");
     }
     Ok((bits, dim, n_vectors, packed))
 }
