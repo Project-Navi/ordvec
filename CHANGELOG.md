@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Batched sign candidate generation now streams the corpus once per call.**
+  `SignBitmap::top_m_candidates_batched_serial_csr` previously looped the
+  single-query path, re-streaming the full sign bitmap per query (the
+  documented-naive first cut). The internals now scan the corpus once per call
+  in L2-sized doc blocks, score every query of the call against each hot block
+  in query tiles via the existing batched kernel, and select per-query top-m
+  with bounded `(hamming, doc_id)` min-collectors — bit-identical to a full
+  sort by construction, independent of processing order (the key *is* the
+  contract's sort key), pinned by an independent oracle suite
+  (`tests/tiled_candgen.rs`) across random, tie-heavy, duplicate-run, and edge
+  geometries. Per-query corpus traffic drops by the call's query count: at
+  1.26M rows × dim=1024, a 2048-query call reads the 161 MB sign sidecar once
+  instead of 2048 times. `top_m_candidates` routes through the same core
+  (dropping its per-call n-row Hamming materialisation) except at `nq=1`,
+  which keeps the dense partition path — the streamed core measured +50–90%
+  single-query time at small/medium `n` with `m` in the hundreds (bounded heap
+  `O(n log m)` vs `select_nth_unstable_by` `O(n)`), while the dense path is
+  parity-or-better at every measured size. The serial contract is preserved
+  (no rayon). Together with the collector worst-bound change below, measured
+  downstream in a two-stage retrieval stack at 1.26M × 1024: batched search
+  throughput 220 → 10.2k queries/s, results bit-identical.
+- **Candidate-collector accept test reduced to a cached worst-bound compare.**
+  Doc ids visit each per-query heap strictly ascending, so a candidate tying
+  the worst kept hamming always loses the `(hamming, doc_id)` tie-break — once
+  the collector is full, the accept test is exactly `hamming < worst kept
+  hamming`. That bound is now cached in a register-friendly `u32` (`u32::MAX`
+  while filling), skipping the heap peek + tuple compare on the ~99.8% reject
+  path. Bit-identical by construction; pinned by the tie-heavy and
+  duplicate-run oracle suites.
+- **Parallel finite-input validation and scratch-based rank encode.**
+  `assert_all_finite` paid a full serial pass per add/search batch — measured
+  ~0.1 s per GiB, twice per ingest batch counting the caller layer. Scans of
+  1M+ floats now split across the rayon pool (4.4× measured).
+  `RankQuant::add`'s per-row closure allocated a fresh ranks `Vec` per vector
+  inside the parallel loop; it now reuses a per-worker scratch via
+  `rank_transform_into`. Measured on a 1.26M × 1024 corpus slice: encode-path
+  validation attribution 0.097 s serial scan → 0.022 s parallel, with the
+  per-vector allocation churn removed from the hot loop.
+- **LUT + parallel constant-composition check on `RankQuant` load.**
+  `load_rankquant`'s forged-buffer defense histogrammed every packed code
+  serially — 1.29 billion shift/mask ops at 1.26M × 1024, ~1 s of the 1.27 s
+  verified open. A 4 KB per-byte bucket-count LUT replaces the per-code inner
+  loop and rows validate in parallel; `find_first` keeps the
+  lowest-offending-row error contract, with a scalar recheck producing the
+  identical message. The security property is unchanged: every row still
+  proves uniform composition before the index is usable. Measured verified
+  open at 1.26M × 1024: 1.27 s → 0.38 s.
+
 ### Changed
 
 - **ordvec-manifest: derived artifact size bounds.** Verification now bounds
