@@ -39,6 +39,7 @@
 //! scalar path. See [`crate::avx512vpop_supported`].
 
 use rayon::prelude::*;
+use std::collections::BinaryHeap;
 
 use crate::OrdvecError;
 
@@ -220,6 +221,77 @@ impl SignBitmap {
     /// SIMD dispatch paths — same audit discipline as
     /// [`crate::Bitmap::top_m_candidates`].
     #[must_use = "this scans the corpus to generate candidates; dropping the result discards that work"]
+    /// Streamed exact top-m selection shared by [`Self::top_m_candidates`]
+    /// and [`Self::top_m_candidates_batched_serial_csr`]: the corpus is
+    /// scanned once per call in L2-sized doc blocks, each hot block is
+    /// scored against every query (in small query tiles), and per-query
+    /// bounded min-m collectors keyed by `(hamming, doc_id)` select exactly
+    /// the lexicographic top-m — bit-identical to a full sort, independent
+    /// of processing order. Serial by contract: no rayon.
+    fn top_m_candidates_streamed(&self, queries: &[f32], m_eff: usize) -> Vec<Vec<u32>> {
+        const TILE_QUERIES: usize = 32;
+        const BLOCK_BYTES: usize = 256 * 1024;
+
+        let dim = self.dim;
+        let nq = queries.len() / dim;
+        let qpv = self.qwords_per_vec;
+        let n = self.n_vectors;
+        debug_assert!(m_eff >= 1 && m_eff <= n);
+
+        let mut q_bitmaps = vec![0u64; nq * qpv];
+        for qi in 0..nq {
+            let qb = self.build_query_bitmap(&queries[qi * dim..(qi + 1) * dim]);
+            q_bitmaps[qi * qpv..(qi + 1) * qpv].copy_from_slice(&qb);
+        }
+
+        let block_docs = (BLOCK_BYTES / (qpv * 8)).max(64).min(n);
+        let tile = TILE_QUERIES.min(nq);
+        let mut block_scores = vec![0u32; tile * block_docs];
+        // Max-heap keeps the current worst kept key at the top, so the
+        // retained set is always the m lexicographically smallest
+        // (hamming, doc_id) keys seen so far.
+        let mut heaps: Vec<BinaryHeap<(u32, u32)>> = (0..nq)
+            .map(|_| BinaryHeap::with_capacity(m_eff + 1))
+            .collect();
+
+        let mut block_start = 0usize;
+        while block_start < n {
+            let bn = block_docs.min(n - block_start);
+            let block = &self.bitmaps[block_start * qpv..(block_start + bn) * qpv];
+            let mut tile_start = 0usize;
+            while tile_start < nq {
+                let tq = tile.min(nq - tile_start);
+                let qb_tile = &q_bitmaps[tile_start * qpv..(tile_start + tq) * qpv];
+                let scores = &mut block_scores[..tq * bn];
+                sign_scan_collect_batched(block, bn, qpv, qb_tile, tq, scores);
+                for ti in 0..tq {
+                    let heap = &mut heaps[tile_start + ti];
+                    let row = &scores[ti * bn..(ti + 1) * bn];
+                    for (d, &hamming) in row.iter().enumerate() {
+                        let key = (hamming, (block_start + d) as u32);
+                        if heap.len() < m_eff {
+                            heap.push(key);
+                        } else if key < *heap.peek().expect("non-empty full collector") {
+                            heap.pop();
+                            heap.push(key);
+                        }
+                    }
+                }
+                tile_start += tq;
+            }
+            block_start += bn;
+        }
+
+        heaps
+            .into_iter()
+            .map(|heap| {
+                let mut kept = heap.into_vec();
+                kept.sort_unstable();
+                kept.into_iter().map(|(_, doc)| doc).collect()
+            })
+            .collect()
+    }
+
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
         assert_eq!(q.len(), self.dim);
         crate::util::assert_all_finite(q);
@@ -227,27 +299,9 @@ impl SignBitmap {
         if m_eff == 0 {
             return Vec::new();
         }
-        let qb = self.build_query_bitmap(q);
-        let mut scores = vec![0u32; self.n_vectors]; // Hamming distance per doc
-        sign_scan_collect(
-            &self.bitmaps,
-            self.n_vectors,
-            self.qwords_per_vec,
-            &qb,
-            &mut scores,
-        );
-        let mut idx: Vec<u32> = (0..self.n_vectors as u32).collect();
-        // Ascending Hamming = best candidates first. Composite key
-        // ensures deterministic partition at boundary ties.
-        let cmp = |a: &u32, b: &u32| {
-            scores[*a as usize]
-                .cmp(&scores[*b as usize])
-                .then_with(|| a.cmp(b))
-        };
-        idx.select_nth_unstable_by(m_eff - 1, cmp);
-        let mut head = idx[..m_eff].to_vec();
-        head.sort_unstable_by(cmp);
-        head
+        self.top_m_candidates_streamed(q, m_eff)
+            .pop()
+            .expect("streamed selection returns one row per query")
     }
 
     /// Batched variant: stream the sign bitmaps **once** and produce
@@ -313,10 +367,12 @@ impl SignBitmap {
     /// pool. (The existing [`Self::top_m_candidates_batched`] remains the
     /// internally-parallel standalone convenience.)
     ///
-    /// Track-1 implementation is intentionally naive — it loops the single-query
-    /// [`Self::top_m_candidates`] (which materialises a per-query `n` Hamming
-    /// row). A future release may replace the internals with streaming top-m
-    /// behind this frozen signature; the CSR output contract will not change.
+    /// The internals stream the corpus **once per call** in L2-sized doc
+    /// blocks, scoring every query of the call against each hot block and
+    /// selecting per-query top-m with bounded `(hamming, doc_id)` collectors
+    /// — per-query corpus traffic drops by the call's query count relative
+    /// to the historical per-query rescan. The CSR output contract is
+    /// unchanged and bit-identical to the previous implementation.
     ///
     /// # Example
     /// ```no_run
@@ -345,9 +401,14 @@ impl SignBitmap {
         let mut offsets = Vec::with_capacity(nq + 1);
         offsets.push(0usize);
         let mut candidates = Vec::with_capacity(nq.saturating_mul(m_eff));
-        for qi in 0..nq {
-            let q = &queries[qi * dim..(qi + 1) * dim];
-            let row = self.top_m_candidates(q, m);
+        if nq == 0 || m_eff == 0 {
+            offsets.extend(std::iter::repeat_n(0usize, nq));
+            return CandidateBatch {
+                candidates,
+                offsets,
+            };
+        }
+        for row in self.top_m_candidates_streamed(queries, m_eff) {
             candidates.extend_from_slice(&row);
             offsets.push(candidates.len());
         }
