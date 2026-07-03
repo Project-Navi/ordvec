@@ -32,7 +32,7 @@ jobs:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (2026-03-27)
@@ -43,7 +43,7 @@ jobs:
       - name: Restore Intel SDE archive cache
         # The setup action still verifies SHA-256 before extraction. The cache
         # only reduces exposure to Intel downloadmirror outages.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ordvec-intel-sde
           key: intel-sde-${{ runner.os }}-${{ runner.arch }}-${{ env.SDE_VERSION }}-${{ env.SDE_SHA256 }}
