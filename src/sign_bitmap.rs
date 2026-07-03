@@ -407,6 +407,11 @@ impl SignBitmap {
     /// to the historical per-query rescan. The CSR output contract is
     /// unchanged and bit-identical to the previous implementation.
     ///
+    /// "Serial" scopes the scan and selection: no rayon is entered for the
+    /// candidate work, so callers own that parallelism. Input finite-
+    /// validation MAY briefly use the global rayon pool for large query
+    /// buffers (order-independent boolean reduction; deterministic).
+    ///
     /// # Example
     /// ```no_run
     /// use ordvec::SignBitmap;
