@@ -154,11 +154,17 @@ Stable limit codes are part of the contract:
   (`row_identity_duplicate_tracking_limit_exceeded`);
 - auxiliary artifact declarations: 1,024
   (`auxiliary_artifact_count_limit_exceeded`);
-- auxiliary artifact bytes per declared file: 64 MiB
+- auxiliary artifact bytes per declared file: bounded by the
+  manifest-declared `file_size_bytes` on verify and by the observed file
+  size on create; the flat cap is an opt-in ceiling, unbounded by default
   (`auxiliary_artifact_file_too_large`);
-- calibration profile artifact bytes: 64 MiB
+- primary index artifact bytes: bounded by the manifest-declared
+  `file_size_bytes` on verify (`artifact_file_too_large`);
+- calibration profile artifact bytes: bounded by the declared
+  `file_size_bytes`; flat cap opt-in, unbounded by default
   (`calibration_profile_too_large`);
-- encoder distortion profile artifact bytes: 64 MiB
+- encoder distortion profile artifact bytes: bounded by the declared
+  `file_size_bytes`; flat cap opt-in, unbounded by default
   (`encoder_distortion_profile_too_large`);
 - collected report issues: 1,024, after which a
   `verification_report_issue_limit_exceeded` issue is emitted;

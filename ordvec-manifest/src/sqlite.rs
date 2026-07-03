@@ -1,8 +1,7 @@
 use crate::{
-    resolve_existing_path, sha256_file, sha256_file_bounded, validate_jsonl_rows,
-    verify_auxiliary_artifacts, verify_manifest, AuxiliaryArtifactState, ManifestDocument,
-    ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationPathCapture,
-    VerificationReport, VerifyOptions,
+    resolve_existing_path, sha256_file_bounded, validate_jsonl_rows, verify_auxiliary_artifacts,
+    verify_manifest, AuxiliaryArtifactState, ManifestDocument, ManifestError, ReportIssue,
+    ResourceLimits, RowIdentity, VerificationPathCapture, VerificationReport, VerifyOptions,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -399,7 +398,18 @@ fn current_cache_key(
     ) else {
         return Ok(None);
     };
-    let artifact_sha256 = match sha256_file(&artifact.canonical_path) {
+    // Bound the cache-key hash exactly like the verify path: declared size
+    // with the opt-in ceiling. A bound violation just misses the cache.
+    let artifact_sha256 = match sha256_file_bounded(
+        &artifact.canonical_path,
+        document
+            .manifest
+            .artifact
+            .file_size_bytes
+            .min(options.limits.max_index_artifact_bytes),
+        "artifact_file_too_large",
+        "index artifact",
+    ) {
         Ok(hash) => hash.sha256,
         Err(_) => return Ok(None),
     };
@@ -618,7 +628,9 @@ fn current_calibration_profile_sha256(
     };
     match sha256_file_bounded(
         &resolved.canonical_path,
-        options.limits.max_calibration_profile_bytes,
+        profile
+            .file_size_bytes
+            .min(options.limits.max_calibration_profile_bytes),
         "calibration_profile_too_large",
         "calibration profile",
     ) {
@@ -652,7 +664,9 @@ fn current_encoder_distortion_profile_sha256(
     };
     match sha256_file_bounded(
         &resolved.canonical_path,
-        options.limits.max_encoder_distortion_profile_bytes,
+        profile
+            .file_size_bytes
+            .min(options.limits.max_encoder_distortion_profile_bytes),
         "encoder_distortion_profile_too_large",
         "encoder distortion profile",
     ) {

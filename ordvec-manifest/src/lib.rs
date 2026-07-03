@@ -36,9 +36,14 @@ pub const DEFAULT_MAX_ROW_IDENTITY_JSONL_LINE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_ROW_IDENTITY_ROWS: usize = 10_000_000;
 pub const DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_AUXILIARY_ARTIFACTS: usize = 1024;
-pub const DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
-pub const DEFAULT_MAX_CALIBRATION_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
-pub const DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Artifact-file reads are bounded by the manifest-declared size on verify
+/// and by the observed file size on create; these flat caps are opt-in
+/// ceilings and default to unbounded. Streaming hashing keeps memory
+/// constant regardless of artifact size.
+pub const DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES: u64 = u64::MAX;
+pub const DEFAULT_MAX_INDEX_ARTIFACT_BYTES: u64 = u64::MAX;
+pub const DEFAULT_MAX_CALIBRATION_PROFILE_BYTES: u64 = u64::MAX;
+pub const DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES: u64 = u64::MAX;
 pub const DEFAULT_MAX_REPORT_ISSUES: usize = 1024;
 pub const DEFAULT_MAX_CACHED_REPORT_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -253,7 +258,19 @@ fn verify_manifest_with_path_capture(
     ) {
         paths.artifact_path = Some(resolved.canonical_path.clone());
         report.artifact.canonical_path = Some(path_to_display(&resolved.canonical_path));
-        match sha256_file(&resolved.canonical_path) {
+        // Bound the read by the manifest-declared size: a primary artifact
+        // larger than its declaration fails fast instead of being hashed in
+        // full (the read was previously unbounded).
+        match sha256_file_bounded(
+            &resolved.canonical_path,
+            document
+                .manifest
+                .artifact
+                .file_size_bytes
+                .min(options.limits.max_index_artifact_bytes),
+            "artifact_file_too_large",
+            "index artifact",
+        ) {
             Ok(hash) => {
                 report.artifact.sha256 = Some(hash.sha256.clone());
                 report.artifact.size_bytes = Some(hash.size_bytes);
@@ -276,6 +293,7 @@ fn verify_manifest_with_path_capture(
                     );
                 }
             }
+            Err(ManifestError::LimitExceeded { code, message }) => report.error(code, message),
             Err(err) => report.error(
                 "artifact_hash_failed",
                 format!("failed to hash artifact: {err}"),
@@ -1223,7 +1241,9 @@ fn validate_encoder_distortion_profile_artifact(
                 Some(path_to_display(&resolved.canonical_path));
             match sha256_file_bounded(
                 &resolved.canonical_path,
-                options.limits.max_encoder_distortion_profile_bytes,
+                profile
+                    .file_size_bytes
+                    .min(options.limits.max_encoder_distortion_profile_bytes),
                 "encoder_distortion_profile_too_large",
                 "encoder distortion profile",
             ) {
@@ -1669,7 +1689,9 @@ fn validate_calibration_profile(
                 Some(path_to_display(&resolved.canonical_path));
             match sha256_file_bounded(
                 &resolved.canonical_path,
-                options.limits.max_calibration_profile_bytes,
+                profile
+                    .file_size_bytes
+                    .min(options.limits.max_calibration_profile_bytes),
                 "calibration_profile_too_large",
                 "calibration profile",
             ) {
@@ -1936,9 +1958,14 @@ fn verify_auxiliary_artifacts(
             AuxiliaryPathResolution::Resolved(resolved) => {
                 captured_path = Some(resolved.canonical_path.clone());
                 entry.canonical_path = Some(path_to_display(&resolved.canonical_path));
+                // Bound the read by the manifest-declared size (the manifest
+                // is the trust anchor; the SHA-256 pins content). A flat
+                // limit, when explicitly configured, remains a ceiling.
                 match sha256_file_bounded(
                     &resolved.canonical_path,
-                    options.limits.max_auxiliary_artifact_bytes,
+                    artifact
+                        .file_size_bytes
+                        .min(options.limits.max_auxiliary_artifact_bytes),
                     "auxiliary_artifact_file_too_large",
                     "auxiliary artifact",
                 ) {
@@ -2261,6 +2288,9 @@ pub struct ResourceLimits {
     pub max_row_identity_tracked_db_id_bytes: usize,
     pub max_auxiliary_artifacts: usize,
     pub max_auxiliary_artifact_bytes: u64,
+    /// Opt-in ceiling for the primary index artifact read (unbounded by
+    /// default; the manifest-declared size is always the effective bound).
+    pub max_index_artifact_bytes: u64,
     pub max_calibration_profile_bytes: u64,
     pub max_encoder_distortion_profile_bytes: u64,
     pub max_report_issues: usize,
@@ -2276,6 +2306,7 @@ impl Default for ResourceLimits {
             max_row_identity_tracked_db_id_bytes: DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES,
             max_auxiliary_artifacts: DEFAULT_MAX_AUXILIARY_ARTIFACTS,
             max_auxiliary_artifact_bytes: DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES,
+            max_index_artifact_bytes: DEFAULT_MAX_INDEX_ARTIFACT_BYTES,
             max_calibration_profile_bytes: DEFAULT_MAX_CALIBRATION_PROFILE_BYTES,
             max_encoder_distortion_profile_bytes: DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES,
             max_report_issues: DEFAULT_MAX_REPORT_ISSUES,
@@ -3452,12 +3483,30 @@ pub fn sha256_file_bounded(
     context: &'static str,
 ) -> Result<FileHash, ManifestError> {
     let path = path.as_ref();
-    let bytes = read_bounded_file(path, max_bytes, code, context)?;
+    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut size_bytes = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        size_bytes += n as u64;
+        if size_bytes > max_bytes {
+            return Err(ManifestError::limit_exceeded(
+                code,
+                format!(
+                    "{context} exceeds {max_bytes} bytes while reading {}",
+                    path.display()
+                ),
+            ));
+        }
+        hasher.update(&buf[..n]);
+    }
     Ok(FileHash {
         sha256: hex::encode(hasher.finalize()),
-        size_bytes: bytes.len() as u64,
+        size_bytes,
     })
 }
 
@@ -3514,7 +3563,12 @@ pub fn create_manifest_for_index_with_options(
         fs::create_dir_all(out_base)?;
     }
     let metadata = probe_index_metadata(index_path)?;
-    let index_hash = sha256_file(index_path)?;
+    let index_hash = sha256_file_bounded(
+        index_path,
+        fs::metadata(index_path)?.len(),
+        "artifact_file_too_large",
+        "index artifact",
+    )?;
     let kind = ManifestIndexKind::try_from_core(metadata.kind)
         .map_err(|err| ManifestError::invalid(err.message()))?;
     let params = ManifestIndexParams::try_from_core(metadata.params)
@@ -3648,9 +3702,15 @@ fn create_auxiliary_artifacts(
                 "auxiliary artifact name {name:?} is duplicated"
             )));
         }
+        // Create is a trusted context: bound the read by the artifact's own
+        // observed size (catching mid-hash growth), not a flat cap. An
+        // explicitly configured flat limit still applies as a ceiling.
+        let observed_len = fs::metadata(&artifact.path)
+            .map_err(ManifestError::from)?
+            .len();
         let hash = sha256_file_bounded(
             &artifact.path,
-            options.limits.max_auxiliary_artifact_bytes,
+            observed_len.min(options.limits.max_auxiliary_artifact_bytes),
             "auxiliary_artifact_file_too_large",
             "auxiliary artifact",
         )?;

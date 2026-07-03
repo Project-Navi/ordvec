@@ -2272,19 +2272,17 @@ fn verify_for_load_fails_closed_with_report_for_corrupted_artifact() {
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&index)
-        .unwrap()
-        .write_all(b"\0")
-        .unwrap();
+    // Corrupt in place (same size): the declared-size read bound is
+    // satisfied, so verification proceeds to the digest and fails there.
+    let mut bytes = fs::read(&index).unwrap();
+    bytes[0] ^= 0xFF;
+    fs::write(&index, &bytes).unwrap();
 
     let err = verify_for_load(&manifest_path, VerifyOptions::default()).unwrap_err();
     let VerifiedLoadPlanError::VerificationFailed(report) = err else {
         panic!("expected verification failure");
     };
     assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
-    assert!(error_codes(&report).contains(&"artifact_file_size_mismatch"));
 }
 
 #[test]
@@ -2328,8 +2326,9 @@ fn verify_for_load_plan_is_not_a_byte_pin() {
     let VerifiedLoadPlanError::VerificationFailed(report) = err else {
         panic!("expected verification failure");
     };
-    assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
-    assert!(error_codes(&report).contains(&"artifact_file_size_mismatch"));
+    // The artifact grew past its declared size, so re-verification fails
+    // fast at the declared-size read bound.
+    assert!(error_codes(&report).contains(&"artifact_file_too_large"));
 }
 
 #[test]
@@ -4254,4 +4253,71 @@ fn sqlite_cache_key_includes_limits_and_bounds_cached_report_size() {
     )
     .unwrap_err();
     assert_eq!(err.code(), Some("sqlite_cached_report_too_large"));
+}
+
+#[test]
+fn grown_profiles_fail_fast_at_declared_size_under_default_limits() {
+    // Derived-limits regression coverage for the two profile call sites:
+    // a profile grown past its manifest-declared size must fail fast with
+    // the *_too_large code at DEFAULT options (bound = declared size), not
+    // be hashed in full and reported as a digest mismatch.
+    let temp = tempfile::tempdir().unwrap();
+    let case = tempfile::tempdir_in(temp.path()).unwrap();
+    let profile_dir = case.path().join("profiles");
+    fs::create_dir(&profile_dir).unwrap();
+    let index = write_index_kind(case.path(), FixtureKind::Bitmap);
+    let manifest_path = case.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    let calibration_path = profile_dir.join("profile.f64");
+    let calibration_hash = write_profile(
+        &calibration_path,
+        manifest.artifact.dim * std::mem::size_of::<f64>(),
+    );
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "profiles/profile.f64",
+        calibration_hash,
+        CalibrationOrdinalization::TopK {
+            dim: manifest.artifact.dim,
+            k: 16,
+        },
+        ProfileParameterization::MarginalTopKFrequency,
+        vec![manifest.artifact.dim],
+    ));
+
+    let distortion_path = profile_dir.join("distortion.json");
+    let distortion_hash = write_profile(&distortion_path, 128);
+    manifest.encoder_distortion = Some(distortion_profile(
+        &manifest,
+        Some("profiles/distortion.json".to_string()),
+        Some(distortion_hash),
+        DistortionEvidenceKind::EmpiricalSample,
+    ));
+
+    let report = verify_manifest_with_base(manifest.clone(), case.path(), VerifyOptions::default());
+    assert!(report.ok, "{:?}", report.errors);
+
+    // Grow both profile files past their declarations.
+    for path in [&calibration_path, &distortion_path] {
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(&[0u8; 64]).unwrap();
+    }
+
+    let report = verify_manifest_with_base(manifest, case.path(), VerifyOptions::default());
+    let codes = error_codes(&report);
+    assert!(
+        codes.contains(&"calibration_profile_too_large"),
+        "grown calibration profile must fail the declared-size bound, got {codes:?}",
+    );
+    assert!(
+        codes.contains(&"encoder_distortion_profile_too_large"),
+        "grown encoder distortion profile must fail the declared-size bound, got {codes:?}",
+    );
 }

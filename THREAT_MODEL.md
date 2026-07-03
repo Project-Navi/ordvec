@@ -397,6 +397,19 @@ enforce service-level quotas — by design (it is a library, not a server).
 batch size, `k`, request rate, and corpus size; a configurable `max_nq` /
 `max_k` at the binding level is a possible future convenience.
 
+**THREAT-QUERY-003 (P2): Artifact read bounds are derived, not flat.**
+Verification bounds every artifact read by its manifest-declared
+`file_size_bytes` (the manifest itself is hard-capped at 1 MiB before JSON
+parsing, and SHA-256 pins artifact content); manifest creation bounds reads
+by the artifact's observed size. Bounded hashing streams with constant
+memory, so a hostile manifest cannot cause unbounded memory growth — but it
+CAN still cause I/O and CPU proportional to the byte size it declares and
+actually supplies on disk. The flat `ResourceLimits` byte caps are opt-in
+ceilings (unbounded by default) for deployments that must bound worst-case
+verification time on attacker-supplied bundles. A `VerifiedLoadPlan` remains
+a verification snapshot, not a byte pin: bytes can change between
+verification and use by a local actor with write access (see scope).
+
 **THREAT-QUERY-002 (P3): Panic on contract violation in Rust server contexts.**
 Rust APIs fail fast on invalid contract input (non-finite floats, dimension /
 shape violations) via `assert!` / `expect`. In a Rust-native server an
