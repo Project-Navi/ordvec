@@ -195,3 +195,29 @@ fn verify_bounds_primary_read_by_declared_size_when_grown() {
         error_codes(&report),
     );
 }
+
+/// The primary index artifact honors an explicitly configured opt-in
+/// ceiling, mirroring the auxiliary/profile artifact classes (CIPHER-02).
+#[test]
+fn explicit_index_ceiling_enforced_on_primary() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    let mut options = VerifyOptions::default();
+    options.limits.max_index_artifact_bytes = 8;
+
+    let report = verify_manifest_with_base(manifest, temp.path(), options);
+    assert!(
+        error_codes(&report).contains(&"artifact_file_too_large"),
+        "explicit index ceiling must reject, got {:?}",
+        error_codes(&report),
+    );
+}

@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `artifact_file_too_large` reason code); previously this read was unbounded.
   An artifact grown past its declaration now fails fast at the read bound
   instead of surfacing as a digest mismatch after hashing the excess.
+- **ordvec-manifest: primary index artifact gains an opt-in ceiling.** New
+  `ResourceLimits::max_index_artifact_bytes` (default unbounded) mirrors the
+  auxiliary/profile ceilings; the create path also bounds the primary read by
+  its observed size. Note: a grown artifact now surfaces as
+  `*_file_too_large` (fail-fast) rather than `*_file_size_mismatch`, which
+  now indicates truncation only.
 - **ordvec-manifest: bounded hashing streams with constant memory.**
   `sha256_file_bounded` no longer materialises the file in memory before
   hashing.

@@ -41,6 +41,7 @@ pub const DEFAULT_MAX_AUXILIARY_ARTIFACTS: usize = 1024;
 /// ceilings and default to unbounded. Streaming hashing keeps memory
 /// constant regardless of artifact size.
 pub const DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES: u64 = u64::MAX;
+pub const DEFAULT_MAX_INDEX_ARTIFACT_BYTES: u64 = u64::MAX;
 pub const DEFAULT_MAX_CALIBRATION_PROFILE_BYTES: u64 = u64::MAX;
 pub const DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES: u64 = u64::MAX;
 pub const DEFAULT_MAX_REPORT_ISSUES: usize = 1024;
@@ -262,7 +263,11 @@ fn verify_manifest_with_path_capture(
         // full (the read was previously unbounded).
         match sha256_file_bounded(
             &resolved.canonical_path,
-            document.manifest.artifact.file_size_bytes,
+            document
+                .manifest
+                .artifact
+                .file_size_bytes
+                .min(options.limits.max_index_artifact_bytes),
             "artifact_file_too_large",
             "index artifact",
         ) {
@@ -2283,6 +2288,9 @@ pub struct ResourceLimits {
     pub max_row_identity_tracked_db_id_bytes: usize,
     pub max_auxiliary_artifacts: usize,
     pub max_auxiliary_artifact_bytes: u64,
+    /// Opt-in ceiling for the primary index artifact read (unbounded by
+    /// default; the manifest-declared size is always the effective bound).
+    pub max_index_artifact_bytes: u64,
     pub max_calibration_profile_bytes: u64,
     pub max_encoder_distortion_profile_bytes: u64,
     pub max_report_issues: usize,
@@ -2298,6 +2306,7 @@ impl Default for ResourceLimits {
             max_row_identity_tracked_db_id_bytes: DEFAULT_MAX_ROW_IDENTITY_TRACKED_DB_ID_BYTES,
             max_auxiliary_artifacts: DEFAULT_MAX_AUXILIARY_ARTIFACTS,
             max_auxiliary_artifact_bytes: DEFAULT_MAX_AUXILIARY_ARTIFACT_BYTES,
+            max_index_artifact_bytes: DEFAULT_MAX_INDEX_ARTIFACT_BYTES,
             max_calibration_profile_bytes: DEFAULT_MAX_CALIBRATION_PROFILE_BYTES,
             max_encoder_distortion_profile_bytes: DEFAULT_MAX_ENCODER_DISTORTION_PROFILE_BYTES,
             max_report_issues: DEFAULT_MAX_REPORT_ISSUES,
@@ -3554,7 +3563,12 @@ pub fn create_manifest_for_index_with_options(
         fs::create_dir_all(out_base)?;
     }
     let metadata = probe_index_metadata(index_path)?;
-    let index_hash = sha256_file(index_path)?;
+    let index_hash = sha256_file_bounded(
+        index_path,
+        fs::metadata(index_path)?.len(),
+        "artifact_file_too_large",
+        "index artifact",
+    )?;
     let kind = ManifestIndexKind::try_from_core(metadata.kind)
         .map_err(|err| ManifestError::invalid(err.message()))?;
     let params = ManifestIndexParams::try_from_core(metadata.params)
