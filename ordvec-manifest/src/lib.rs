@@ -571,6 +571,17 @@ fn validate_auxiliary_artifact_shape(
                 ),
             );
         }
+        // Optional artifacts may legitimately be declared absent with a
+        // zero-size placeholder (see `AuxiliaryArtifactState::OptionalAbsent`);
+        // only required declarations must carry a real size.
+        if artifact.required && artifact.file_size_bytes == 0 {
+            report.error(
+                "auxiliary_artifact_file_size_zero",
+                format!(
+                    "required auxiliary artifact {name:?} file_size_bytes must be greater than zero"
+                ),
+            );
+        }
     }
 }
 
