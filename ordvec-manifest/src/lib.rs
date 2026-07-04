@@ -363,6 +363,12 @@ fn validate_manifest_shape(
             "artifact.sha256 must be a lowercase 64-character hex SHA-256 digest",
         );
     }
+    if manifest.artifact.file_size_bytes == 0 {
+        report.error(
+            "artifact_file_size_zero",
+            "artifact.file_size_bytes must be greater than zero",
+        );
+    }
     if manifest.artifact.bytes_per_vec == 0 {
         report.error(
             "artifact_bytes_per_vec_zero",
@@ -3505,7 +3511,14 @@ pub fn sha256_file_bounded(
     let mut size_bytes = 0u64;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = match file.read(&mut buf) {
+        // Strict bound: never request bytes past max_bytes + 1 (the +1
+        // detects exceedance), mirroring read_bounded_file's take() pattern.
+        let allowance = max_bytes.saturating_add(1) - size_bytes;
+        if allowance == 0 {
+            break;
+        }
+        let want = allowance.min(buf.len() as u64) as usize;
+        let n = match file.read(&mut buf[..want]) {
             Ok(n) => n,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err.into()),
@@ -3586,10 +3599,20 @@ pub fn create_manifest_for_index_with_options(
     let metadata = probe_index_metadata(index_path)?;
     let index_hash = sha256_file_bounded(
         index_path,
-        fs::metadata(index_path)?.len(),
+        metadata.file_size_bytes,
         "artifact_file_too_large",
         "index artifact",
     )?;
+    // One consistent snapshot: the manifest records the byte count that was
+    // actually hashed, and any change between the metadata probe and the
+    // hash (concurrent writer) fails loudly instead of embedding a
+    // size/digest pair describing different bytes.
+    if index_hash.size_bytes != metadata.file_size_bytes {
+        return Err(ManifestError::invalid(format!(
+            "index artifact changed during manifest creation: probed {} bytes, hashed {} bytes",
+            metadata.file_size_bytes, index_hash.size_bytes
+        )));
+    }
     let kind = ManifestIndexKind::try_from_core(metadata.kind)
         .map_err(|err| ManifestError::invalid(err.message()))?;
     let params = ManifestIndexParams::try_from_core(metadata.params)
@@ -3603,7 +3626,7 @@ pub fn create_manifest_for_index_with_options(
         vector_count: metadata.vector_count,
         bytes_per_vec: metadata.bytes_per_vec,
         params,
-        file_size_bytes: metadata.file_size_bytes,
+        file_size_bytes: index_hash.size_bytes,
     };
 
     let row_identity = match row_identity {
