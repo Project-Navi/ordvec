@@ -254,6 +254,18 @@ impl SignBitmap {
         // Max-heap keeps the current worst kept key at the top, so the
         // retained set is always the m lexicographically smallest
         // (hamming, doc_id) keys seen so far.
+        // Selection state is O(nq * m_eff) on top of the CSR output — an
+        // explicit checked bound (32-bit/wasm32 targets can overflow the
+        // multiplication) with a clear message, per the crate's
+        // checked-allocation discipline. Exact per-heap reservation of
+        // m_eff + 1 is deliberate: gradual growth would double-allocate to
+        // the next power of two (~2x m_eff peak per query); callers with
+        // extreme nq * m_eff should tile the query batch (as OrdinalDB's
+        // chunk scheduler does).
+        let selection_cells = nq.checked_mul(m_eff).unwrap_or_else(|| {
+            panic!("selection state nq ({nq}) * m ({m_eff}) overflows usize; tile the query batch")
+        });
+        let _ = selection_cells;
         let mut heaps: Vec<BinaryHeap<(u32, u32)>> = (0..nq)
             .map(|_| BinaryHeap::with_capacity(m_eff + 1))
             .collect();
@@ -426,7 +438,9 @@ impl SignBitmap {
         let m_eff = m.min(self.n_vectors);
         let mut offsets = Vec::with_capacity(nq + 1);
         offsets.push(0usize);
-        let mut candidates = Vec::with_capacity(nq.saturating_mul(m_eff));
+        let mut candidates = Vec::with_capacity(nq.checked_mul(m_eff).unwrap_or_else(|| {
+            panic!("CSR output nq ({nq}) * m ({m_eff}) overflows usize; tile the query batch")
+        }));
         if nq == 0 || m_eff == 0 {
             offsets.extend(std::iter::repeat_n(0usize, nq));
             return CandidateBatch {
