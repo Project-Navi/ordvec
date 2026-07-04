@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## 0.6.0 - 2026-07-04
+
 ### Performance
 
 - **Batched sign candidate generation now streams the corpus once per call.**
