@@ -39,6 +39,7 @@
 //! scalar path. See [`crate::avx512vpop_supported`].
 
 use rayon::prelude::*;
+use std::collections::BinaryHeap;
 
 use crate::OrdvecError;
 
@@ -220,6 +221,112 @@ impl SignBitmap {
     /// SIMD dispatch paths — same audit discipline as
     /// [`crate::Bitmap::top_m_candidates`].
     #[must_use = "this scans the corpus to generate candidates; dropping the result discards that work"]
+    /// Streamed exact top-m selection shared by [`Self::top_m_candidates`]
+    /// and [`Self::top_m_candidates_batched_serial_csr`]: the corpus is
+    /// scanned once per call in L2-sized doc blocks, each hot block is
+    /// scored against every query (in small query tiles), and per-query
+    /// bounded min-m collectors keyed by `(hamming, doc_id)` select exactly
+    /// the lexicographic top-m — bit-identical to a full sort, independent
+    /// of processing order. Serial by contract: no rayon.
+    fn top_m_candidates_streamed(&self, queries: &[f32], m_eff: usize) -> Vec<Vec<u32>> {
+        const TILE_QUERIES: usize = 32;
+        const BLOCK_BYTES: usize = 256 * 1024;
+
+        let dim = self.dim;
+        debug_assert!(
+            queries.len().is_multiple_of(dim),
+            "queries buffer must be a whole number of rows"
+        );
+        let nq = queries.len() / dim;
+        let qpv = self.qwords_per_vec;
+        let n = self.n_vectors;
+        debug_assert!(m_eff >= 1 && m_eff <= n);
+
+        // Build bitmaps in place: the entry points already validated the
+        // whole query buffer, and build_query_bitmap would allocate a fresh
+        // Vec (and re-validate) per query on this hot path.
+        let mut q_bitmaps = vec![0u64; nq * qpv];
+        for qi in 0..nq {
+            let q = &queries[qi * dim..(qi + 1) * dim];
+            let bm = &mut q_bitmaps[qi * qpv..(qi + 1) * qpv];
+            for (j, &value) in q.iter().enumerate() {
+                if value > 0.0 {
+                    bm[j / 64] |= 1u64 << (j % 64);
+                }
+            }
+        }
+
+        let block_docs = (BLOCK_BYTES / (qpv * 8)).max(64).min(n);
+        let tile = TILE_QUERIES.min(nq);
+        let mut block_scores = vec![0u32; tile * block_docs];
+        // Max-heap keeps the current worst kept key at the top, so the
+        // retained set is always the m lexicographically smallest
+        // (hamming, doc_id) keys seen so far.
+        // Selection state is O(nq * m_eff) on top of the CSR output — an
+        // explicit checked bound (32-bit/wasm32 targets can overflow the
+        // multiplication) with a clear message, per the crate's
+        // checked-allocation discipline. Exact per-heap reservation of
+        // m_eff + 1 is deliberate: gradual growth would double-allocate to
+        // the next power of two (~2x m_eff peak per query); callers with
+        // extreme nq * m_eff should tile the query batch (as OrdinalDB's
+        // chunk scheduler does).
+        let selection_cells = nq.checked_mul(m_eff).unwrap_or_else(|| {
+            panic!("selection state nq ({nq}) * m ({m_eff}) overflows usize; tile the query batch")
+        });
+        let _ = selection_cells;
+        let mut heaps: Vec<BinaryHeap<(u32, u32)>> = (0..nq)
+            .map(|_| BinaryHeap::with_capacity(m_eff + 1))
+            .collect();
+        // Cached copy of each full heap's worst kept hamming. Doc ids visit
+        // each heap strictly ascending (d ascends within a row, blocks
+        // ascend), so a candidate tying the worst hamming always loses the
+        // (hamming, doc_id) tie-break — once full, the boundary test
+        // reduces to one u32 compare against this register. u32::MAX while
+        // filling (hamming <= dim can never reach it).
+        let mut worst_bounds = vec![u32::MAX; nq];
+
+        let mut block_start = 0usize;
+        while block_start < n {
+            let bn = block_docs.min(n - block_start);
+            let block = &self.bitmaps[block_start * qpv..(block_start + bn) * qpv];
+            let mut tile_start = 0usize;
+            while tile_start < nq {
+                let tq = tile.min(nq - tile_start);
+                let qb_tile = &q_bitmaps[tile_start * qpv..(tile_start + tq) * qpv];
+                let scores = &mut block_scores[..tq * bn];
+                sign_scan_collect_batched(block, bn, qpv, qb_tile, tq, scores);
+                for ti in 0..tq {
+                    let heap = &mut heaps[tile_start + ti];
+                    let worst = &mut worst_bounds[tile_start + ti];
+                    let row = &scores[ti * bn..(ti + 1) * bn];
+                    for (d, &hamming) in row.iter().enumerate() {
+                        if hamming >= *worst {
+                            continue;
+                        }
+                        heap.push((hamming, (block_start + d) as u32));
+                        if heap.len() > m_eff {
+                            heap.pop();
+                        }
+                        if heap.len() == m_eff {
+                            *worst = heap.peek().expect("full collector").0;
+                        }
+                    }
+                }
+                tile_start += tq;
+            }
+            block_start += bn;
+        }
+
+        heaps
+            .into_iter()
+            .map(|heap| {
+                let mut kept = heap.into_vec();
+                kept.sort_unstable();
+                kept.into_iter().map(|(_, doc)| doc).collect()
+            })
+            .collect()
+    }
+
     pub fn top_m_candidates(&self, q: &[f32], m: usize) -> Vec<u32> {
         assert_eq!(q.len(), self.dim);
         crate::util::assert_all_finite(q);
@@ -227,6 +334,10 @@ impl SignBitmap {
         if m_eff == 0 {
             return Vec::new();
         }
+        // Single-query stays on the dense partition path: with one query
+        // there is no scan to share, and select_nth_unstable_by (O(n)
+        // average) measurably beats an O(n log m) bounded heap for m in the
+        // hundreds at small/medium n (audit: +50-90% regression otherwise).
         let qb = self.build_query_bitmap(q);
         let mut scores = vec![0u32; self.n_vectors]; // Hamming distance per doc
         sign_scan_collect(
@@ -313,10 +424,17 @@ impl SignBitmap {
     /// pool. (The existing [`Self::top_m_candidates_batched`] remains the
     /// internally-parallel standalone convenience.)
     ///
-    /// Track-1 implementation is intentionally naive — it loops the single-query
-    /// [`Self::top_m_candidates`] (which materialises a per-query `n` Hamming
-    /// row). A future release may replace the internals with streaming top-m
-    /// behind this frozen signature; the CSR output contract will not change.
+    /// The internals stream the corpus **once per call** in L2-sized doc
+    /// blocks, scoring every query of the call against each hot block and
+    /// selecting per-query top-m with bounded `(hamming, doc_id)` collectors
+    /// — per-query corpus traffic drops by the call's query count relative
+    /// to the historical per-query rescan. The CSR output contract is
+    /// unchanged and bit-identical to the previous implementation.
+    ///
+    /// "Serial" scopes the scan and selection: no rayon is entered for the
+    /// candidate work, so callers own that parallelism. Input finite-
+    /// validation MAY briefly use the global rayon pool for large query
+    /// buffers (order-independent boolean reduction; deterministic).
     ///
     /// # Example
     /// ```no_run
@@ -344,10 +462,17 @@ impl SignBitmap {
         let m_eff = m.min(self.n_vectors);
         let mut offsets = Vec::with_capacity(nq + 1);
         offsets.push(0usize);
-        let mut candidates = Vec::with_capacity(nq.saturating_mul(m_eff));
-        for qi in 0..nq {
-            let q = &queries[qi * dim..(qi + 1) * dim];
-            let row = self.top_m_candidates(q, m);
+        let mut candidates = Vec::with_capacity(nq.checked_mul(m_eff).unwrap_or_else(|| {
+            panic!("CSR output nq ({nq}) * m ({m_eff}) overflows usize; tile the query batch")
+        }));
+        if nq == 0 || m_eff == 0 {
+            offsets.extend(std::iter::repeat_n(0usize, nq));
+            return CandidateBatch {
+                candidates,
+                offsets,
+            };
+        }
+        for row in self.top_m_candidates_streamed(queries, m_eff) {
             candidates.extend_from_slice(&row);
             offsets.push(candidates.len());
         }
@@ -662,6 +787,59 @@ fn sign_scan_collect_batched(
     }
 }
 
+/// Fold eight u64-lane accumulators into one vector holding their eight
+/// horizontal sums, in accumulator order: an unpack/permute/shuffle tree
+/// (25 vector ops) replacing eight serial `_mm512_reduce_add_epi64`
+/// expansions on the per-doc hot path.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn hsum8_epi64_avx512(accs: &[std::arch::x86_64::__m512i; 8]) -> std::arch::x86_64::__m512i {
+    use std::arch::x86_64::*;
+    {
+        // L1: pairwise lane sums, interleaved per source:
+        // s01 = [a0p01, a1p01, a0p23, a1p23, a0p45, a1p45, a0p67, a1p67]
+        let s01 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[0], accs[1]),
+            _mm512_unpackhi_epi64(accs[0], accs[1]),
+        );
+        let s23 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[2], accs[3]),
+            _mm512_unpackhi_epi64(accs[2], accs[3]),
+        );
+        let s45 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[4], accs[5]),
+            _mm512_unpackhi_epi64(accs[4], accs[5]),
+        );
+        let s67 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[6], accs[7]),
+            _mm512_unpackhi_epi64(accs[6], accs[7]),
+        );
+        // L2: gather even/odd u64s across pair vectors:
+        // e01_23 = [a0p01, a0p23, a0p45, a0p67, a2p01, a2p23, a2p45, a2p67]
+        let even_idx = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
+        let odd_idx = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
+        let e02 = _mm512_permutex2var_epi64(s01, even_idx, s23);
+        let o13 = _mm512_permutex2var_epi64(s01, odd_idx, s23);
+        let e46 = _mm512_permutex2var_epi64(s45, even_idx, s67);
+        let o57 = _mm512_permutex2var_epi64(s45, odd_idx, s67);
+        // L3: pairwise again ->
+        // w1 = [a0p0123, a1p0123, a0p4567, a1p4567, a2p0123, a3p0123, a2p4567, a3p4567]
+        let w1 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(e02, o13),
+            _mm512_unpackhi_epi64(e02, o13),
+        );
+        let w2 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(e46, o57),
+            _mm512_unpackhi_epi64(e46, o57),
+        );
+        // L4: fold 128-bit blocks: w1 blocks B0=[a0p0123,a1p0123]
+        // B1=[a0p4567,a1p4567] B2=[a2..],B3 -> sums = B0+B1, B2+B3.
+        let t = _mm512_shuffle_i64x2(w1, w2, 0b10_00_10_00);
+        let u = _mm512_shuffle_i64x2(w1, w2, 0b11_01_11_01);
+        _mm512_add_epi64(t, u)
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn sign_scan_collect_batched_avx512vpop(
@@ -734,9 +912,11 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
                         accs[bi] = _mm512_add_epi64(accs[bi], _mm512_popcnt_epi64(xor_zmm));
                     }
                 }
+                let sums = hsum8_epi64_avx512(&accs);
+                let mut sums_arr = [0u64; CHUNK];
+                _mm512_storeu_si512(sums_arr.as_mut_ptr() as *mut __m512i, sums);
                 for bi in 0..CHUNK {
-                    let acc_sum: i64 = _mm512_reduce_add_epi64(accs[bi]);
-                    scores[(chunk_start + bi) * n + di] = acc_sum as u32;
+                    scores[(chunk_start + bi) * n + di] = sums_arr[bi] as u32;
                 }
             }
             chunk_start += CHUNK;

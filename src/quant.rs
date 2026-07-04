@@ -33,7 +33,7 @@ use crate::quant_kernels::{
     scan_b2_asym_avx2, scan_b2_asym_avx512, scan_b4_asym_avx2, scan_b4_asym_avx512,
 };
 use crate::rank::{
-    bucket_centre, bucket_ranks, pack_buckets, rank_to_bucket, rank_transform,
+    bucket_centre, bucket_ranks, pack_buckets, rank_to_bucket, rank_transform, rank_transform_into,
     rankquant_bytes_per_vec, rankquant_norm,
 };
 use crate::sign_bitmap::SignBitmap;
@@ -601,12 +601,15 @@ impl RankQuant {
         self.packed[start..]
             .par_chunks_mut(bytes_per_vec)
             .zip(vectors.par_chunks(dim))
-            .for_each(|(out, v)| {
-                let ranks = rank_transform(v);
-                let buckets = bucket_ranks(&ranks, bits);
-                let packed = pack_buckets(&buckets, bits);
-                out.copy_from_slice(&packed);
-            });
+            .for_each_init(
+                || vec![0u16; dim],
+                |ranks, (out, v)| {
+                    rank_transform_into(v, ranks);
+                    let buckets = bucket_ranks(ranks, bits);
+                    let packed = pack_buckets(&buckets, bits);
+                    out.copy_from_slice(&packed);
+                },
+            );
         self.n_vectors = new_n;
     }
 

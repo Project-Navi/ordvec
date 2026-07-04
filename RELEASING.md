@@ -173,6 +173,11 @@ the OIDC exchange (no risk of a bad publish; just a failed run).
      lockstep versions, MSRV/docs drift, registry metadata parity, Python
      classifier/URL parity, docs.rs feature policy, package contents, and
      release workflow invariants.
+   - **Downstream un-patch (one-time, 0.6.0):** OrdinalDB's workspace
+     `Cargo.toml` carries a `[patch.crates-io]` block pointing `ordvec` and
+     `ordvec-manifest` at this repo's `integration/full-stack` git branch.
+     When 0.6.0 publishes, that block must be removed so OrdinalDB consumes
+     the published crates.io releases instead of the pre-release git branch.
 4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
    `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`,

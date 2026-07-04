@@ -38,9 +38,10 @@ append-friendly, and graph-optional.
 > trec-covid run below; the harness also supports nfcorpus and fiqa. ordvec wins
 > single-query latency against exact `flat` on the committed 171K-doc run and on
 > operability (no build, no tuning, append-only); in the committed default-method
-> threaded view, HNSW still wins highly-parallel batched serving. Larger-corpus
-> and alternate-encoder studies are active research, not public release claims
-> until their artifacts land in this repository.**
+> threaded view, HNSW still leads highly-parallel batched serving, though 0.6.0's
+> once-per-call corpus streaming narrowed that margin (see the threaded view
+> below). Larger-corpus and alternate-encoder studies are active research, not
+> public release claims until their artifacts land in this repository.**
 
 **Public evidence snapshot.** The load-bearing result in this README is narrower
 than the research backlog: Harrier-Q8 embeddings on public BEIR data, scored
@@ -60,8 +61,8 @@ and the gap widens over the committed subsampling sweep:
 ![ordvec speedup over exact search grows with corpus size](https://raw.githubusercontent.com/Project-Navi/ordvec/main/benchmarks/beir/figures/scaling_curve.png)
 
 - **~100× faster than exact `flat`, single query, at 171K docs.** Single-query
-  latency: exact `flat` 56 ms vs ordvec `Sign→rq2` **0.53 ms** — the gap over `flat`
-  grows with the corpus (it is ~5× at 1K docs).
+  latency: exact `flat` 52.4 ms vs ordvec `Sign→rq2` **0.52 ms (≈101×)** — the gap
+  over `flat` grows with the corpus (it is ~4.4× at 1K docs).
 - **8–16× smaller for the reported qrel rows.** The b=2 rank code is 256 B/vector
   (16× smaller than 4096 B floats), b=4 is 512 B (8×), and the reported two-stage
   `sign→rq2` row accounts for both stage-1 sign codes and the RankQuant reranker
@@ -70,8 +71,10 @@ and the gap widens over the committed subsampling sweep:
   followed by RankQuant b=2 rerank. At **nDCG@10 within bootstrap noise of exact**
   (on trec-covid the ordinal rows even edge ahead; see [Benchmarks](#benchmarks)).
 - **vs HNSW (the honest public scale story).** On the committed trec-covid run,
-  ordvec wins single-query latency while HNSW wins the highly-parallel threaded
-  view. That is the public comparison here. At larger corpora, graph or shard
+  ordvec wins single-query latency (≈3× at batch 1) while HNSW leads the
+  highly-parallel threaded view — by 1.6× over `sign→rq2` and 1.2× over
+  `bitmap→rq2` after 0.6.0's batched candidate generation (previously ≈2.3×).
+  That is the public comparison here. At larger corpora, graph or shard
   layers are the right comparison target; this README does not claim public
   million-scale HNSW crossover or GPU bandwidth numbers until the underlying run
   artifacts are committed.
@@ -209,7 +212,7 @@ Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ```toml
 [dependencies]
-ordvec = "0.5"
+ordvec = "0.6"
 
 # Or, to track unreleased `main`, use a git dependency instead:
 # ordvec = { git = "https://github.com/Project-Navi/ordvec" }
@@ -384,13 +387,13 @@ run; regenerate your own with `make benchmark-beir`.
 
 | Dataset | Method | Bytes/vec | nDCG@10 | Δ vs flat (95% CI) |
 |---|---|--:|--:|---|
-| scifact (5,183) | `flat` (exact) | 4096 | 0.7551 | (baseline) |
-| | `hnsw` M=32 | 4096 + graph | 0.7554 | +0.0003 * |
-| | **ordvec rq4** | **512** | **0.7549** | −0.0003 * |
-| | ordvec rq2 | 256 | 0.7471 | −0.0080 * |
-| | ordvec sign→rq2 | 384 | 0.7471 | −0.0080 * |
+| scifact (5,183) | `flat` (exact) | 4096 | 0.7559 | (baseline) |
+| | `hnsw` M=32 | 4096 + graph | 0.7573 | +0.0014 * |
+| | **ordvec rq4** | **512** | **0.7580** | +0.0021 * |
+| | ordvec rq2 | 256 | 0.7484 | −0.0075 * |
+| | ordvec sign→rq2 | 384 | 0.7484 | −0.0075 * |
 | trec-covid (171,332) | `flat` (exact) | 4096 | 0.7574 | (baseline) |
-| | `hnsw` M=32 | 4096 + graph | 0.7555 | −0.0019 * |
+| | `hnsw` M=32 | 4096 + graph | 0.7600 | +0.0026 * |
 | | ordvec rq2 | 256 | 0.7632 | +0.0057 * |
 | | **ordvec rq4** | **512** | **0.7636** | +0.0062 * |
 | | ordvec sign→rq2 | 384 | 0.7638 | +0.0064 * |
@@ -411,34 +414,38 @@ views (trec-covid, 171,332 docs, 1024-d):
 
 ![single-query latency bars](https://raw.githubusercontent.com/Project-Navi/ordvec/main/benchmarks/beir/figures/bars_single_thread.png)
 
-`flat` 56 ms → ordvec `sign→rq2` **0.53 ms (≈106×)**, `bitmap→rq2` 0.62 ms (≈91×),
-`hnsw` 1.5 ms (37×). The scaling curve [above](#benchmark-at-a-glance) is this
+`flat` 52.4 ms → ordvec `sign→rq2` **0.52 ms (≈101×)**, `bitmap→rq2` 0.58 ms (≈90×),
+`hnsw` 1.5 ms (≈34×). The scaling curve [above](#benchmark-at-a-glance) is this
 view swept over the committed subsamples — the speedup over `flat` grows across
 that public sweep.
 
 **2. Batched throughput (batch = 32, 1 thread)** — when many queries arrive at
-once, `flat`'s GEMM amortizes the corpus stream across the batch (56→4 ms),
-narrowing the gap: ordvec `sign→rq2`/`bitmap→rq2` stay ≈8–9.5× ahead.
+once, `flat`'s GEMM amortizes the corpus stream across the batch (52→3.8 ms).
+Since 0.6.0, ordvec's batched candidate generation amortizes the same way — the
+serial CSR path streams the corpus **once per call** instead of once per query
+(1.69× on the committed synthetic two-stage bench) — so `sign→rq2` 0.33 ms /
+`bitmap→rq2` 0.38 ms stay **≈10–12× ahead** of batched `flat`.
 
 **3. Many cores (batch = 32, 32 threads)** — everything parallelizes and the
 field compresses; `hnsw` threads best:
 
 ![threaded throughput bars](https://raw.githubusercontent.com/Project-Navi/ordvec/main/benchmarks/beir/figures/bars_threaded.png)
 
-`hnsw` 4.8× vs `flat`, ordvec `bitmap→rq2` 3.7×, `rq2` 2.5×, `sign→rq2` 2.1×.
+`hnsw` 4.9× vs `flat`, ordvec `bitmap→rq2` 4.0×, `sign→rq2` 3.1×, `rq2` 2.2×.
 This committed chart uses the default `sign-rq2` row, not the newer
 within-query-threaded `sign-rq2-threaded` probe row; regenerate public figures
 before using that probe for release claims. In this default-method view,
-**HNSW wins this regime** — by a hair on threaded throughput. The honest
+**HNSW still leads this regime** — 1.6× over `sign→rq2` (≈2.3× before 0.6.0's
+once-per-call corpus streaming) and 1.2× over `bitmap→rq2`. The honest
 ordvec-vs-HNSW tradeoff, all from this same run (trec-covid, 171,332 docs):
 
 | | HNSW M=32 | ordvec `sign→rq2` |
 |---|---|---|
-| threaded latency (32 threads, batch 32) | **0.23 ms** ✅ | 0.52 ms |
-| single-query latency (batch 1) | 1.52 ms | **0.53 ms** ✅ (~3×) |
+| threaded latency (32 threads, batch 32) | **0.20 ms** ✅ | 0.32 ms |
+| single-query latency (batch 1) | 1.52 ms | **0.52 ms** ✅ (~3×) |
 | index size / vector | 4096 B + graph | **256–384 B** ✅ (8–16× less) |
-| build time, 171K docs | **51.4 s** | **0.26 s** ✅ (training-free) |
-| nDCG@10 (trec-covid) | 0.7555 | **0.7638** ✅ |
+| build time, 171K docs | **47.1 s** | **0.21 s** ✅ (training-free) |
+| nDCG@10 (trec-covid) | 0.7600 | **0.7638** ✅ |
 
 So even where HNSW edges ahead on threaded latency, ordvec gets there with **no
 graph to build** (instant, training-free, and rebuilt for free when the corpus

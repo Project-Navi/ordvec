@@ -154,11 +154,18 @@ Stable limit codes are part of the contract:
   (`row_identity_duplicate_tracking_limit_exceeded`);
 - auxiliary artifact declarations: 1,024
   (`auxiliary_artifact_count_limit_exceeded`);
-- auxiliary artifact bytes per declared file: 64 MiB
+- auxiliary artifact bytes per declared file: bounded by the
+  manifest-declared `file_size_bytes` on verify and by the observed file
+  size on create; the flat cap is an opt-in ceiling, unbounded by default
   (`auxiliary_artifact_file_too_large`);
-- calibration profile artifact bytes: 64 MiB
+- primary index artifact bytes: bounded by the manifest-declared
+  `file_size_bytes` on verify; the flat cap is an opt-in ceiling, unbounded
+  by default (`artifact_file_too_large`);
+- calibration profile artifact bytes: bounded by the declared
+  `file_size_bytes`; flat cap opt-in, unbounded by default
   (`calibration_profile_too_large`);
-- encoder distortion profile artifact bytes: 64 MiB
+- encoder distortion profile artifact bytes: bounded by the declared
+  `file_size_bytes`; flat cap opt-in, unbounded by default
   (`encoder_distortion_profile_too_large`);
 - collected report issues: 1,024, after which a
   `verification_report_issue_limit_exceeded` issue is emitted;
@@ -168,7 +175,7 @@ The CLI exposes matching override flags on `inspect`, `verify`, `create`,
 `sqlite verify`, and `sqlite activate`: `--max-manifest-bytes`,
 `--max-row-map-line-bytes`, `--max-row-map-rows`,
 `--max-row-map-tracked-id-bytes`, `--max-auxiliary-artifacts`,
-`--max-auxiliary-artifact-bytes`,
+`--max-auxiliary-artifact-bytes`, `--max-index-artifact-bytes`,
 `--max-calibration-profile-bytes`,
 `--max-encoder-distortion-profile-bytes`, `--max-report-issues`, and
 `--max-cached-report-bytes`. Library callers can override the same ceilings
@@ -184,6 +191,7 @@ Stable limit codes:
 | row-identity duplicate-tracking `db_id` bytes | `row_identity_duplicate_tracking_limit_exceeded` | `row_identity_duplicate_tracking_limit_exceeded` |
 | auxiliary artifact declarations | `auxiliary_artifact_count_limit_exceeded` | n/a |
 | auxiliary artifact bytes per declared file | `auxiliary_artifact_file_too_large` | n/a |
+| primary index artifact bytes | `artifact_file_too_large` | n/a |
 | calibration profile artifact bytes | `calibration_profile_too_large` | n/a |
 | encoder distortion profile artifact bytes | `encoder_distortion_profile_too_large` | n/a |
 | collected verification report issues | `verification_report_issue_limit_exceeded` | n/a |
