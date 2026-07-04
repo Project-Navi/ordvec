@@ -242,10 +242,18 @@ impl SignBitmap {
         let n = self.n_vectors;
         debug_assert!(m_eff >= 1 && m_eff <= n);
 
+        // Build bitmaps in place: the entry points already validated the
+        // whole query buffer, and build_query_bitmap would allocate a fresh
+        // Vec (and re-validate) per query on this hot path.
         let mut q_bitmaps = vec![0u64; nq * qpv];
         for qi in 0..nq {
-            let qb = self.build_query_bitmap(&queries[qi * dim..(qi + 1) * dim]);
-            q_bitmaps[qi * qpv..(qi + 1) * qpv].copy_from_slice(&qb);
+            let q = &queries[qi * dim..(qi + 1) * dim];
+            let bm = &mut q_bitmaps[qi * qpv..(qi + 1) * qpv];
+            for (j, &value) in q.iter().enumerate() {
+                if value > 0.0 {
+                    bm[j / 64] |= 1u64 << (j % 64);
+                }
+            }
         }
 
         let block_docs = (BLOCK_BYTES / (qpv * 8)).max(64).min(n);
