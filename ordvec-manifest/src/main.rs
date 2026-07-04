@@ -103,7 +103,8 @@ fn parse_auxiliary_artifact_arg(value: &str) -> Result<AuxiliaryArtifactArg, Str
 
 #[cfg(test)]
 mod tests {
-    use super::parse_auxiliary_artifact_arg;
+    use super::{parse_auxiliary_artifact_arg, Cli, Commands, LimitArgs};
+    use clap::Parser;
     use std::path::PathBuf;
 
     #[test]
@@ -111,6 +112,42 @@ mod tests {
         let parsed = parse_auxiliary_artifact_arg(" app.ids = ids.bin ").unwrap();
         assert_eq!(parsed.name, "app.ids");
         assert_eq!(parsed.path, PathBuf::from("ids.bin"));
+    }
+
+    #[test]
+    fn limit_args_wire_index_artifact_ceiling() {
+        let args = LimitArgs {
+            max_index_artifact_bytes: Some(42),
+            ..LimitArgs::default()
+        };
+        assert_eq!(args.resource_limits().max_index_artifact_bytes, 42);
+        // Unset flag leaves the library default (unbounded) untouched.
+        assert_eq!(
+            LimitArgs::default()
+                .resource_limits()
+                .max_index_artifact_bytes,
+            ordvec_manifest::ResourceLimits::default().max_index_artifact_bytes
+        );
+    }
+
+    #[test]
+    fn verify_accepts_max_index_artifact_bytes_flag() {
+        let cli = Cli::try_parse_from([
+            "ordvec-manifest",
+            "verify",
+            "--manifest",
+            "manifest.json",
+            "--max-index-artifact-bytes",
+            "8",
+        ])
+        .expect("flag must parse");
+        match cli.command {
+            Commands::Verify { limits, .. } => {
+                assert_eq!(limits.max_index_artifact_bytes, Some(8));
+                assert_eq!(limits.resource_limits().max_index_artifact_bytes, 8);
+            }
+            _ => panic!("expected verify command"),
+        }
     }
 }
 
@@ -174,6 +211,8 @@ struct LimitArgs {
     #[arg(long)]
     max_auxiliary_artifact_bytes: Option<u64>,
     #[arg(long)]
+    max_index_artifact_bytes: Option<u64>,
+    #[arg(long)]
     max_calibration_profile_bytes: Option<u64>,
     #[arg(long)]
     max_encoder_distortion_profile_bytes: Option<u64>,
@@ -203,6 +242,9 @@ impl LimitArgs {
         }
         if let Some(value) = self.max_auxiliary_artifact_bytes {
             limits.max_auxiliary_artifact_bytes = value;
+        }
+        if let Some(value) = self.max_index_artifact_bytes {
+            limits.max_index_artifact_bytes = value;
         }
         if let Some(value) = self.max_calibration_profile_bytes {
             limits.max_calibration_profile_bytes = value;
