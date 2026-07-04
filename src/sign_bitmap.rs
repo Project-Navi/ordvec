@@ -233,6 +233,10 @@ impl SignBitmap {
         const BLOCK_BYTES: usize = 256 * 1024;
 
         let dim = self.dim;
+        debug_assert!(
+            queries.len().is_multiple_of(dim),
+            "queries buffer must be a whole number of rows"
+        );
         let nq = queries.len() / dim;
         let qpv = self.qwords_per_vec;
         let n = self.n_vectors;
@@ -406,6 +410,11 @@ impl SignBitmap {
     /// — per-query corpus traffic drops by the call's query count relative
     /// to the historical per-query rescan. The CSR output contract is
     /// unchanged and bit-identical to the previous implementation.
+    ///
+    /// "Serial" scopes the scan and selection: no rayon is entered for the
+    /// candidate work, so callers own that parallelism. Input finite-
+    /// validation MAY briefly use the global rayon pool for large query
+    /// buffers (order-independent boolean reduction; deterministic).
     ///
     /// # Example
     /// ```no_run
