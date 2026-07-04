@@ -233,6 +233,10 @@ impl SignBitmap {
         const BLOCK_BYTES: usize = 256 * 1024;
 
         let dim = self.dim;
+        debug_assert!(
+            queries.len().is_multiple_of(dim),
+            "queries buffer must be a whole number of rows"
+        );
         let nq = queries.len() / dim;
         let qpv = self.qwords_per_vec;
         let n = self.n_vectors;
