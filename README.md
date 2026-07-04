@@ -445,7 +445,7 @@ ordvec-vs-HNSW tradeoff, all from this same run (trec-covid, 171,332 docs):
 | single-query latency (batch 1) | 1.52 ms | **0.52 ms** ✅ (~3×) |
 | index size / vector | 4096 B + graph | **256–384 B** ✅ (8–16× less) |
 | build time, 171K docs | **47.1 s** | **0.21 s** ✅ (training-free) |
-| nDCG@10 (trec-covid) | 0.7555 | **0.7638** ✅ |
+| nDCG@10 (trec-covid) | 0.7600 | **0.7638** ✅ |
 
 So even where HNSW edges ahead on threaded latency, ordvec gets there with **no
 graph to build** (instant, training-free, and rebuilt for free when the corpus
