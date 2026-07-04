@@ -2640,6 +2640,49 @@ fn auxiliary_artifacts_fail_closed_on_tamper_missing_and_path_escape() {
 }
 
 #[test]
+fn manifest_shape_rejects_zero_declared_file_sizes_for_required_artifacts() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
+    fs::write(temp.path().join("extra.bin"), b"extra").unwrap();
+    let extra_hash = sha256_file(temp.path().join("extra.bin")).unwrap();
+
+    manifest.artifact.file_size_bytes = 0;
+    manifest.auxiliary_artifacts = vec![AuxiliaryArtifact {
+        name: "extra".to_string(),
+        path: "extra.bin".to_string(),
+        sha256: extra_hash.sha256,
+        file_size_bytes: 0,
+        required: true,
+    }];
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    assert!(!report.ok);
+    let codes = error_codes(&report);
+    assert!(codes.contains(&"artifact_file_size_zero"), "{codes:?}");
+    assert!(
+        codes.contains(&"auxiliary_artifact_file_size_zero"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn optional_absent_zero_size_placeholder_is_not_flagged_zero_size() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
+    manifest.auxiliary_artifacts = vec![AuxiliaryArtifact {
+        name: "optional-model".to_string(),
+        path: "missing-model.json".to_string(),
+        sha256: "0".repeat(64),
+        file_size_bytes: 0,
+        required: false,
+    }];
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    assert!(report.ok, "{:?}", report.errors);
+    assert!(!error_codes(&report).contains(&"auxiliary_artifact_file_size_zero"));
+}
+
+#[test]
 fn auxiliary_artifact_schema_rejects_unknown_fields_and_duplicate_names() {
     let root = tempfile::tempdir().unwrap();
     let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
