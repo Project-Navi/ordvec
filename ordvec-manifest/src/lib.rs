@@ -3599,7 +3599,9 @@ pub fn create_manifest_for_index_with_options(
     let metadata = probe_index_metadata(index_path)?;
     let index_hash = sha256_file_bounded(
         index_path,
-        metadata.file_size_bytes,
+        metadata
+            .file_size_bytes
+            .min(options.limits.max_index_artifact_bytes),
         "artifact_file_too_large",
         "index artifact",
     )?;
