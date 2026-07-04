@@ -233,6 +233,10 @@ impl SignBitmap {
         const BLOCK_BYTES: usize = 256 * 1024;
 
         let dim = self.dim;
+        debug_assert!(
+            queries.len().is_multiple_of(dim),
+            "queries buffer must be a whole number of rows"
+        );
         let nq = queries.len() / dim;
         let qpv = self.qwords_per_vec;
         let n = self.n_vectors;
@@ -406,6 +410,11 @@ impl SignBitmap {
     /// — per-query corpus traffic drops by the call's query count relative
     /// to the historical per-query rescan. The CSR output contract is
     /// unchanged and bit-identical to the previous implementation.
+    ///
+    /// "Serial" scopes the scan and selection: no rayon is entered for the
+    /// candidate work, so callers own that parallelism. Input finite-
+    /// validation MAY briefly use the global rayon pool for large query
+    /// buffers (order-independent boolean reduction; deterministic).
     ///
     /// # Example
     /// ```no_run
@@ -756,6 +765,59 @@ fn sign_scan_collect_batched(
     }
 }
 
+/// Fold eight u64-lane accumulators into one vector holding their eight
+/// horizontal sums, in accumulator order: an unpack/permute/shuffle tree
+/// (25 vector ops) replacing eight serial `_mm512_reduce_add_epi64`
+/// expansions on the per-doc hot path.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn hsum8_epi64_avx512(accs: &[std::arch::x86_64::__m512i; 8]) -> std::arch::x86_64::__m512i {
+    use std::arch::x86_64::*;
+    {
+        // L1: pairwise lane sums, interleaved per source:
+        // s01 = [a0p01, a1p01, a0p23, a1p23, a0p45, a1p45, a0p67, a1p67]
+        let s01 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[0], accs[1]),
+            _mm512_unpackhi_epi64(accs[0], accs[1]),
+        );
+        let s23 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[2], accs[3]),
+            _mm512_unpackhi_epi64(accs[2], accs[3]),
+        );
+        let s45 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[4], accs[5]),
+            _mm512_unpackhi_epi64(accs[4], accs[5]),
+        );
+        let s67 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(accs[6], accs[7]),
+            _mm512_unpackhi_epi64(accs[6], accs[7]),
+        );
+        // L2: gather even/odd u64s across pair vectors:
+        // e01_23 = [a0p01, a0p23, a0p45, a0p67, a2p01, a2p23, a2p45, a2p67]
+        let even_idx = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
+        let odd_idx = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
+        let e02 = _mm512_permutex2var_epi64(s01, even_idx, s23);
+        let o13 = _mm512_permutex2var_epi64(s01, odd_idx, s23);
+        let e46 = _mm512_permutex2var_epi64(s45, even_idx, s67);
+        let o57 = _mm512_permutex2var_epi64(s45, odd_idx, s67);
+        // L3: pairwise again ->
+        // w1 = [a0p0123, a1p0123, a0p4567, a1p4567, a2p0123, a3p0123, a2p4567, a3p4567]
+        let w1 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(e02, o13),
+            _mm512_unpackhi_epi64(e02, o13),
+        );
+        let w2 = _mm512_add_epi64(
+            _mm512_unpacklo_epi64(e46, o57),
+            _mm512_unpackhi_epi64(e46, o57),
+        );
+        // L4: fold 128-bit blocks: w1 blocks B0=[a0p0123,a1p0123]
+        // B1=[a0p4567,a1p4567] B2=[a2..],B3 -> sums = B0+B1, B2+B3.
+        let t = _mm512_shuffle_i64x2(w1, w2, 0b10_00_10_00);
+        let u = _mm512_shuffle_i64x2(w1, w2, 0b11_01_11_01);
+        _mm512_add_epi64(t, u)
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn sign_scan_collect_batched_avx512vpop(
@@ -828,9 +890,11 @@ unsafe fn sign_scan_collect_batched_avx512vpop(
                         accs[bi] = _mm512_add_epi64(accs[bi], _mm512_popcnt_epi64(xor_zmm));
                     }
                 }
+                let sums = hsum8_epi64_avx512(&accs);
+                let mut sums_arr = [0u64; CHUNK];
+                _mm512_storeu_si512(sums_arr.as_mut_ptr() as *mut __m512i, sums);
                 for bi in 0..CHUNK {
-                    let acc_sum: i64 = _mm512_reduce_add_epi64(accs[bi]);
-                    scores[(chunk_start + bi) * n + di] = acc_sum as u32;
+                    scores[(chunk_start + bi) * n + di] = sums_arr[bi] as u32;
                 }
             }
             chunk_start += CHUNK;

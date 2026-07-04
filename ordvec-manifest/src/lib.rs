@@ -3463,7 +3463,11 @@ pub fn sha256_file(path: impl AsRef<Path>) -> io::Result<FileHash> {
     let mut size_bytes = 0u64;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf)?;
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err.into()),
+        };
         if n == 0 {
             break;
         }
@@ -3483,6 +3487,19 @@ pub fn sha256_file_bounded(
     context: &'static str,
 ) -> Result<FileHash, ManifestError> {
     let path = path.as_ref();
+    // Refuse non-regular files BEFORE opening: opening a FIFO read-only
+    // blocks until a writer connects, and a device node would stream
+    // forever under a large declared-size bound. Regular files terminate
+    // at EOF and are post-checked against the declaration. (A path swapped
+    // to a special file after this check is local-actor mutation, out of
+    // scope per the threat model.)
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(ManifestError::limit_exceeded(
+            code,
+            format!("{context} is not a regular file: {}", path.display()),
+        ));
+    }
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut size_bytes = 0u64;

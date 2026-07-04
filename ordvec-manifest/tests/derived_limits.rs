@@ -221,3 +221,28 @@ fn explicit_index_ceiling_enforced_on_primary() {
         error_codes(&report),
     );
 }
+
+/// Non-regular files must be refused before hashing: a FIFO would stream
+/// forever under a large declared-size bound (CIPHER-001).
+#[cfg(unix)]
+#[test]
+fn verify_refuses_non_regular_artifact_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let aux_path = temp.path().join("sidecar.bin");
+    fs::write(&aux_path, vec![7u8; 512]).unwrap();
+    let (manifest, _) = create_with_aux(temp.path(), &aux_path);
+
+    fs::remove_file(&aux_path).unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(&aux_path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    assert!(
+        error_codes(&report).contains(&"auxiliary_artifact_file_too_large"),
+        "FIFO artifact must be refused, got {:?}",
+        error_codes(&report),
+    );
+}
