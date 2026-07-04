@@ -3483,7 +3483,7 @@ pub fn sha256_file(path: impl AsRef<Path>) -> io::Result<FileHash> {
         let n = match file.read(&mut buf) {
             Ok(n) => n,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         };
         if n == 0 {
             break;
@@ -3522,7 +3522,11 @@ pub fn sha256_file_bounded(
     let mut size_bytes = 0u64;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf)?;
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err.into()),
+        };
         if n == 0 {
             break;
         }
