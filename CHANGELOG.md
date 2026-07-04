@@ -26,8 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which keeps the dense partition path — the streamed core measured +50–90%
   single-query time at small/medium `n` with `m` in the hundreds (bounded heap
   `O(n log m)` vs `select_nth_unstable_by` `O(n)`), while the dense path is
-  parity-or-better at every measured size. The serial contract is preserved
-  (no rayon). Together with the collector worst-bound change below, measured
+  parity-or-better at every measured size. The serial contract covers the
+  candidate scan and selection (no rayon there; callers own that
+  parallelism) — input finite-validation on large query buffers may
+  briefly use the global rayon pool (order-independent, deterministic).
+  `top_m_candidates_batched` (the internally-parallel convenience) is
+  unchanged by this work. Together with the collector worst-bound change below, measured
   downstream in a two-stage retrieval stack at 1.26M × 1024: batched search
   throughput 220 → 10.2k queries/s, results bit-identical.
 - **Candidate-collector accept test reduced to a cached worst-bound compare.**
