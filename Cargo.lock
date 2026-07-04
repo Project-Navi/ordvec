@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "ordvec-ffi"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ordvec",
 ]
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "ordvec-manifest-python"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ordvec-manifest",
  "pyo3",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "ordvec-python"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "numpy",
  "ordvec",
