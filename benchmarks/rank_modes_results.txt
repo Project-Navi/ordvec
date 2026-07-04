@@ -12,7 +12,7 @@
 # Corpus: SYNTHETIC low-rank clustered corpus, seed = 1 (CORPUS_SEED), in-process.
 # Config: dim=256  n=30000  queries=200  k=10  (the self-contained default).
 # Hardware class: x86_64 desktop, AMD Ryzen 9 9950X (AVX-512), 32 rayon threads.
-# Toolchain: rustc 1.95.0, release profile (opt-level 3 + LTO, codegen-units 1).
+# Toolchain: rustc 1.95.0 (59807616e 2026-04-14), release profile (opt-level 3 + LTO, codegen-units 1).
 #
 # DETERMINISM: the QUALITY columns are seeded and bit-identical run-to-run on
 # the same machine — verified by two back-to-back runs (R@10, CR, bytes/vec,
@@ -51,34 +51,38 @@
 #         --corpus-npy /path/to/corpus.npy --queries-npy /path/to/queries.npy
 # ===========================================================================
 
+# Refresh note (0.6.0 batch work): the per-query latency rows in this table
+# measure SINGLE-QUERY single-thread scans — paths intentionally unchanged
+# by the 0.6.0 batched candidate-generation rework (verified: identical
+# within noise between the pre- and post-rework code on the same toolchain
+# and machine). The encode columns improved (parallel finite validation +
+# scratch-based rank encode). Batched candidate generation improvements are
+# measured by examples/two_stage_bench (see
+# two_stage_caller_owned_dim1024.txt: stage-1 1.69x on the committed
+# workload) — they do not appear in this single-query table by design.
+
 target arch x86_64 / opt-level 3 + lto (release profile)
-x86_64 features detected: sse4.2, avx2, fma, avx512f, avx512bw, avx512vl
-rayon threads = 32 (encode + brute-force GT are parallelised; per-query latency rows measure single-thread scan)
-generating low-rank clustered corpus (clusters=200, latent=64) ...
-  done in 0.17s (seed=1, self-contained)
-bench_rank: dim=256 n=30000 queries=200 k=10
-FP32 brute-force ground truth ...
-  done in 0.03s
+
 
 mode                              bytes/vec  total MiB    encode v/s    p50 ms    p99 ms    GiB/s   ns/dim   Mdocs/s scan     R@10
 ------------------------------------------------------------------------------------------------------------------------------------
-RankIndex sym                           512       14.6       4559550     3.959     4.379     3.61    0.515           7.58   0.7825
-RankIndex asym                          512       14.6       4559550     3.712     4.012     3.85    0.483           8.08   0.8450
-RankQuant b=2 sym                        64        1.8       5251083     2.534     2.761     0.71    0.330          11.84   0.4660
-RankQuant b=2 asym                       64        1.8       5251083     0.238     0.245     7.51    0.031         125.94   0.5715
-RankQuant b=2 asym byte-LUT              64        1.8       5095754     0.754     0.764     2.37    0.098          39.78   0.5715
-RankQuant b=2 fastscan                  128        3.7        283630     0.090     0.093    39.69    0.012         332.93   0.5700
-RankQuant b=4 sym                       128        3.7       5205223     2.634     2.885     1.36    0.343          11.39   0.7475
-RankQuant b=4 asym                      128        3.7       5205223     0.313     0.317    11.42    0.041          95.79   0.8055
-RankQuant b=4 asym byte-LUT             128        3.7       5324938     1.644     1.662     2.18    0.214          18.25   0.8055
-RankQuant b=1 sym                        32        0.9       5523695     2.467     2.745     0.36    0.321          12.16   0.2785
-RankQuant b=1 asym                       32        0.9       5523695     2.446     2.478     0.37    0.318          12.26   0.3470
-Bitmap n_top=64                          32        0.9       5576810     0.081     0.084    11.02    0.011         369.67   0.2480
-SignBitmap probe                         32        0.9      19641040     0.091     0.099     9.81    0.012         329.12   0.2880
-TwoStage b=2 M=100 CR=0.976              96        2.7       2689552     0.098     0.107    27.45    0.013         306.99   0.5700
-TwoStage b=2 M=500 CR=1.000              96        2.7       2669862     0.109     0.122    24.62    0.014         275.39   0.5715
-TwoStage b=2 M=1000 CR=1.000             96        2.7       2742585     0.122     0.135    21.90    0.016         244.94   0.5715
-TwoStage b=2 M=5000 CR=1.000             96        2.7       2674849     0.240     0.253    11.19    0.031         125.10   0.5715
-SignTwoStage b=2 M=500 CR=1.000          96        2.7       4038493     0.106     0.114    25.37    0.014         283.74   0.5715
+Rank sym                                512       14.6       4175858     3.727     4.330     3.84    0.485           8.05   0.7805
+Rank asym                               512       14.6       4175858     3.537     4.008     4.04    0.461           8.48   0.8330
+RankQuant b=2 sym                        64        1.8       4246863     2.535     3.063     0.71    0.330          11.84   0.4555
+RankQuant b=2 asym                       64        1.8       4246863     0.297     0.313     6.01    0.039         100.85   0.5785
+RankQuant b=2 asym byte-LUT              64        1.8       4399340     0.630     0.785     2.84    0.082          47.65   0.5785
+RankQuant b=2 fastscan                  128        3.7        249604     0.109     0.112    32.90    0.014         275.98   0.5845
+RankQuant b=4 sym                       128        3.7       4221293     2.602     3.182     1.37    0.339          11.53   0.7425
+RankQuant b=4 asym                      128        3.7       4221293     0.373     0.508     9.59    0.049          80.48   0.8095
+RankQuant b=4 asym byte-LUT             128        3.7       4299550     1.217     1.693     2.94    0.158          24.65   0.8095
+RankQuant b=1 sym                        32        0.9       4435777     2.400     2.815     0.37    0.313          12.50   0.2890
+RankQuant b=1 asym                       32        0.9       4435777     2.394     2.801     0.37    0.312          12.53   0.3790
+Bitmap n_top=64                          32        0.9       4260526     0.064     0.066    14.02    0.008         470.51   0.2495
+SignBitmap probe                         32        0.9      14021070     0.045     0.053    19.81    0.006         664.67   0.2745
+TwoStage b=2 M=100 CR=0.978              96        2.7       2356573     0.053     0.059    51.04    0.007         570.90   0.5795
+TwoStage b=2 M=500 CR=1.000              96        2.7       2462261     0.067     0.081    39.87    0.009         445.98   0.5785
+TwoStage b=2 M=1000 CR=1.000             96        2.7       2256172     0.082     0.091    32.78    0.011         366.64   0.5785
+TwoStage b=2 M=5000 CR=1.000             96        2.7       2339041     0.186     0.198    14.39    0.024         160.97   0.5785
+SignTwoStage b=2 M=500 CR=1.000          96        2.7       3605670     0.064     0.074    41.71    0.008         466.56   0.5785
 
-{"dim":256,"n":30000,"queries":200,"k":10,"rows":[{"name":"RankIndex sym","bytes_per_vec":512,"total_mib":14.648,"encode_vps":4559549.8,"p50_ms":3.9589,"p99_ms":4.3786,"gib_per_sec":3.613,"ns_per_dim":0.5155,"docs_per_sec":7577944.8,"recall_at_10_vs_fp32":0.7825},{"name":"RankIndex asym","bytes_per_vec":512,"total_mib":14.648,"encode_vps":4559549.8,"p50_ms":3.7118,"p99_ms":4.0118,"gib_per_sec":3.854,"ns_per_dim":0.4833,"docs_per_sec":8082284.1,"recall_at_10_vs_fp32":0.8450},{"name":"RankQuant b=2 sym","bytes_per_vec":64,"total_mib":1.831,"encode_vps":5251083.2,"p50_ms":2.5342,"p99_ms":2.7609,"gib_per_sec":0.706,"ns_per_dim":0.3300,"docs_per_sec":11837877.9,"recall_at_10_vs_fp32":0.4660},{"name":"RankQuant b=2 asym","bytes_per_vec":64,"total_mib":1.831,"encode_vps":5251083.2,"p50_ms":0.2382,"p99_ms":0.2448,"gib_per_sec":7.507,"ns_per_dim":0.0310,"docs_per_sec":125940354.6,"recall_at_10_vs_fp32":0.5715},{"name":"RankQuant b=2 asym byte-LUT","bytes_per_vec":64,"total_mib":1.831,"encode_vps":5095754.3,"p50_ms":0.7542,"p99_ms":0.7642,"gib_per_sec":2.371,"ns_per_dim":0.0982,"docs_per_sec":39777827.6,"recall_at_10_vs_fp32":0.5715},{"name":"RankQuant b=2 fastscan","bytes_per_vec":128,"total_mib":3.664,"encode_vps":283630.2,"p50_ms":0.0901,"p99_ms":0.0926,"gib_per_sec":39.688,"ns_per_dim":0.0117,"docs_per_sec":332930118.0,"recall_at_10_vs_fp32":0.5700},{"name":"RankQuant b=4 sym","bytes_per_vec":128,"total_mib":3.662,"encode_vps":5205222.9,"p50_ms":2.6344,"p99_ms":2.8850,"gib_per_sec":1.358,"ns_per_dim":0.3430,"docs_per_sec":11387896.0,"recall_at_10_vs_fp32":0.7475},{"name":"RankQuant b=4 asym","bytes_per_vec":128,"total_mib":3.662,"encode_vps":5205222.9,"p50_ms":0.3132,"p99_ms":0.3165,"gib_per_sec":11.419,"ns_per_dim":0.0408,"docs_per_sec":95788804.8,"recall_at_10_vs_fp32":0.8055},{"name":"RankQuant b=4 asym byte-LUT","bytes_per_vec":128,"total_mib":3.662,"encode_vps":5324938.4,"p50_ms":1.6437,"p99_ms":1.6621,"gib_per_sec":2.176,"ns_per_dim":0.2140,"docs_per_sec":18251816.7,"recall_at_10_vs_fp32":0.8055},{"name":"RankQuant b=1 sym","bytes_per_vec":32,"total_mib":0.916,"encode_vps":5523695.1,"p50_ms":2.4667,"p99_ms":2.7455,"gib_per_sec":0.362,"ns_per_dim":0.3212,"docs_per_sec":12161849.9,"recall_at_10_vs_fp32":0.2785},{"name":"RankQuant b=1 asym","bytes_per_vec":32,"total_mib":0.916,"encode_vps":5523695.1,"p50_ms":2.4461,"p99_ms":2.4776,"gib_per_sec":0.366,"ns_per_dim":0.3185,"docs_per_sec":12264561.3,"recall_at_10_vs_fp32":0.3470},{"name":"Bitmap n_top=64","bytes_per_vec":32,"total_mib":0.916,"encode_vps":5576810.4,"p50_ms":0.0812,"p99_ms":0.0838,"gib_per_sec":11.017,"ns_per_dim":0.0106,"docs_per_sec":369672100.8,"recall_at_10_vs_fp32":0.2480},{"name":"SignBitmap probe","bytes_per_vec":32,"total_mib":0.916,"encode_vps":19641040.3,"p50_ms":0.0912,"p99_ms":0.0985,"gib_per_sec":9.809,"ns_per_dim":0.0119,"docs_per_sec":329124200.5,"recall_at_10_vs_fp32":0.2880},{"name":"TwoStage b=2 M=100 CR=0.976","bytes_per_vec":96,"total_mib":2.747,"encode_vps":2689552.2,"p50_ms":0.0977,"p99_ms":0.1074,"gib_per_sec":27.447,"ns_per_dim":0.0127,"docs_per_sec":306987024.7,"recall_at_10_vs_fp32":0.5700},{"name":"TwoStage b=2 M=500 CR=1.000","bytes_per_vec":96,"total_mib":2.747,"encode_vps":2669861.7,"p50_ms":0.1089,"p99_ms":0.1216,"gib_per_sec":24.622,"ns_per_dim":0.0142,"docs_per_sec":275393583.3,"recall_at_10_vs_fp32":0.5715},{"name":"TwoStage b=2 M=1000 CR=1.000","bytes_per_vec":96,"total_mib":2.747,"encode_vps":2742584.6,"p50_ms":0.1225,"p99_ms":0.1347,"gib_per_sec":21.899,"ns_per_dim":0.0159,"docs_per_sec":244937949.1,"recall_at_10_vs_fp32":0.5715},{"name":"TwoStage b=2 M=5000 CR=1.000","bytes_per_vec":96,"total_mib":2.747,"encode_vps":2674848.6,"p50_ms":0.2398,"p99_ms":0.2534,"gib_per_sec":11.185,"ns_per_dim":0.0312,"docs_per_sec":125103731.8,"recall_at_10_vs_fp32":0.5715},{"name":"SignTwoStage b=2 M=500 CR=1.000","bytes_per_vec":96,"total_mib":2.747,"encode_vps":4038492.8,"p50_ms":0.1057,"p99_ms":0.1143,"gib_per_sec":25.369,"ns_per_dim":0.0138,"docs_per_sec":283744289.6,"recall_at_10_vs_fp32":0.5715}]}
+JSON:

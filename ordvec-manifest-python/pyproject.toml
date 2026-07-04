@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ordvec-manifest"
-version = "0.5.0"
+version = "0.6.0"
 description = "Python bindings for ordvec index manifest verification"
 readme = "README.md"
 requires-python = ">=3.10"
