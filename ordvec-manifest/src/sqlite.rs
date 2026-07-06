@@ -119,6 +119,18 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
         )
         .map_err(sqlite_err)?;
     }
+    // Schema v2 dropped active_manifest's manifest_id column, and `CREATE
+    // TABLE IF NOT EXISTS` below would leave such a stale table in place,
+    // making activate()'s INSERT fail at runtime on its NOT NULL column. The
+    // registry is rebuildable cache/pointer state — cached verification
+    // reports and the active-manifest pointer, never source of truth — so a
+    // table whose live schema mismatches the current one is dropped and
+    // recreated empty rather than migrated.
+    drop_registry_table_on_schema_mismatch(
+        conn,
+        "active_manifest",
+        &["id", "manifest_path", "activated_at", "forced"],
+    )?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS verification_reports(
             report_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -716,6 +728,38 @@ fn has_required_columns(columns: &[String], required: &[&str]) -> bool {
     required
         .iter()
         .all(|required| columns.iter().any(|column| column == required))
+}
+
+/// Drops `table` when its live column set differs from `expected_columns`.
+/// The sqlite registry is rebuildable cache/pointer state, so a stale-schema
+/// table from an older build is dropped here and recreated empty by the
+/// `CREATE TABLE IF NOT EXISTS` statements that `init` runs immediately
+/// afterwards — legacy rows are never migrated. Idempotent: once the table
+/// matches the current schema this is a no-op, and an absent table is left
+/// for `CREATE TABLE IF NOT EXISTS` to create.
+fn drop_registry_table_on_schema_mismatch(
+    conn: &Connection,
+    table: &str,
+    expected_columns: &[&str],
+) -> Result<(), ManifestError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sqlite_err)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_err)?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let matches_current =
+        columns.len() == expected_columns.len() && has_required_columns(&columns, expected_columns);
+    if !matches_current {
+        conn.execute_batch(&format!("DROP TABLE {table}"))
+            .map_err(sqlite_err)?;
+    }
+    Ok(())
 }
 
 fn sqlite_err(err: rusqlite::Error) -> ManifestError {
