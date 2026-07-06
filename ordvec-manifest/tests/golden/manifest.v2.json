@@ -1,0 +1,39 @@
+{
+  "schema_version": "ordvec.index_manifest.v2",
+  "artifact": {
+    "path": "index.ovrq",
+    "sha256": "4f9f638545a184edc0e4d40505ec4ccc8d01f08a3b7b3802e8416f8137f2c911",
+    "kind": "rank_quant",
+    "format_version": 1,
+    "dim": 16,
+    "vector_count": 2,
+    "bytes_per_vec": 4,
+    "params": {
+      "kind": "rank_quant",
+      "bits": 2
+    },
+    "file_size_bytes": 22
+  },
+  "auxiliary_artifacts": [
+    {
+      "name": "aux-a.bin",
+      "path": "aux-a.bin",
+      "sha256": "68625473e92b147c590f83c5609bda60f2f431851e4db12a311279a7657e0b0c",
+      "file_size_bytes": 9
+    },
+    {
+      "name": "aux-b.bin",
+      "path": "aux-b.bin",
+      "sha256": "7483d93e519a65e9398791421d0fa3303b8ebf865fc2e78f88339e1e751e7c02",
+      "file_size_bytes": 9
+    }
+  ],
+  "embedding": {
+    "model": "test-embedding",
+    "dim": 16
+  },
+  "row_identity": {
+    "kind": "row_id_identity",
+    "row_count": 2
+  }
+}
