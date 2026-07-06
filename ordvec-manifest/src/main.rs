@@ -304,7 +304,6 @@ fn run() -> Result<i32, ManifestError> {
             if as_json {
                 print_json(&document.manifest)?;
             } else {
-                println!("manifest_id: {}", document.manifest.manifest_id);
                 println!("schema_version: {}", document.manifest.schema_version);
                 println!("artifact: {}", document.manifest.artifact.path);
                 println!(
@@ -486,13 +485,7 @@ fn emit_report(
     if as_json {
         print_json(report)?;
     } else if report.ok {
-        println!(
-            "verified {}",
-            report
-                .manifest_id
-                .as_deref()
-                .unwrap_or("<missing manifest_id>")
-        );
+        println!("verified");
     } else {
         for issue in &report.errors {
             eprintln!("{}: {}", issue.code, issue.message);

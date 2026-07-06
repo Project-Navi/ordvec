@@ -26,8 +26,6 @@ def write_unloadable_manifest(tmp_path):
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     manifest = {
         "schema_version": ordvec_manifest.SCHEMA_VERSION,
-        "manifest_id": "urn:uuid:7c66ad6e-bdde-49a8-b420-f1136d04f5bd",
-        "created_at": "2026-06-09T00:00:00Z",
         "artifact": {
             "path": artifact.name,
             "sha256": digest,

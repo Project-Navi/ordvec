@@ -28,7 +28,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v1";
+pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v2";
 pub const CALIBRATION_SCHEMA_VERSION: &str = "ordvec.calibration.v1";
 pub const ENCODER_DISTORTION_SCHEMA_VERSION: &str = "ordvec.encoder_distortion.v1";
 pub const DEFAULT_MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -122,7 +122,8 @@ pub fn load_manifest_file_with_options(
         "manifest_file_too_large",
         "manifest file",
     )?;
-    let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)?;
+    let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|err| manifest_parse_error(&manifest_bytes, err))?;
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -133,6 +134,30 @@ pub fn load_manifest_file_with_options(
         source_path: Some(path.to_path_buf()),
         base_dir,
     })
+}
+
+/// Wraps a manifest parse failure with schema-version context. Old or new
+/// schema generations fail the strict `deny_unknown_fields` parse before the
+/// `schema_version` field is ever validated, so a targeted probe of that one
+/// field is needed to say *why* the document does not parse.
+fn manifest_parse_error(manifest_bytes: &[u8], err: serde_json::Error) -> ManifestError {
+    #[derive(Deserialize)]
+    struct SchemaVersionProbe {
+        schema_version: Option<String>,
+    }
+    if let Ok(SchemaVersionProbe {
+        schema_version: Some(version),
+    }) = serde_json::from_slice::<SchemaVersionProbe>(manifest_bytes)
+    {
+        if version != SCHEMA_VERSION {
+            return ManifestError::invalid(format!(
+                "manifest declares schema_version {version:?} but this build supports \
+                 {SCHEMA_VERSION:?}; the manifest was written by an older or newer \
+                 manifest schema: {err}"
+            ));
+        }
+    }
+    ManifestError::Json(err)
 }
 
 fn read_bounded_file(
@@ -237,7 +262,7 @@ fn verify_manifest_with_path_capture(
     options: VerifyOptions,
 ) -> (VerificationReport, VerificationPathCapture) {
     let mut paths = VerificationPathCapture::default();
-    let mut report = VerificationReport::new(Some(document.manifest.manifest_id.clone()));
+    let mut report = VerificationReport::new();
     validate_manifest_shape(&document.manifest, &options.limits, &mut report);
 
     let artifact_display_path = document.manifest.artifact.path.clone();
@@ -339,12 +364,6 @@ fn validate_manifest_shape(
             ),
         );
     }
-    if manifest.manifest_id.trim().is_empty() {
-        report.error("manifest_id_empty", "manifest_id must be non-empty");
-    }
-    if DateTime::parse_from_rfc3339(&manifest.created_at).is_err() {
-        report.error("created_at_invalid", "created_at must parse as RFC3339");
-    }
     if manifest.embedding.model.trim().is_empty() {
         report.error("embedding_model_empty", "embedding.model must be non-empty");
     }
@@ -356,6 +375,11 @@ fn validate_manifest_shape(
     }
     if manifest.artifact.path.trim().is_empty() {
         report.error("artifact_path_empty", "artifact.path must be non-empty");
+    } else if !is_canonical_manifest_path(&manifest.artifact.path) {
+        report.error(
+            "artifact_path_not_canonical",
+            "artifact.path must use forward slashes with no `.` or empty segments",
+        );
     }
     if !is_sha256_hex(&manifest.artifact.sha256) {
         report.error(
@@ -413,6 +437,11 @@ fn validate_manifest_shape(
             report.error(
                 "row_identity_path_empty",
                 "row_identity.path must be non-empty",
+            );
+        } else if !is_canonical_manifest_path(path) {
+            report.error(
+                "row_identity_path_not_canonical",
+                "row_identity.path must use forward slashes with no `.` or empty segments",
             );
         }
         if !is_sha256_hex(sha256) {
@@ -561,6 +590,13 @@ fn validate_auxiliary_artifact_shape(
             report.error(
                 "auxiliary_artifact_path_empty",
                 format!("auxiliary artifact {name:?} path must be non-empty"),
+            );
+        } else if !is_canonical_manifest_path(&artifact.path) {
+            report.error(
+                "auxiliary_artifact_path_not_canonical",
+                format!(
+                    "auxiliary artifact {name:?} path must use forward slashes with no `.` or empty segments"
+                ),
             );
         }
         if !is_sha256_hex(&artifact.sha256) {
@@ -2442,8 +2478,6 @@ fn is_true(value: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct IndexManifest {
     pub schema_version: String,
-    pub manifest_id: String,
-    pub created_at: String,
     pub artifact: Artifact,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auxiliary_artifacts: Vec<AuxiliaryArtifact>,
@@ -3269,7 +3303,6 @@ fn report_issue_summary(errors: &[ReportIssue]) -> String {
 pub struct VerificationReport {
     pub ok: bool,
     pub checked_at: String,
-    pub manifest_id: Option<String>,
     pub artifact: ArtifactReport,
     #[serde(default)]
     pub auxiliary_artifacts: Vec<AuxiliaryArtifactReport>,
@@ -3284,11 +3317,10 @@ pub struct VerificationReport {
 }
 
 impl VerificationReport {
-    fn new(manifest_id: Option<String>) -> Self {
+    fn new() -> Self {
         Self {
             ok: false,
             checked_at: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            manifest_id,
             artifact: ArtifactReport::default(),
             auxiliary_artifacts: Vec::new(),
             row_identity: RowIdentityReport::default(),
@@ -3696,11 +3728,8 @@ pub fn create_manifest_for_index_with_options(
     let auxiliary_artifacts =
         create_auxiliary_artifacts(&options.auxiliary_artifacts, out_base, &options)?;
 
-    let invocation_id = format!("urn:uuid:{}", Uuid::new_v4());
     Ok(IndexManifest {
         schema_version: SCHEMA_VERSION.to_string(),
-        manifest_id: format!("urn:uuid:{}", Uuid::new_v4()),
-        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         artifact,
         auxiliary_artifacts,
         embedding: Embedding {
@@ -3716,14 +3745,7 @@ pub fn create_manifest_for_index_with_options(
         encoder_distortion: None,
         calibration: None,
         row_identity,
-        build: Some(BuildInfo {
-            invocation_id,
-            builder_id: Some("ordvec-manifest".to_string()),
-            source_repo: None,
-            source_commit: None,
-            ci_provider: None,
-            ci_run_id: None,
-        }),
+        build: None,
         attestations: Vec::new(),
         extensions: BTreeMap::new(),
     })
@@ -3784,9 +3806,19 @@ fn create_auxiliary_artifacts(
             required: artifact.required,
         });
     }
+    // Deterministic manifest bytes: entry order must not depend on
+    // declaration order.
+    manifest_artifacts.sort_by(|a, b| {
+        (a.name.as_str(), a.path.as_str()).cmp(&(b.name.as_str(), b.path.as_str()))
+    });
     Ok(manifest_artifacts)
 }
 
+/// Writes the manifest in its single canonical serialization: serde_json
+/// pretty-printing, struct-declaration field order, BTreeMap-sorted map keys.
+/// Content hashing and signing operate on the stored bytes, so changing the
+/// serializer or its settings changes every manifest's identity and is a
+/// schema-version event, not a cosmetic change.
 pub fn write_manifest_file(
     manifest: &IndexManifest,
     path: impl AsRef<Path>,
@@ -4106,6 +4138,21 @@ fn relative_path_between(base: &Path, target: &Path) -> Option<PathBuf> {
         }
     }
     Some(relative)
+}
+
+/// A canonical manifest path uses forward slashes only and contains no `.`
+/// or empty segments, so identical bundle content always embeds identical
+/// path strings. Absolute paths and `..` segments remain governed by the
+/// existing `allow_absolute_paths` / `allow_path_escape` policies.
+fn is_canonical_manifest_path(path: &str) -> bool {
+    if path.is_empty() || path.contains('\\') {
+        return false;
+    }
+    let relative = path.strip_prefix('/').unwrap_or(path);
+    !relative.is_empty()
+        && relative
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != ".")
 }
 
 fn path_to_manifest_string(path: &Path) -> String {

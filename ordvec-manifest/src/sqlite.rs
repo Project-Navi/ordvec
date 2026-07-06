@@ -21,12 +21,7 @@ pub fn verify_with_registry(
     init(&conn)?;
     if use_cache {
         if let Some(cache_key) = current_cache_key(document, manifest_path.as_ref(), &options)? {
-            if let Some(report) = load_cached_report(
-                &conn,
-                &document.manifest.manifest_id,
-                &cache_key,
-                &options.limits,
-            )? {
+            if let Some(report) = load_cached_report(&conn, &cache_key, &options.limits)? {
                 return Ok(report);
             }
         }
@@ -38,7 +33,6 @@ pub fn verify_with_registry(
         cache_key_from_report(manifest_path.as_ref(), &report, document, &store_options)?;
     store_report(
         &mut conn,
-        document,
         manifest_path.as_ref(),
         &report,
         cache_key.as_ref(),
@@ -71,7 +65,6 @@ pub fn activate(
     };
     store_report(
         &mut conn,
-        document,
         manifest_path.as_ref(),
         &report,
         cache_key.as_ref(),
@@ -82,15 +75,13 @@ pub fn activate(
     }
 
     conn.execute(
-        "INSERT INTO active_manifest(id, manifest_id, manifest_path, activated_at, forced)
-         VALUES(1, ?1, ?2, ?3, ?4)
+        "INSERT INTO active_manifest(id, manifest_path, activated_at, forced)
+         VALUES(1, ?1, ?2, ?3)
          ON CONFLICT(id) DO UPDATE SET
-           manifest_id=excluded.manifest_id,
            manifest_path=excluded.manifest_path,
            activated_at=excluded.activated_at,
            forced=excluded.forced",
         params![
-            document.manifest.manifest_id,
             manifest_path.as_ref().display().to_string(),
             Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
             i64::from(force),
@@ -106,7 +97,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
             "ALTER TABLE verification_reports RENAME TO verification_reports_old;
              CREATE TABLE verification_reports(
                 report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manifest_id TEXT NOT NULL,
                 manifest_path TEXT NOT NULL,
                 checked_at TEXT NOT NULL,
                 ok INTEGER NOT NULL,
@@ -121,9 +111,9 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
                 report_json TEXT NOT NULL
              );
              INSERT INTO verification_reports(
-                manifest_id, manifest_path, checked_at, ok, report_json
+                manifest_path, checked_at, ok, report_json
              )
-             SELECT manifest_id, manifest_path, checked_at, ok, report_json
+             SELECT manifest_path, checked_at, ok, report_json
              FROM verification_reports_old;
              DROP TABLE verification_reports_old;",
         )
@@ -132,7 +122,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS verification_reports(
             report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            manifest_id TEXT NOT NULL,
             manifest_path TEXT NOT NULL,
             checked_at TEXT NOT NULL,
             ok INTEGER NOT NULL,
@@ -148,7 +137,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
         );
         CREATE INDEX IF NOT EXISTS verification_reports_cache_idx
           ON verification_reports(
-            manifest_id,
             manifest_location_sha256,
             manifest_sha256,
             options_sha256,
@@ -161,7 +149,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
           );
         CREATE TABLE IF NOT EXISTS active_manifest(
             id INTEGER PRIMARY KEY CHECK(id = 1),
-            manifest_id TEXT NOT NULL,
             manifest_path TEXT NOT NULL,
             activated_at TEXT NOT NULL,
             forced INTEGER NOT NULL
@@ -173,7 +160,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
 
 fn store_report(
     conn: &mut Connection,
-    document: &ManifestDocument,
     manifest_path: &Path,
     report: &VerificationReport,
     cache_key: Option<&CacheKey>,
@@ -193,7 +179,6 @@ fn store_report(
     }
     tx.execute(
         "INSERT INTO verification_reports(
-            manifest_id,
             manifest_path,
             checked_at,
             ok,
@@ -206,9 +191,8 @@ fn store_report(
             auxiliary_artifacts_sha256,
             encoder_distortion_profile_sha256,
             report_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
-            document.manifest.manifest_id,
             manifest_path.display().to_string(),
             report.checked_at,
             i64::from(report.ok),
@@ -230,7 +214,6 @@ fn store_report(
 
 fn load_cached_report(
     conn: &Connection,
-    manifest_id: &str,
     cache_key: &CacheKey,
     limits: &ResourceLimits,
 ) -> Result<Option<VerificationReport>, ManifestError> {
@@ -238,31 +221,29 @@ fn load_cached_report(
         .query_row(
             "SELECT report_id, length(CAST(report_json AS BLOB))
              FROM verification_reports
-             WHERE manifest_id = ?1
-               AND manifest_location_sha256 = ?2
-               AND manifest_sha256 = ?3
-               AND options_sha256 = ?4
-               AND artifact_sha256 = ?5
+             WHERE manifest_location_sha256 = ?1
+               AND manifest_sha256 = ?2
+               AND options_sha256 = ?3
+               AND artifact_sha256 = ?4
                AND (
-                 (row_identity_sha256 IS NULL AND ?6 IS NULL)
-                 OR row_identity_sha256 = ?6
+                 (row_identity_sha256 IS NULL AND ?5 IS NULL)
+                 OR row_identity_sha256 = ?5
                )
                AND (
-                 (calibration_profile_sha256 IS NULL AND ?7 IS NULL)
-                 OR calibration_profile_sha256 = ?7
+                 (calibration_profile_sha256 IS NULL AND ?6 IS NULL)
+                 OR calibration_profile_sha256 = ?6
                )
                AND (
-                 (auxiliary_artifacts_sha256 IS NULL AND ?8 IS NULL)
-                 OR auxiliary_artifacts_sha256 = ?8
+                 (auxiliary_artifacts_sha256 IS NULL AND ?7 IS NULL)
+                 OR auxiliary_artifacts_sha256 = ?7
                )
                AND (
-                 (encoder_distortion_profile_sha256 IS NULL AND ?9 IS NULL)
-                 OR encoder_distortion_profile_sha256 = ?9
+                 (encoder_distortion_profile_sha256 IS NULL AND ?8 IS NULL)
+                 OR encoder_distortion_profile_sha256 = ?8
                )
              ORDER BY report_id DESC
              LIMIT 1",
             params![
-                manifest_id,
                 cache_key.manifest_location_sha256.as_str(),
                 cache_key.manifest_sha256.as_str(),
                 cache_key.options_sha256.as_str(),
@@ -546,7 +527,7 @@ fn current_auxiliary_artifacts_sha256(
     if document.manifest.auxiliary_artifacts.is_empty() {
         return Ok(None);
     }
-    let mut report = VerificationReport::new(None);
+    let mut report = VerificationReport::new();
     let mut paths = VerificationPathCapture::default();
     verify_auxiliary_artifacts(document, options, &mut report, &mut paths);
     auxiliary_artifacts_sha256_from_report(document, &report)
@@ -706,7 +687,6 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         .map_err(sqlite_err)?;
     let current_required = [
         "report_id",
-        "manifest_id",
         "manifest_path",
         "checked_at",
         "ok",
@@ -720,17 +700,14 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         "encoder_distortion_profile_sha256",
         "report_json",
     ];
-    if has_required_columns(&columns, &current_required) {
+    // A stale manifest_id column carries a NOT NULL constraint the current
+    // inserts no longer satisfy, so its presence always forces migration.
+    let has_stale_manifest_id = columns.iter().any(|column| column == "manifest_id");
+    if !has_stale_manifest_id && has_required_columns(&columns, &current_required) {
         return Ok(false);
     }
 
-    let legacy_required = [
-        "manifest_id",
-        "manifest_path",
-        "checked_at",
-        "ok",
-        "report_json",
-    ];
+    let legacy_required = ["manifest_path", "checked_at", "ok", "report_json"];
     if has_required_columns(&columns, &legacy_required) {
         return Ok(true);
     }

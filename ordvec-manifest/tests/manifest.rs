@@ -590,7 +590,7 @@ fn manifest_loader_enforces_size_limit_with_exact_boundary_success() {
         },
     )
     .unwrap();
-    assert_eq!(loaded.manifest.manifest_id, manifest.manifest_id);
+    assert_eq!(loaded.manifest.artifact.sha256, manifest.artifact.sha256);
 }
 
 #[test]
@@ -1013,7 +1013,14 @@ fn schema_enforces_lowercase_sha256_and_optional_field_shapes() {
     manifest.embedding.corpus_digest = Some("A".repeat(64));
     manifest.embedding.embedding_matrix_digest = Some("not-a-digest".to_string());
     manifest.embedding.normalization = Some("".to_string());
-    manifest.build.as_mut().unwrap().source_repo = Some("".to_string());
+    manifest.build = Some(ordvec_manifest::BuildInfo {
+        invocation_id: "urn:uuid:7c66ad6e-bdde-49a8-b420-f1136d04f5bd".to_string(),
+        builder_id: None,
+        source_repo: Some("".to_string()),
+        source_commit: None,
+        ci_provider: None,
+        ci_run_id: None,
+    });
 
     let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
     for code in [
@@ -3223,6 +3230,7 @@ fn sqlite_migrates_legacy_verification_reports_by_required_column_names() {
     assert!(columns.contains(&"report_id".to_string()));
     assert!(columns.contains(&"manifest_sha256".to_string()));
     assert!(!columns.contains(&"extra".to_string()));
+    assert!(!columns.contains(&"manifest_id".to_string()));
 }
 
 #[cfg(feature = "sqlite")]
