@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+
+- **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
+  manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
+  and `created_at` are removed from `IndexManifest`, creation writes
+  `build: null`, and auxiliary artifact entries are sorted by
+  `(name, path)`, so identical bundle content serializes to byte-identical
+  manifests and `sha256(manifest.json)` is the bundle's content address.
+  Existing v1 manifests no longer parse; loading one fails with an error
+  naming both schema versions (zero back-compat, pre-release). Embedded
+  paths must now be canonical — bundle-relative, forward slashes, no `.`,
+  `..`, or empty segments — enforced both at creation (non-embeddable
+  inputs fail `create` instead of minting a manifest that fails its own
+  verification) and at verification (`*_path_not_canonical` codes, now
+  also covering calibration and encoder-distortion profile refs). Absolute
+  paths and escaping `..` paths remain available behind the existing
+  `allow_absolute_paths` / `allow_path_escape` opt-ins. The
+  `write_manifest_file` serialization form is documented as the single
+  canonical byte form: hashing and signing operate on stored bytes, and any
+  serializer change is a schema-version event. The sqlite report registry
+  drops its `manifest_id` column (existing databases migrate on open).
 
 ## 0.6.0 - 2026-07-04
 
