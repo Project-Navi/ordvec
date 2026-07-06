@@ -2270,7 +2270,7 @@ fn resolve_auxiliary_artifact_path(
 
     if manifest_absolute != path.is_absolute() {
         report.error(
-            "auxiliary_artifact_absolute_path_unresolvable",
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE,
             format!(
                 "auxiliary artifact path {} for {:?} is classified absolute by manifest policy but cannot resolve as absolute on this platform; refusing to resolve it against the manifest base",
                 path.display(),
@@ -2278,7 +2278,7 @@ fn resolve_auxiliary_artifact_path(
             ),
         );
         return AuxiliaryPathResolution::Failed(
-            "auxiliary_artifact_absolute_path_unresolvable".to_string(),
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE.to_string(),
         );
     }
 
@@ -2487,6 +2487,7 @@ struct VerificationPathCapture {
 /// code stays a named constant in [`codes`].
 struct PathIssueCodes {
     absolute_path_rejected: &'static str,
+    absolute_path_unresolvable: &'static str,
     base_dir_unavailable: &'static str,
     path_escape_rejected: &'static str,
     path_unavailable: &'static str,
@@ -2494,6 +2495,7 @@ struct PathIssueCodes {
 
 const ARTIFACT_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     absolute_path_rejected: codes::ARTIFACT_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE,
     base_dir_unavailable: codes::ARTIFACT_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::ARTIFACT_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::ARTIFACT_PATH_UNAVAILABLE,
@@ -2501,6 +2503,7 @@ const ARTIFACT_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
 
 const ROW_IDENTITY_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     absolute_path_rejected: codes::ROW_IDENTITY_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::ROW_IDENTITY_ABSOLUTE_PATH_UNRESOLVABLE,
     base_dir_unavailable: codes::ROW_IDENTITY_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::ROW_IDENTITY_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::ROW_IDENTITY_PATH_UNAVAILABLE,
@@ -2508,6 +2511,7 @@ const ROW_IDENTITY_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
 
 const ENCODER_DISTORTION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     absolute_path_rejected: codes::ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE,
     base_dir_unavailable: codes::ENCODER_DISTORTION_PROFILE_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::ENCODER_DISTORTION_PROFILE_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::ENCODER_DISTORTION_PROFILE_PATH_UNAVAILABLE,
@@ -2515,6 +2519,7 @@ const ENCODER_DISTORTION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
 
 const CALIBRATION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     absolute_path_rejected: codes::CALIBRATION_PROFILE_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::CALIBRATION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE,
     base_dir_unavailable: codes::CALIBRATION_PROFILE_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::CALIBRATION_PROFILE_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::CALIBRATION_PROFILE_PATH_UNAVAILABLE,
@@ -2546,7 +2551,7 @@ fn resolve_existing_path(
     // outright instead of resolving inconsistently across OSes.
     if manifest_absolute != path.is_absolute() {
         errors.push(ReportIssue::new(
-            format!("{context}_absolute_path_unresolvable"),
+            issue_codes.absolute_path_unresolvable,
             format!(
                 "path {} is classified absolute by manifest policy but cannot resolve as absolute on this platform; refusing to resolve it against the manifest base",
                 path.display()
@@ -3614,6 +3619,7 @@ pub struct AttestationShapeCheck {
 /// consumers can branch on constants instead of retyping string literals.
 pub mod codes {
     pub const ARTIFACT_ABSOLUTE_PATH_REJECTED: &str = "artifact_absolute_path_rejected";
+    pub const ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE: &str = "artifact_absolute_path_unresolvable";
     pub const ARTIFACT_BASE_DIR_UNAVAILABLE: &str = "artifact_base_dir_unavailable";
     pub const ARTIFACT_BYTES_PER_VEC_MISMATCH: &str = "artifact_bytes_per_vec_mismatch";
     pub const ARTIFACT_BYTES_PER_VEC_ZERO: &str = "artifact_bytes_per_vec_zero";
@@ -3646,6 +3652,8 @@ pub mod codes {
     pub const ATTESTATION_SUBJECT_SHA256_MISMATCH: &str = "attestation_subject_sha256_mismatch";
     pub const AUXILIARY_ARTIFACT_ABSOLUTE_PATH_REJECTED: &str =
         "auxiliary_artifact_absolute_path_rejected";
+    pub const AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "auxiliary_artifact_absolute_path_unresolvable";
     pub const AUXILIARY_ARTIFACT_BASE_DIR_UNAVAILABLE: &str =
         "auxiliary_artifact_base_dir_unavailable";
     pub const AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED: &str =
@@ -3700,6 +3708,8 @@ pub mod codes {
     pub const CALIBRATION_ORDINALIZATION_DIM_ZERO: &str = "calibration_ordinalization_dim_zero";
     pub const CALIBRATION_PROFILE_ABSOLUTE_PATH_REJECTED: &str =
         "calibration_profile_absolute_path_rejected";
+    pub const CALIBRATION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "calibration_profile_absolute_path_unresolvable";
     pub const CALIBRATION_PROFILE_BASE_DIR_UNAVAILABLE: &str =
         "calibration_profile_base_dir_unavailable";
     pub const CALIBRATION_PROFILE_DIM_MISMATCH: &str = "calibration_profile_dim_mismatch";
@@ -3785,6 +3795,8 @@ pub mod codes {
     pub const ENCODER_DISTORTION_POOLING_MISMATCH: &str = "encoder_distortion_pooling_mismatch";
     pub const ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_REJECTED: &str =
         "encoder_distortion_profile_absolute_path_rejected";
+    pub const ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "encoder_distortion_profile_absolute_path_unresolvable";
     pub const ENCODER_DISTORTION_PROFILE_BASE_DIR_UNAVAILABLE: &str =
         "encoder_distortion_profile_base_dir_unavailable";
     pub const ENCODER_DISTORTION_PROFILE_FILE_SIZE_MISMATCH: &str =
@@ -3847,6 +3859,8 @@ pub mod codes {
     pub const EXTENSION_KEY_NOT_NAMESPACED: &str = "extension_key_not_namespaced";
     pub const MANIFEST_FILE_TOO_LARGE: &str = "manifest_file_too_large";
     pub const ROW_IDENTITY_ABSOLUTE_PATH_REJECTED: &str = "row_identity_absolute_path_rejected";
+    pub const ROW_IDENTITY_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "row_identity_absolute_path_unresolvable";
     pub const ROW_IDENTITY_BASE_DIR_UNAVAILABLE: &str = "row_identity_base_dir_unavailable";
     pub const ROW_IDENTITY_DB_ID_CONTAINS_NUL: &str = "row_identity_db_id_contains_nul";
     pub const ROW_IDENTITY_DB_ID_EMPTY: &str = "row_identity_db_id_empty";

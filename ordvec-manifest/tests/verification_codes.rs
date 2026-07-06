@@ -20,6 +20,10 @@ fn security_relevant_code_values_are_locked() {
             "artifact_absolute_path_rejected",
         ),
         (
+            codes::ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE,
+            "artifact_absolute_path_unresolvable",
+        ),
+        (
             codes::ARTIFACT_PATH_ESCAPE_REJECTED,
             "artifact_path_escape_rejected",
         ),
@@ -38,6 +42,10 @@ fn security_relevant_code_values_are_locked() {
         (
             codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_REJECTED,
             "auxiliary_artifact_absolute_path_rejected",
+        ),
+        (
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE,
+            "auxiliary_artifact_absolute_path_unresolvable",
         ),
         (
             codes::AUXILIARY_ARTIFACT_PATH_ESCAPE_REJECTED,
