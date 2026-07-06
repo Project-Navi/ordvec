@@ -219,3 +219,96 @@ fn non_canonical_manifest_paths_are_rejected_at_validation() {
         .iter()
         .any(|issue| issue.code == "artifact_path_not_canonical"));
 }
+
+#[test]
+fn contained_parent_dir_segments_are_not_canonical_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    write_index(temp.path());
+    fs::create_dir(temp.path().join("a")).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        temp.path().join("index.ovrq"),
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    // `a/../index.ovrq` resolves to the same file as `index.ovrq` without
+    // ever escaping the bundle, so it slips past escape/containment checks;
+    // canonicality must reject it or one bundle has many verified identities.
+    let mut aliased = manifest;
+    aliased.artifact.path = "a/../index.ovrq".to_string();
+    let report = verify_manifest_with_base(aliased.clone(), temp.path(), VerifyOptions::default());
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_path_not_canonical"));
+
+    // `..` segments remain available under the explicit escape policy.
+    let report = verify_manifest_with_base(
+        aliased,
+        temp.path(),
+        VerifyOptions {
+            allow_path_escape: true,
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(report.ok, "{:?}", report.errors);
+}
+
+#[test]
+fn absolute_path_strings_are_policy_governed_not_canonicality_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        temp.path().join("index.ovrq"),
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    // Windows-style absolute strings must fall to the allow_absolute_paths
+    // policy at resolution, not to the canonical-form check, so the retained
+    // absolute-path opt-in keeps working across platforms.
+    for absolute in ["C:/bundles/index.ovrq", "//?/C:/bundles/index.ovrq"] {
+        let mut manifest = manifest.clone();
+        manifest.artifact.path = absolute.to_string();
+        let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+        assert!(!report.ok);
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|issue| issue.code != "artifact_path_not_canonical"),
+            "{absolute} must be governed by path policy, got {:?}",
+            report.errors
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn create_rejects_paths_it_cannot_embed_canonically() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    // A legal Unix filename containing a backslash cannot be embedded without
+    // aliasing the manifest path separator; creation must fail instead of
+    // minting a manifest that fails its own default verification.
+    let aux = aux_input(temp.path(), "back\\slash.bin", b"aux");
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![aux],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("cannot be embedded"), "{err}");
+}

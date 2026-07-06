@@ -263,7 +263,7 @@ fn verify_manifest_with_path_capture(
 ) -> (VerificationReport, VerificationPathCapture) {
     let mut paths = VerificationPathCapture::default();
     let mut report = VerificationReport::new();
-    validate_manifest_shape(&document.manifest, &options.limits, &mut report);
+    validate_manifest_shape(&document.manifest, &options, &mut report);
 
     let artifact_display_path = document.manifest.artifact.path.clone();
     report.artifact.manifest_path = Some(artifact_display_path.clone());
@@ -352,7 +352,7 @@ fn verify_manifest_with_path_capture(
 
 fn validate_manifest_shape(
     manifest: &IndexManifest,
-    limits: &ResourceLimits,
+    options: &VerifyOptions,
     report: &mut VerificationReport,
 ) {
     if manifest.schema_version != SCHEMA_VERSION {
@@ -375,10 +375,12 @@ fn validate_manifest_shape(
     }
     if manifest.artifact.path.trim().is_empty() {
         report.error("artifact_path_empty", "artifact.path must be non-empty");
-    } else if !is_canonical_manifest_path(&manifest.artifact.path) {
+    } else if !is_manifest_path_absolute(&manifest.artifact.path)
+        && !is_canonical_manifest_path(&manifest.artifact.path, options.allow_path_escape)
+    {
         report.error(
             "artifact_path_not_canonical",
-            "artifact.path must use forward slashes with no `.` or empty segments",
+            "artifact.path must use forward slashes with no `.`, `..`, or empty segments",
         );
     }
     if !is_sha256_hex(&manifest.artifact.sha256) {
@@ -438,10 +440,12 @@ fn validate_manifest_shape(
                 "row_identity_path_empty",
                 "row_identity.path must be non-empty",
             );
-        } else if !is_canonical_manifest_path(path) {
+        } else if !is_manifest_path_absolute(path)
+            && !is_canonical_manifest_path(path, options.allow_path_escape)
+        {
             report.error(
                 "row_identity_path_not_canonical",
-                "row_identity.path must use forward slashes with no `.` or empty segments",
+                "row_identity.path must use forward slashes with no `.`, `..`, or empty segments",
             );
         }
         if !is_sha256_hex(sha256) {
@@ -464,7 +468,7 @@ fn validate_manifest_shape(
         }
     }
 
-    validate_auxiliary_artifact_shape(manifest, limits, report);
+    validate_auxiliary_artifact_shape(manifest, options, report);
 
     validate_optional_non_empty(
         "embedding_model_revision_empty",
@@ -558,10 +562,10 @@ fn validate_manifest_shape(
 
 fn validate_auxiliary_artifact_shape(
     manifest: &IndexManifest,
-    limits: &ResourceLimits,
+    options: &VerifyOptions,
     report: &mut VerificationReport,
 ) {
-    if !check_auxiliary_artifact_count(manifest, limits, report) {
+    if !check_auxiliary_artifact_count(manifest, &options.limits, report) {
         return;
     }
     let mut names = HashSet::new();
@@ -591,11 +595,13 @@ fn validate_auxiliary_artifact_shape(
                 "auxiliary_artifact_path_empty",
                 format!("auxiliary artifact {name:?} path must be non-empty"),
             );
-        } else if !is_canonical_manifest_path(&artifact.path) {
+        } else if !is_manifest_path_absolute(&artifact.path)
+            && !is_canonical_manifest_path(&artifact.path, options.allow_path_escape)
+        {
             report.error(
                 "auxiliary_artifact_path_not_canonical",
                 format!(
-                    "auxiliary artifact {name:?} path must use forward slashes with no `.` or empty segments"
+                    "auxiliary artifact {name:?} path must use forward slashes with no `.`, `..`, or empty segments"
                 ),
             );
         }
@@ -1255,6 +1261,13 @@ fn validate_encoder_distortion_profile_artifact(
             "encoder_distortion_profile_path_empty",
             "encoder_distortion.profile.path must be non-empty",
         );
+    } else if !is_manifest_path_absolute(&profile.path)
+        && !is_canonical_manifest_path(&profile.path, options.allow_path_escape)
+    {
+        report.error(
+            "encoder_distortion_profile_path_not_canonical",
+            "encoder_distortion.profile.path must use forward slashes with no `.`, `..`, or empty segments",
+        );
     }
     if !is_sha256_hex(&profile.sha256) {
         report.error(
@@ -1696,6 +1709,13 @@ fn validate_calibration_profile(
         report.error(
             "calibration_profile_path_empty",
             "calibration.profile.path must be non-empty",
+        );
+    } else if !is_manifest_path_absolute(&profile.path)
+        && !is_canonical_manifest_path(&profile.path, options.allow_path_escape)
+    {
+        report.error(
+            "calibration_profile_path_not_canonical",
+            "calibration.profile.path must use forward slashes with no `.`, `..`, or empty segments",
         );
     }
     if !is_sha256_hex(&profile.sha256) {
@@ -4078,34 +4098,40 @@ fn manifest_path_for_create(
 ) -> Result<String, ManifestError> {
     let canonical_path = fs::canonicalize(path)?;
     let canonical_base = fs::canonicalize(base_dir)?;
-    if let Ok(relative) = canonical_path.strip_prefix(&canonical_base) {
-        if !relative.as_os_str().is_empty() {
-            return Ok(path_to_manifest_string(relative));
+    let value = if let Ok(relative) = canonical_path.strip_prefix(&canonical_base) {
+        if relative.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            path_to_manifest_string(relative)
         }
-        return Ok(".".to_string());
-    }
-
-    if !options.allow_path_escape {
+    } else if !options.allow_path_escape {
         return Err(ManifestError::invalid(format!(
             "{context} path {} is outside manifest directory {}; use --allow-path-escape to create a manifest that requires non-default verification policy",
             canonical_path.display(),
             canonical_base.display()
         )));
-    }
+    } else if let Some(relative) = relative_path_between(&canonical_base, &canonical_path) {
+        path_to_manifest_string(&relative)
+    } else if options.allow_absolute_paths {
+        path_to_manifest_string(&canonical_path)
+    } else {
+        return Err(ManifestError::invalid(format!(
+            "{context} path {} cannot be expressed relative to manifest directory {}; use --allow-absolute-paths with --allow-path-escape",
+            canonical_path.display(),
+            canonical_base.display()
+        )));
+    };
 
-    if let Some(relative) = relative_path_between(&canonical_base, &canonical_path) {
-        return Ok(path_to_manifest_string(&relative));
+    // Never embed a path the manifest's own validation would reject: what
+    // create writes, verify (under the same policy flags) must accept.
+    if !is_manifest_path_absolute(&value)
+        && !is_canonical_manifest_path(&value, options.allow_path_escape)
+    {
+        return Err(ManifestError::invalid(format!(
+            "{context} path {value:?} cannot be embedded canonically (bundle-relative, forward slashes, no `.`, `..`, or empty segments); rename the file or move it into the manifest directory"
+        )));
     }
-
-    if options.allow_absolute_paths {
-        return Ok(path_to_manifest_string(&canonical_path));
-    }
-
-    Err(ManifestError::invalid(format!(
-        "{context} path {} cannot be expressed relative to manifest directory {}; use --allow-absolute-paths with --allow-path-escape",
-        canonical_path.display(),
-        canonical_base.display()
-    )))
+    Ok(value)
 }
 
 fn relative_path_between(base: &Path, target: &Path) -> Option<PathBuf> {
@@ -4140,24 +4166,49 @@ fn relative_path_between(base: &Path, target: &Path) -> Option<PathBuf> {
     Some(relative)
 }
 
-/// A canonical manifest path uses forward slashes only and contains no `.`
-/// or empty segments, so identical bundle content always embeds identical
-/// path strings. Absolute paths and `..` segments remain governed by the
-/// existing `allow_absolute_paths` / `allow_path_escape` policies.
-fn is_canonical_manifest_path(path: &str) -> bool {
+/// A canonical manifest path is bundle-relative, uses forward slashes only,
+/// and contains no `.`, `..`, or empty segments, so identical bundle content
+/// always embeds identical path strings. `..` segments are only accepted
+/// under `allow_path_escape`; absolute paths are excluded before this check
+/// and remain governed by the `allow_absolute_paths` policy at resolution.
+fn is_canonical_manifest_path(path: &str, allow_path_escape: bool) -> bool {
     if path.is_empty() || path.contains('\\') {
         return false;
     }
-    let relative = path.strip_prefix('/').unwrap_or(path);
-    !relative.is_empty()
-        && relative
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != ".")
+    path.split('/').all(|segment| {
+        !segment.is_empty() && segment != "." && (segment != ".." || allow_path_escape)
+    })
+}
+
+/// Detects absolute manifest path strings on any platform: POSIX (`/...`),
+/// Windows drive (`C:/...` or `C:\...`), and UNC/verbatim (`\\...`, `//...`).
+/// The canonical-form check skips these; the `allow_absolute_paths` policy
+/// at path resolution accepts or rejects them.
+fn is_manifest_path_absolute(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with('\\') {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 fn path_to_manifest_string(path: &Path) -> String {
     if path.is_absolute() {
-        return path.display().to_string().replace('\\', "/");
+        let display = path.display().to_string();
+        // fs::canonicalize returns verbatim paths on Windows; strip the
+        // verbatim prefix so the embedded string round-trips through
+        // PathBuf::from at verification time.
+        let display = if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = display.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            display
+        };
+        return display.replace('\\', "/");
     }
     let parts = path
         .components()
@@ -4222,6 +4273,33 @@ fn hex_digest_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_manifest_path_form_is_policy_aware() {
+        assert!(is_canonical_manifest_path("index.ovrq", false));
+        assert!(is_canonical_manifest_path("sub/dir/index.ovrq", false));
+        assert!(!is_canonical_manifest_path("", false));
+        assert!(!is_canonical_manifest_path("./index.ovrq", false));
+        assert!(!is_canonical_manifest_path("a//b", false));
+        assert!(!is_canonical_manifest_path("back\\slash.bin", false));
+        assert!(!is_canonical_manifest_path("a/../index.ovrq", false));
+        assert!(!is_canonical_manifest_path("../index.ovrq", false));
+        assert!(is_canonical_manifest_path("a/../index.ovrq", true));
+        assert!(is_canonical_manifest_path("../index.ovrq", true));
+        assert!(!is_canonical_manifest_path("back\\slash.bin", true));
+    }
+
+    #[test]
+    fn absolute_manifest_path_detection_covers_all_platform_forms() {
+        assert!(is_manifest_path_absolute("/srv/index.ovrq"));
+        assert!(is_manifest_path_absolute("C:/bundles/index.ovrq"));
+        assert!(is_manifest_path_absolute("C:\\bundles\\index.ovrq"));
+        assert!(is_manifest_path_absolute("\\\\server\\share\\index.ovrq"));
+        assert!(is_manifest_path_absolute("//?/C:/bundles/index.ovrq"));
+        assert!(!is_manifest_path_absolute("index.ovrq"));
+        assert!(!is_manifest_path_absolute("sub/index.ovrq"));
+        assert!(!is_manifest_path_absolute("C:"));
+    }
 
     #[test]
     fn manifest_kind_conversion_uses_format_registry_coverage() {

@@ -1399,6 +1399,52 @@ fn encoder_distortion_profile_artifact_checks_are_enforced() {
 }
 
 #[test]
+fn profile_ref_paths_must_be_canonical() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profiles");
+    fs::create_dir(&profile_dir).unwrap();
+    let index = write_index_kind(temp.path(), FixtureKind::RankQuant);
+    let manifest_path = temp.path().join("manifest.json");
+    let distortion_hash = write_profile(&profile_dir.join("distortion.json"), 128);
+    let bucket_hash = write_profile(&temp.path().join("bucket.f64"), 16 * 4 * 8);
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.encoder_distortion = Some(distortion_profile(
+        &manifest,
+        Some("profiles/./distortion.json".to_string()),
+        Some(distortion_hash),
+        DistortionEvidenceKind::EmpiricalSample,
+    ));
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "a/../bucket.f64",
+        bucket_hash,
+        CalibrationOrdinalization::Bucket {
+            dim: manifest.artifact.dim,
+            bits: 2,
+        },
+        ProfileParameterization::BucketFrequency,
+        vec![manifest.artifact.dim, 4],
+    ));
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    for code in [
+        "encoder_distortion_profile_path_not_canonical",
+        "calibration_profile_path_not_canonical",
+    ] {
+        assert!(
+            error_codes(&report).contains(&code),
+            "missing {code}: {:?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
 fn encoder_distortion_can_bind_to_calibration_profile_id() {
     let temp = tempfile::tempdir().unwrap();
     let case = tempfile::tempdir_in(temp.path()).unwrap();
