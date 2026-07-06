@@ -1,5 +1,5 @@
 use crate::{
-    resolve_existing_path, sha256_bytes, sha256_file_bounded, validate_jsonl_rows,
+    codes, resolve_existing_path, sha256_bytes, sha256_file_bounded, validate_jsonl_rows,
     verify_auxiliary_artifacts, verify_manifest, AuxiliaryArtifactState, ManifestDocument,
     ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationPathCapture,
     VerificationReport, VerifyOptions,
@@ -54,7 +54,7 @@ pub fn activate(
     let mut report = verify_manifest(document, options);
     if !report.ok && force {
         report.warnings.push(ReportIssue::new(
-            "sqlite_activation_forced",
+            codes::SQLITE_ACTIVATION_FORCED,
             "sqlite activation was forced even though verification failed",
         ));
     }
@@ -169,7 +169,7 @@ fn store_report(
     let report_json = serde_json::to_string(report)?;
     if report_json.len() as u64 > limits.max_cached_report_bytes {
         return Err(ManifestError::limit_exceeded(
-            "sqlite_cached_report_too_large",
+            codes::SQLITE_CACHED_REPORT_TOO_LARGE,
             format!(
                 "cached report is {} bytes, exceeding max_cached_report_bytes={}",
                 report_json.len(),
@@ -262,7 +262,7 @@ fn load_cached_report(
     };
     if report_len as u64 > limits.max_cached_report_bytes {
         return Err(ManifestError::limit_exceeded(
-            "sqlite_cached_report_too_large",
+            codes::SQLITE_CACHED_REPORT_TOO_LARGE,
             format!(
                 "cached report is {report_len} bytes, exceeding max_cached_report_bytes={}",
                 limits.max_cached_report_bytes
@@ -352,7 +352,7 @@ fn current_cache_key(
     let manifest_sha256 = match sha256_file_bounded(
         manifest_path,
         options.limits.max_manifest_bytes,
-        "manifest_file_too_large",
+        codes::MANIFEST_FILE_TOO_LARGE,
         "manifest file",
     ) {
         Ok(hash) => hash.sha256,
@@ -374,7 +374,7 @@ fn current_cache_key(
         &artifact_path,
         &document.base_dir,
         options,
-        "artifact",
+        &crate::ARTIFACT_PATH_ISSUES,
         &mut path_errors,
     ) else {
         return Ok(None);
@@ -388,7 +388,7 @@ fn current_cache_key(
             .artifact
             .file_size_bytes
             .min(options.limits.max_index_artifact_bytes),
-        "artifact_file_too_large",
+        codes::ARTIFACT_FILE_TOO_LARGE,
         "index artifact",
     ) {
         Ok(hash) => hash.sha256,
@@ -408,7 +408,7 @@ fn current_cache_key(
                 &row_path,
                 &document.base_dir,
                 options,
-                "row_identity",
+                &crate::ROW_IDENTITY_PATH_ISSUES,
                 &mut path_errors,
             ) else {
                 return Ok(None);
@@ -456,7 +456,7 @@ fn cache_key_from_report(
     let manifest_sha256 = match sha256_file_bounded(
         manifest_path,
         options.limits.max_manifest_bytes,
-        "manifest_file_too_large",
+        codes::MANIFEST_FILE_TOO_LARGE,
         "manifest file",
     ) {
         Ok(hash) => hash.sha256,
@@ -602,7 +602,7 @@ fn current_calibration_profile_sha256(
         &path,
         &document.base_dir,
         options,
-        "calibration_profile",
+        &crate::CALIBRATION_PROFILE_PATH_ISSUES,
         &mut path_errors,
     ) else {
         return Ok(None);
@@ -612,7 +612,7 @@ fn current_calibration_profile_sha256(
         profile
             .file_size_bytes
             .min(options.limits.max_calibration_profile_bytes),
-        "calibration_profile_too_large",
+        codes::CALIBRATION_PROFILE_TOO_LARGE,
         "calibration profile",
     ) {
         Ok(hash) => Ok(Some(hash.sha256)),
@@ -638,7 +638,7 @@ fn current_encoder_distortion_profile_sha256(
         &path,
         &document.base_dir,
         options,
-        "encoder_distortion_profile",
+        &crate::ENCODER_DISTORTION_PROFILE_PATH_ISSUES,
         &mut path_errors,
     ) else {
         return Ok(None);
@@ -648,7 +648,7 @@ fn current_encoder_distortion_profile_sha256(
         profile
             .file_size_bytes
             .min(options.limits.max_encoder_distortion_profile_bytes),
-        "encoder_distortion_profile_too_large",
+        codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE,
         "encoder distortion profile",
     ) {
         Ok(hash) => Ok(Some(hash.sha256)),
