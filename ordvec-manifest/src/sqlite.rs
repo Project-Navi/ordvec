@@ -1,12 +1,12 @@
 use crate::{
-    resolve_existing_path, sha256_file_bounded, validate_jsonl_rows, verify_auxiliary_artifacts,
-    verify_manifest, AuxiliaryArtifactState, ManifestDocument, ManifestError, ReportIssue,
-    ResourceLimits, RowIdentity, VerificationPathCapture, VerificationReport, VerifyOptions,
+    resolve_existing_path, sha256_bytes, sha256_file_bounded, validate_jsonl_rows,
+    verify_auxiliary_artifacts, verify_manifest, AuxiliaryArtifactState, ManifestDocument,
+    ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationPathCapture,
+    VerificationReport, VerifyOptions,
 };
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -341,7 +341,7 @@ fn manifest_location_sha256(
         base_dir: hex::encode(base_dir.as_os_str().as_encoded_bytes()),
     };
     let json = serde_json::to_vec(&material)?;
-    Ok(Some(sha256_bytes(&json)))
+    Ok(Some(sha256_bytes(&json).sha256))
 }
 
 fn current_cache_key(
@@ -362,7 +362,7 @@ fn current_cache_key(
         return Ok(None);
     };
     let options_json = serde_json::to_vec(&CacheableVerifyOptions::from_options(options))?;
-    let options_sha256 = sha256_bytes(&options_json);
+    let options_sha256 = sha256_bytes(&options_json).sha256;
 
     let artifact_path = options
         .index_override
@@ -466,7 +466,7 @@ fn cache_key_from_report(
         return Ok(None);
     };
     let options_json = serde_json::to_vec(&CacheableVerifyOptions::from_options(options))?;
-    let options_sha256 = sha256_bytes(&options_json);
+    let options_sha256 = sha256_bytes(&options_json).sha256;
     let Some(artifact_sha256) = report.artifact.sha256.clone() else {
         return Ok(None);
     };
@@ -570,7 +570,7 @@ fn auxiliary_artifacts_sha256_from_report(
     }
 
     let json = serde_json::to_vec(&entries)?;
-    Ok(Some(sha256_bytes(&json)))
+    Ok(Some(sha256_bytes(&json).sha256))
 }
 
 #[derive(Serialize)]
@@ -654,12 +654,6 @@ fn current_encoder_distortion_profile_sha256(
         Ok(hash) => Ok(Some(hash.sha256)),
         Err(_) => Ok(None),
     }
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
 }
 
 fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, ManifestError> {

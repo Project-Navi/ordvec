@@ -3549,6 +3549,64 @@ pub fn sha256_file(path: impl AsRef<Path>) -> io::Result<FileHash> {
     })
 }
 
+/// Hashes an in-memory byte slice with the same digest form as [`sha256_file`].
+pub fn sha256_bytes(bytes: &[u8]) -> FileHash {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    FileHash {
+        sha256: hex::encode(hasher.finalize()),
+        size_bytes: bytes.len() as u64,
+    }
+}
+
+/// Hashes a reader, refusing inputs larger than `max_bytes`.
+///
+/// Exceeding the bound fails with [`io::ErrorKind::InvalidData`]; inputs of
+/// exactly `max_bytes` succeed.
+pub fn sha256_reader<R: Read>(mut reader: R, max_bytes: u64) -> io::Result<FileHash> {
+    match sha256_read_bounded(&mut reader, max_bytes)? {
+        Some(hash) => Ok(hash),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("input exceeds {max_bytes} bytes"),
+        )),
+    }
+}
+
+/// Bounded hashing core shared by [`sha256_file_bounded`] and
+/// [`sha256_reader`]. Returns `Ok(None)` when the input exceeds `max_bytes`.
+fn sha256_read_bounded<R: Read>(reader: &mut R, max_bytes: u64) -> io::Result<Option<FileHash>> {
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        // Strict bound: never request bytes past max_bytes + 1 (the +1
+        // detects exceedance), mirroring read_bounded_file's take() pattern.
+        let allowance = max_bytes.saturating_add(1) - size_bytes;
+        if allowance == 0 {
+            break;
+        }
+        let want = allowance.min(buf.len() as u64) as usize;
+        let n = match reader.read(&mut buf[..want]) {
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if n == 0 {
+            break;
+        }
+        size_bytes += n as u64;
+        if size_bytes > max_bytes {
+            return Ok(None);
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(Some(FileHash {
+        sha256: hex::encode(hasher.finalize()),
+        size_bytes,
+    }))
+}
+
 pub fn sha256_file_bounded(
     path: impl AsRef<Path>,
     max_bytes: u64,
@@ -3570,41 +3628,16 @@ pub fn sha256_file_bounded(
         ));
     }
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut size_bytes = 0u64;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        // Strict bound: never request bytes past max_bytes + 1 (the +1
-        // detects exceedance), mirroring read_bounded_file's take() pattern.
-        let allowance = max_bytes.saturating_add(1) - size_bytes;
-        if allowance == 0 {
-            break;
-        }
-        let want = allowance.min(buf.len() as u64) as usize;
-        let n = match file.read(&mut buf[..want]) {
-            Ok(n) => n,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err.into()),
-        };
-        if n == 0 {
-            break;
-        }
-        size_bytes += n as u64;
-        if size_bytes > max_bytes {
-            return Err(ManifestError::limit_exceeded(
-                code,
-                format!(
-                    "{context} exceeds {max_bytes} bytes while reading {}",
-                    path.display()
-                ),
-            ));
-        }
-        hasher.update(&buf[..n]);
+    match sha256_read_bounded(&mut file, max_bytes)? {
+        Some(hash) => Ok(hash),
+        None => Err(ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} exceeds {max_bytes} bytes while reading {}",
+                path.display()
+            ),
+        )),
     }
-    Ok(FileHash {
-        sha256: hex::encode(hasher.finalize()),
-        size_bytes,
-    })
 }
 
 #[derive(Clone, Debug)]
