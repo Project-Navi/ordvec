@@ -3507,6 +3507,94 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_activate_recreates_legacy_active_manifest_schema() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+
+    let db = temp.path().join("registry.sqlite");
+    {
+        let conn = Connection::open(&db).unwrap();
+        // Legacy pre-schema-v2 registry: activate() no longer supplies
+        // manifest_id, so this NOT NULL column must trigger the
+        // drop-and-recreate on init instead of failing the INSERT.
+        conn.execute_batch(
+            "CREATE TABLE active_manifest(
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                manifest_id TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                forced INTEGER NOT NULL
+            );
+            INSERT INTO active_manifest(id, manifest_id, manifest_path, activated_at, forced)
+            VALUES(1, 'urn:uuid:legacy', 'legacy-manifest.json', '2026-01-01T00:00:00Z', 0);",
+        )
+        .unwrap();
+    }
+
+    let report = ordvec_manifest::sqlite::activate(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    // Re-activating against the recreated table must stay idempotent.
+    let second = ordvec_manifest::sqlite::activate(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert!(second.ok, "{:?}", second.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let columns = {
+        let mut stmt = conn.prepare("PRAGMA table_info(active_manifest)").unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        columns
+    };
+    assert_eq!(
+        columns,
+        vec!["id", "manifest_path", "activated_at", "forced"]
+    );
+    let (active_path, forced): (String, i64) = conn
+        .query_row(
+            "SELECT manifest_path, forced FROM active_manifest WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(active_path, manifest_path.display().to_string());
+    assert_eq!(forced, 0);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_combined_verified_load_matrix_respects_limits_paths_and_cache() {
     use rusqlite::Connection;
 
