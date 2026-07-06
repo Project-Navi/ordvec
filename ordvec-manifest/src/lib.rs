@@ -2188,7 +2188,11 @@ fn resolve_auxiliary_artifact_path(
     report: &mut VerificationReport,
 ) -> AuxiliaryPathResolution {
     let path = Path::new(&artifact.path);
-    if path.is_absolute() && !options.allow_absolute_paths {
+    // Same classification rule as `resolve_existing_path`: the policy gate
+    // and the mismatch rejection below keep the platform-independent manifest
+    // classification and this platform's resolution semantics aligned.
+    let manifest_absolute = is_manifest_path_absolute(&artifact.path);
+    if manifest_absolute && !options.allow_absolute_paths {
         report.error(
             "auxiliary_artifact_absolute_path_rejected",
             format!(
@@ -2199,6 +2203,20 @@ fn resolve_auxiliary_artifact_path(
         );
         return AuxiliaryPathResolution::Failed(
             "auxiliary_artifact_absolute_path_rejected".to_string(),
+        );
+    }
+
+    if manifest_absolute != path.is_absolute() {
+        report.error(
+            "auxiliary_artifact_absolute_path_unresolvable",
+            format!(
+                "auxiliary artifact path {} for {:?} is classified absolute by manifest policy but cannot resolve as absolute on this platform; refusing to resolve it against the manifest base",
+                path.display(),
+                artifact.name
+            ),
+        );
+        return AuxiliaryPathResolution::Failed(
+            "auxiliary_artifact_absolute_path_unresolvable".to_string(),
         );
     }
 
@@ -2407,10 +2425,30 @@ fn resolve_existing_path(
     context: &str,
     errors: &mut Vec<ReportIssue>,
 ) -> Option<ResolvedPath> {
-    if path.is_absolute() && !options.allow_absolute_paths {
+    // Policy classification uses the platform-independent manifest rule, not
+    // `Path::is_absolute`, so an absolute-for-policy path can never dodge the
+    // `allow_absolute_paths` gate on a platform whose native semantics would
+    // read it as relative (e.g. `C:/...` or UNC on Unix, `/...` on Windows).
+    let manifest_absolute = is_manifest_path_absolute(&path.to_string_lossy());
+    if manifest_absolute && !options.allow_absolute_paths {
         errors.push(ReportIssue::new(
             format!("{context}_absolute_path_rejected"),
             format!("absolute path {} is rejected by default", path.display()),
+        ));
+        return None;
+    }
+
+    // A path classified absolute for policy purposes must never silently
+    // resolve relative to the manifest base (or vice versa): when the
+    // manifest classification and this platform's semantics disagree, reject
+    // outright instead of resolving inconsistently across OSes.
+    if manifest_absolute != path.is_absolute() {
+        errors.push(ReportIssue::new(
+            format!("{context}_absolute_path_unresolvable"),
+            format!(
+                "path {} is classified absolute by manifest policy but cannot resolve as absolute on this platform; refusing to resolve it against the manifest base",
+                path.display()
+            ),
         ));
         return None;
     }
@@ -4182,10 +4220,15 @@ fn is_canonical_manifest_path(path: &str, allow_path_escape: bool) -> bool {
 
 /// Detects absolute manifest path strings on any platform: POSIX (`/...`),
 /// Windows drive (`C:/...` or `C:\...`), and UNC/verbatim (`\\...`, `//...`).
-/// The canonical-form check skips these; the `allow_absolute_paths` policy
-/// at path resolution accepts or rejects them.
+/// A single leading backslash is NOT absolute: on Unix it is an ordinary
+/// file-name byte, so treating it as absolute here while resolution treats
+/// it as relative would let `\evil` skip the canonical-form check and still
+/// resolve inside the bundle. It stays non-absolute and is rejected by the
+/// canonical-form check instead (backslashes are never canonical). The
+/// canonical-form check skips absolute paths; the `allow_absolute_paths`
+/// policy at path resolution accepts or rejects them.
 fn is_manifest_path_absolute(path: &str) -> bool {
-    if path.starts_with('/') || path.starts_with('\\') {
+    if path.starts_with('/') || path.starts_with(r"\\") {
         return true;
     }
     let bytes = path.as_bytes();
@@ -4296,9 +4339,15 @@ mod tests {
         assert!(is_manifest_path_absolute("C:\\bundles\\index.ovrq"));
         assert!(is_manifest_path_absolute("\\\\server\\share\\index.ovrq"));
         assert!(is_manifest_path_absolute("//?/C:/bundles/index.ovrq"));
+        assert!(is_manifest_path_absolute("\\\\?\\C:\\bundles\\index.ovrq"));
         assert!(!is_manifest_path_absolute("index.ovrq"));
         assert!(!is_manifest_path_absolute("sub/index.ovrq"));
         assert!(!is_manifest_path_absolute("C:"));
+        // A single leading backslash is not absolute: it must fall through to
+        // the canonical-form check (which rejects backslashes) instead of
+        // skipping it and then resolving relative on Unix.
+        assert!(!is_manifest_path_absolute("\\evil"));
+        assert!(!is_manifest_path_absolute("\\"));
     }
 
     #[test]

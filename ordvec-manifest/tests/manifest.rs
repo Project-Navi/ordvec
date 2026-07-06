@@ -2043,6 +2043,96 @@ fn path_policy_rejects_escapes_and_absolute_paths_by_default() {
 
 #[cfg(unix)]
 #[test]
+fn single_backslash_artifact_path_fails_canonical_check_under_all_policies() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    // On Unix a backslash is an ordinary file-name byte, so a crafted bundle
+    // can carry a matching artifact literally named `\evil`. Classifying a
+    // single leading backslash as absolute skipped the canonical-form check
+    // while resolution still treated the path as relative, so this manifest
+    // verified successfully before the fix. The lint misreads the backslash
+    // as a path separator; on Unix this join produces a child file name.
+    #[allow(clippy::join_absolute_paths)]
+    fs::copy(&index, temp.path().join("\\evil")).unwrap();
+    manifest.artifact.path = "\\evil".to_string();
+
+    let report = verify_manifest_with_base(manifest.clone(), temp.path(), VerifyOptions::default());
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_path_not_canonical"));
+
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            allow_absolute_paths: true,
+            allow_path_escape: true,
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_path_not_canonical"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unc_artifact_path_stays_policy_gated_and_never_resolves_relative() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.artifact.path = "\\\\server\\share\\index.ovrq".to_string();
+
+    // UNC paths remain classified absolute, so the default policy rejects
+    // them outright.
+    let report = verify_manifest_with_base(manifest.clone(), temp.path(), VerifyOptions::default());
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_absolute_path_rejected"));
+
+    // Even with absolute paths allowed, a path that is absolute for policy
+    // purposes must never silently resolve relative to the manifest base on
+    // a platform (Unix) that cannot resolve it as absolute.
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            allow_absolute_paths: true,
+            allow_path_escape: true,
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_absolute_path_unresolvable"));
+}
+
+#[cfg(unix)]
+#[test]
 fn symlink_escape_reports_observed_canonical_path() {
     use std::os::unix::fs::symlink;
 
