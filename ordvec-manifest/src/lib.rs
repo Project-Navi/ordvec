@@ -300,20 +300,32 @@ fn verify_manifest_with_path_capture(
                 report.artifact.sha256 = Some(hash.sha256.clone());
                 report.artifact.size_bytes = Some(hash.size_bytes);
                 if !hex_digest_eq(&hash.sha256, &document.manifest.artifact.sha256) {
-                    report.error(
-                        codes::ARTIFACT_SHA256_MISMATCH,
-                        format!(
-                            "artifact SHA-256 was {}, manifest declares {}",
-                            hash.sha256, document.manifest.artifact.sha256
+                    report.errors.push(
+                        ReportIssue::new(
+                            codes::ARTIFACT_SHA256_MISMATCH,
+                            format!(
+                                "artifact SHA-256 was {}, manifest declares {}",
+                                hash.sha256, document.manifest.artifact.sha256
+                            ),
+                        )
+                        .with_sha256_detail(
+                            document.manifest.artifact.sha256.as_str(),
+                            hash.sha256.as_str(),
                         ),
                     );
                 }
                 if hash.size_bytes != document.manifest.artifact.file_size_bytes {
-                    report.error(
-                        codes::ARTIFACT_FILE_SIZE_MISMATCH,
-                        format!(
-                            "artifact size was {}, manifest declares {}",
-                            hash.size_bytes, document.manifest.artifact.file_size_bytes
+                    report.errors.push(
+                        ReportIssue::new(
+                            codes::ARTIFACT_FILE_SIZE_MISMATCH,
+                            format!(
+                                "artifact size was {}, manifest declares {}",
+                                hash.size_bytes, document.manifest.artifact.file_size_bytes
+                            ),
+                        )
+                        .with_size_detail(
+                            document.manifest.artifact.file_size_bytes,
+                            hash.size_bytes,
                         ),
                     );
                 }
@@ -858,11 +870,14 @@ fn verify_row_identity(
                         if let Some(hash) = &stats.sha256 {
                             report.row_identity.sha256 = Some(hash.clone());
                             if !hex_digest_eq(hash, sha256) {
-                                report.error(
-                                    codes::ROW_IDENTITY_SHA256_MISMATCH,
-                                    format!(
-                                        "row_identity SHA-256 was {hash}, manifest declares {sha256}"
-                                    ),
+                                report.errors.push(
+                                    ReportIssue::new(
+                                        codes::ROW_IDENTITY_SHA256_MISMATCH,
+                                        format!(
+                                            "row_identity SHA-256 was {hash}, manifest declares {sha256}"
+                                        ),
+                                    )
+                                    .with_sha256_detail(sha256.as_str(), hash.as_str()),
                                 );
                             }
                         }
@@ -2086,11 +2101,18 @@ fn verify_auxiliary_artifacts(
                                 &mut entry,
                                 codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
                             );
-                            report.error(
-                                codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
-                                format!(
-                                    "auxiliary artifact {:?} SHA-256 was {}, manifest declares {}",
-                                    artifact.name, hash.sha256, artifact.sha256
+                            report.errors.push(
+                                ReportIssue::new(
+                                    codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
+                                    format!(
+                                        "auxiliary artifact {:?} SHA-256 was {}, manifest declares {}",
+                                        artifact.name, hash.sha256, artifact.sha256
+                                    ),
+                                )
+                                .with_artifact_name(artifact.name.as_str())
+                                .with_sha256_detail(
+                                    artifact.sha256.as_str(),
+                                    hash.sha256.as_str(),
                                 ),
                             );
                         }
@@ -2099,12 +2121,16 @@ fn verify_auxiliary_artifacts(
                                 &mut entry,
                                 codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH,
                             );
-                            report.error(
-                                codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH,
-                                format!(
-                                    "auxiliary artifact {:?} size was {}, manifest declares {}",
-                                    artifact.name, hash.size_bytes, artifact.file_size_bytes
-                                ),
+                            report.errors.push(
+                                ReportIssue::new(
+                                    codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH,
+                                    format!(
+                                        "auxiliary artifact {:?} size was {}, manifest declares {}",
+                                        artifact.name, hash.size_bytes, artifact.file_size_bytes
+                                    ),
+                                )
+                                .with_artifact_name(artifact.name.as_str())
+                                .with_size_detail(artifact.file_size_bytes, hash.size_bytes),
                             );
                         }
                         if entry.reason_code.is_none() {
@@ -2259,13 +2285,16 @@ fn resolve_auxiliary_artifact_path(
             return AuxiliaryPathResolution::OptionalAbsent;
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            report.error(
-                codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED,
-                format!(
-                    "required auxiliary artifact {:?} is missing at {}",
-                    artifact.name,
-                    resolved_path.display()
-                ),
+            report.errors.push(
+                ReportIssue::new(
+                    codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED,
+                    format!(
+                        "required auxiliary artifact {:?} is missing at {}",
+                        artifact.name,
+                        resolved_path.display()
+                    ),
+                )
+                .with_artifact_name(artifact.name.as_str()),
             );
             return AuxiliaryPathResolution::MissingRequired;
         }
@@ -3811,10 +3840,48 @@ pub mod codes {
         "verification_report_issue_limit_exceeded";
 }
 
+/// Typed classification of [`ReportIssue::code`] values so downstream
+/// security code can branch on enum variants instead of string compares.
+///
+/// Only the load/security-relevant code families are classified; every other
+/// code maps to [`VerificationCode::Unknown`]. Manifest parse failures never
+/// reach a report (they surface as [`ManifestError`]), so the schema family
+/// covers the in-report [`codes::SCHEMA_VERSION_UNSUPPORTED`] check.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VerificationCode {
+    ArtifactSha256Mismatch,
+    ArtifactFileSizeMismatch,
+    ArtifactMissing,
+    AuxiliarySha256Mismatch,
+    AuxiliaryFileSizeMismatch,
+    AuxiliaryMissingRequired,
+    RowIdentitySha256Mismatch,
+    RowIdentityRowCountMismatch,
+    ManifestSchema,
+    ResourceLimit,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReportIssue {
     pub code: String,
     pub message: String,
+    /// Auxiliary artifact name the issue refers to, when one applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_name: Option<String>,
+    /// Manifest-declared SHA-256 for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    /// Observed SHA-256 for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_sha256: Option<String>,
+    /// Manifest-declared byte size for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
+    /// Observed byte size for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_size_bytes: Option<u64>,
 }
 
 impl ReportIssue {
@@ -3822,6 +3889,63 @@ impl ReportIssue {
         Self {
             code: code.into(),
             message: message.into(),
+            artifact_name: None,
+            expected_sha256: None,
+            actual_sha256: None,
+            expected_size_bytes: None,
+            actual_size_bytes: None,
+        }
+    }
+
+    pub fn with_artifact_name(mut self, name: impl Into<String>) -> Self {
+        self.artifact_name = Some(name.into());
+        self
+    }
+
+    pub fn with_sha256_detail(
+        mut self,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        self.expected_sha256 = Some(expected.into());
+        self.actual_sha256 = Some(actual.into());
+        self
+    }
+
+    pub fn with_size_detail(mut self, expected: u64, actual: u64) -> Self {
+        self.expected_size_bytes = Some(expected);
+        self.actual_size_bytes = Some(actual);
+        self
+    }
+
+    /// Maps this issue's code onto the typed [`VerificationCode`] families.
+    pub fn classification(&self) -> VerificationCode {
+        match self.code.as_str() {
+            codes::ARTIFACT_SHA256_MISMATCH => VerificationCode::ArtifactSha256Mismatch,
+            codes::ARTIFACT_FILE_SIZE_MISMATCH => VerificationCode::ArtifactFileSizeMismatch,
+            codes::ARTIFACT_PATH_UNAVAILABLE => VerificationCode::ArtifactMissing,
+            codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH => VerificationCode::AuxiliarySha256Mismatch,
+            codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH => {
+                VerificationCode::AuxiliaryFileSizeMismatch
+            }
+            codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED => {
+                VerificationCode::AuxiliaryMissingRequired
+            }
+            codes::ROW_IDENTITY_SHA256_MISMATCH => VerificationCode::RowIdentitySha256Mismatch,
+            codes::ROW_IDENTITY_ROW_COUNT_MISMATCH => VerificationCode::RowIdentityRowCountMismatch,
+            codes::SCHEMA_VERSION_UNSUPPORTED => VerificationCode::ManifestSchema,
+            codes::MANIFEST_FILE_TOO_LARGE
+            | codes::ARTIFACT_FILE_TOO_LARGE
+            | codes::AUXILIARY_ARTIFACT_FILE_TOO_LARGE
+            | codes::AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED
+            | codes::CALIBRATION_PROFILE_TOO_LARGE
+            | codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE
+            | codes::ROW_IDENTITY_LINE_TOO_LARGE
+            | codes::ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED
+            | codes::ROW_IDENTITY_DUPLICATE_TRACKING_LIMIT_EXCEEDED
+            | codes::SQLITE_CACHED_REPORT_TOO_LARGE
+            | codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED => VerificationCode::ResourceLimit,
+            _ => VerificationCode::Unknown,
         }
     }
 }

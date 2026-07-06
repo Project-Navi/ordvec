@@ -188,3 +188,201 @@ fn nth_call_arg(rest: &str, n: usize) -> Option<String> {
     }
     None
 }
+
+use ordvec_manifest::{
+    ArtifactReport, CalibrationReport, EncoderDistortionReport, ReportIssue, RowIdentityReport,
+    VerificationCode, VerificationReport,
+};
+
+#[test]
+fn classification_round_trips_every_mapped_variant() {
+    let expected: &[(&str, VerificationCode)] = &[
+        (
+            codes::ARTIFACT_SHA256_MISMATCH,
+            VerificationCode::ArtifactSha256Mismatch,
+        ),
+        (
+            codes::ARTIFACT_FILE_SIZE_MISMATCH,
+            VerificationCode::ArtifactFileSizeMismatch,
+        ),
+        (
+            codes::ARTIFACT_PATH_UNAVAILABLE,
+            VerificationCode::ArtifactMissing,
+        ),
+        (
+            codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
+            VerificationCode::AuxiliarySha256Mismatch,
+        ),
+        (
+            codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH,
+            VerificationCode::AuxiliaryFileSizeMismatch,
+        ),
+        (
+            codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED,
+            VerificationCode::AuxiliaryMissingRequired,
+        ),
+        (
+            codes::ROW_IDENTITY_SHA256_MISMATCH,
+            VerificationCode::RowIdentitySha256Mismatch,
+        ),
+        (
+            codes::ROW_IDENTITY_ROW_COUNT_MISMATCH,
+            VerificationCode::RowIdentityRowCountMismatch,
+        ),
+        (
+            codes::SCHEMA_VERSION_UNSUPPORTED,
+            VerificationCode::ManifestSchema,
+        ),
+        (
+            codes::MANIFEST_FILE_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::ARTIFACT_FILE_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::AUXILIARY_ARTIFACT_FILE_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::CALIBRATION_PROFILE_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::ROW_IDENTITY_LINE_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::ROW_IDENTITY_DUPLICATE_TRACKING_LIMIT_EXCEEDED,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::SQLITE_CACHED_REPORT_TOO_LARGE,
+            VerificationCode::ResourceLimit,
+        ),
+        (
+            codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED,
+            VerificationCode::ResourceLimit,
+        ),
+    ];
+    for (code, variant) in expected {
+        assert_eq!(
+            ReportIssue::new(*code, "message").classification(),
+            *variant,
+            "code {code:?} must classify as {variant:?}"
+        );
+    }
+}
+
+#[test]
+fn unmapped_and_unknown_codes_classify_as_unknown() {
+    for code in [
+        "not_a_known_code",
+        "",
+        codes::EMBEDDING_MODEL_EMPTY,
+        codes::ARTIFACT_PATH_EMPTY,
+    ] {
+        assert_eq!(
+            ReportIssue::new(code, "message").classification(),
+            VerificationCode::Unknown
+        );
+    }
+}
+
+/// The `code` field stays a plain string and issues without structured detail
+/// serialize exactly as before the typed-classification change.
+#[test]
+fn verification_report_json_is_byte_stable() {
+    let report = VerificationReport {
+        ok: false,
+        checked_at: "2026-07-05T00:00:00.000000000Z".to_string(),
+        artifact: ArtifactReport::default(),
+        auxiliary_artifacts: Vec::new(),
+        row_identity: RowIdentityReport::default(),
+        encoder_distortion: EncoderDistortionReport::default(),
+        calibration: CalibrationReport::default(),
+        attestation_shape_checks: Vec::new(),
+        errors: vec![ReportIssue::new(
+            codes::ARTIFACT_SHA256_MISMATCH,
+            "artifact SHA-256 was aa, manifest declares bb",
+        )],
+        warnings: Vec::new(),
+        skipped_checks: vec!["attestations_absent".to_string()],
+    };
+    let golden = concat!(
+        "{\"ok\":false,\"checked_at\":\"2026-07-05T00:00:00.000000000Z\",",
+        "\"artifact\":{\"manifest_path\":null,\"observed_path\":null,",
+        "\"canonical_path\":null,\"sha256\":null,\"size_bytes\":null,",
+        "\"metadata\":null},\"auxiliary_artifacts\":[],",
+        "\"row_identity\":{\"kind\":null,\"manifest_path\":null,",
+        "\"canonical_path\":null,\"sha256\":null,\"row_count\":null,",
+        "\"validated_rows\":null},\"encoder_distortion\":{\"present\":false,",
+        "\"schema_version\":null,\"profile_id\":null,\"evidence_kind\":null,",
+        "\"source_metric\":null,\"embedding_metric\":null,",
+        "\"profile_manifest_path\":null,\"profile_canonical_path\":null,",
+        "\"profile_sha256\":null,\"profile_size_bytes\":null},",
+        "\"calibration\":{\"present\":false,\"schema_version\":null,",
+        "\"profile_id\":null,\"calibrated_for_model\":null,",
+        "\"ordinalization\":null,\"null_model\":null,",
+        "\"profile_manifest_path\":null,\"profile_canonical_path\":null,",
+        "\"profile_sha256\":null,\"profile_size_bytes\":null},",
+        "\"attestation_shape_checks\":[],",
+        "\"errors\":[{\"code\":\"artifact_sha256_mismatch\",",
+        "\"message\":\"artifact SHA-256 was aa, manifest declares bb\"}],",
+        "\"warnings\":[],\"skipped_checks\":[\"attestations_absent\"]}",
+    );
+    assert_eq!(serde_json::to_string(&report).unwrap(), golden);
+}
+
+#[test]
+fn detailed_issue_serializes_structured_fields_and_round_trips() {
+    let issue = ReportIssue::new(codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH, "msg")
+        .with_artifact_name("ordinaldb.ids")
+        .with_sha256_detail("aa", "bb")
+        .with_size_detail(1, 2);
+    let golden = concat!(
+        "{\"code\":\"auxiliary_artifact_sha256_mismatch\",\"message\":\"msg\",",
+        "\"artifact_name\":\"ordinaldb.ids\",\"expected_sha256\":\"aa\",",
+        "\"actual_sha256\":\"bb\",\"expected_size_bytes\":1,",
+        "\"actual_size_bytes\":2}",
+    );
+    let json = serde_json::to_string(&issue).unwrap();
+    assert_eq!(json, golden);
+
+    let parsed: ReportIssue = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.artifact_name.as_deref(), Some("ordinaldb.ids"));
+    assert_eq!(parsed.expected_sha256.as_deref(), Some("aa"));
+    assert_eq!(parsed.actual_sha256.as_deref(), Some("bb"));
+    assert_eq!(parsed.expected_size_bytes, Some(1));
+    assert_eq!(parsed.actual_size_bytes, Some(2));
+    assert_eq!(
+        parsed.classification(),
+        VerificationCode::AuxiliarySha256Mismatch
+    );
+}
+
+/// Pre-change report JSON (no structured fields) still deserializes.
+#[test]
+fn legacy_issue_json_still_parses() {
+    let parsed: ReportIssue =
+        serde_json::from_str("{\"code\":\"artifact_sha256_mismatch\",\"message\":\"m\"}").unwrap();
+    assert_eq!(parsed.code, codes::ARTIFACT_SHA256_MISMATCH);
+    assert!(parsed.artifact_name.is_none());
+    assert!(parsed.expected_sha256.is_none());
+    assert!(parsed.actual_sha256.is_none());
+    assert!(parsed.expected_size_bytes.is_none());
+    assert!(parsed.actual_size_bytes.is_none());
+}

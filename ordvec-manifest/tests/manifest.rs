@@ -8,8 +8,8 @@ use ordvec_manifest::{
     DistortionEvidenceKind, DistortionProfileArtifactRef, DistortionScope,
     EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind, ManifestIndexParams, MetricSpec,
     NullModelSpec, ProfileArtifactRef, ProfileParameterization, RequireAuxiliaryError,
-    ResourceLimits, RowIdentity, VerifiedLoadPlanError, VerifyOptions, CALIBRATION_SCHEMA_VERSION,
-    ENCODER_DISTORTION_SCHEMA_VERSION,
+    ResourceLimits, RowIdentity, VerificationCode, VerifiedLoadPlanError, VerifyOptions,
+    CALIBRATION_SCHEMA_VERSION, ENCODER_DISTORTION_SCHEMA_VERSION,
 };
 use serde_json::json;
 use std::fs;
@@ -2336,6 +2336,21 @@ fn verify_for_load_fails_closed_with_report_for_corrupted_artifact() {
         panic!("expected verification failure");
     };
     assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
+    let issue = report
+        .errors
+        .iter()
+        .find(|issue| issue.code == "artifact_sha256_mismatch")
+        .expect("sha256 mismatch issue is reported");
+    assert_eq!(
+        issue.classification(),
+        VerificationCode::ArtifactSha256Mismatch
+    );
+    assert_eq!(
+        issue.expected_sha256.as_deref(),
+        Some(manifest.artifact.sha256.as_str())
+    );
+    assert!(issue.actual_sha256.is_some());
+    assert_ne!(issue.actual_sha256, issue.expected_sha256);
 }
 
 #[test]
