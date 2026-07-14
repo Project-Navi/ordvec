@@ -4434,6 +4434,15 @@ fn create_auxiliary_artifacts(
 /// Content hashing and signing operate on the stored bytes, so changing the
 /// serializer or its settings changes every manifest's identity and is a
 /// schema-version event, not a cosmetic change.
+///
+/// The canonical bytes depend on `serde_json`'s default feature set. Nested
+/// [`serde_json::Value`] maps carried in `extensions` / `attestations` are
+/// key-sorted only while `serde_json` is built without `preserve_order`; a
+/// consumer whose dependency graph enables `serde_json/preserve_order` (or
+/// `arbitrary_precision`) via feature unification would serialize those maps
+/// in insertion order, changing the content address. Do not enable those
+/// features in a build that produces content-addressed manifests. See
+/// <https://github.com/Project-Navi/ordvec/issues/295>.
 pub fn write_manifest_file(
     manifest: &IndexManifest,
     path: impl AsRef<Path>,
