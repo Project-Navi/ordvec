@@ -1,6 +1,6 @@
 [package]
 name = "ordvec"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.89" # AVX-512 intrinsics stabilized in 1.89.0; also clears the 1.87 floor from u64::is_multiple_of
 description = "Training-free ordinal & sign quantization for vector retrieval"
