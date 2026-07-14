@@ -499,7 +499,17 @@ fn create_manifest_rejects_invalid_auxiliary_artifact_declarations() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("No such file") || err.to_string().contains("not found"));
+    // The missing-file io error text is platform-worded: unix says "No such
+    // file or directory", Windows says "The system cannot find the file
+    // specified."; both raw io displays end with "(os error 2)".
+    let message = err.to_string();
+    assert!(
+        message.contains("No such file")
+            || message.contains("not found")
+            || message.contains("cannot find the file")
+            || message.contains("os error 2"),
+        "{message}"
+    );
 
     let outside = root.path().join("outside.bin");
     fs::write(&outside, b"outside").unwrap();
