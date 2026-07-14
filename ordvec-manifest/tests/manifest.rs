@@ -2319,7 +2319,10 @@ fn verify_for_load_returns_row_map_path_and_optional_absent_auxiliary() {
     assert_eq!(sidecar_plan.path(), None);
 }
 
-#[cfg(unix)]
+// Linux-only, not cfg(unix): macOS APFS rejects non-UTF-8 filenames with
+// EILSEQ at creation, so the non-UTF-8 base path this exercises cannot
+// exist there.
+#[cfg(target_os = "linux")]
 #[test]
 fn verify_for_load_preserves_non_utf8_base_paths() {
     use std::ffi::OsString;
