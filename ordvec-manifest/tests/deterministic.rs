@@ -75,7 +75,12 @@ fn manifest_bytes_match_checked_in_golden() {
     let golden = include_bytes!("golden/manifest.v2.json");
     assert_eq!(
         bytes, golden,
-        "manifest serialization changed; canonical bytes are a schema-version event"
+        "checked-in golden manifest bytes changed. The canonical byte form is \
+         the bundle's content address, so this is deliberate only if you changed \
+         the manifest serializer (a schema-version event) or the ordvec index \
+         encoding the fixture embeds (an .ovrq format_version event). If instead \
+         an editor reflowed or newline-normalized golden/manifest.v2.json, revert \
+         that — the fixture is intentionally byte-exact with no trailing newline."
     );
 }
 
@@ -150,6 +155,38 @@ fn old_schema_manifest_fails_with_clear_schema_version_error() {
         json!("urn:uuid:11111111-1111-4111-8111-111111111111"),
     );
     object.insert("created_at".to_string(), json!("2026-06-09T00:00:00Z"));
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+
+    let message = load_manifest_file(&manifest_path).unwrap_err().to_string();
+    assert!(message.contains("ordvec.index_manifest.v1"), "{message}");
+    assert!(message.contains(SCHEMA_VERSION), "{message}");
+    assert!(message.contains("older or newer"), "{message}");
+}
+
+#[test]
+fn current_shape_with_wrong_schema_version_fails_at_load() {
+    // A document that is otherwise valid v2 but claims an unsupported
+    // schema_version has no unknown fields, so `deny_unknown_fields` accepts
+    // it — the loader must reject it on the version alone, not defer to verify.
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    let mut value = serde_json::to_value(&manifest).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "schema_version".to_string(),
+        json!("ordvec.index_manifest.v1"),
+    );
     fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&value).unwrap(),

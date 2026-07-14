@@ -3384,6 +3384,76 @@ fn sqlite_migrates_legacy_verification_reports_by_required_column_names() {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_migration_recovers_from_leftover_old_table() {
+    use rusqlite::Connection;
+
+    // A prior migration that was interrupted after the RENAME leaves a stray
+    // `verification_reports_old`. The migration must drop it and still succeed,
+    // not wedge every future open on "table verification_reports_old already
+    // exists".
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("wedged.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "CREATE TABLE verification_reports(
+            report_json TEXT, checked_at TEXT, ok INTEGER,
+            manifest_path TEXT, manifest_id TEXT
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute("CREATE TABLE verification_reports_old(stale TEXT)", [])
+        .unwrap();
+    drop(conn);
+
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let leftover: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table' AND name='verification_reports_old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0, "stray _old table must be gone after migration");
+    let columns = conn
+        .prepare("PRAGMA table_info(verification_reports)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.contains(&"manifest_sha256".to_string()));
+    assert!(!columns.contains(&"manifest_id".to_string()));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
     use rusqlite::Connection;
     use std::fs::OpenOptions;

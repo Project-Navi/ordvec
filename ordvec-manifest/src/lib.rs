@@ -124,6 +124,19 @@ pub fn load_manifest_file_with_options(
     )?;
     let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|err| manifest_parse_error(&manifest_bytes, err))?;
+    // A genuine v1 manifest fails the parse above (its required `manifest_id`
+    // / `created_at` fields trip `deny_unknown_fields`), but a document that is
+    // v2-shaped yet labels itself an unsupported `schema_version` would
+    // otherwise load and only be caught at verify. Enforce the version at load
+    // so loading any non-current schema fails here, as documented.
+    if manifest.schema_version != SCHEMA_VERSION {
+        return Err(ManifestError::invalid(format!(
+            "manifest declares schema_version {:?} but this build supports \
+             {SCHEMA_VERSION:?}; the manifest was written by an older or newer \
+             manifest schema",
+            manifest.schema_version
+        )));
+    }
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
