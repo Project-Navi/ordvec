@@ -30,7 +30,12 @@ ordvec-manifest verify --manifest path/to/index.manifest.json
 From a workspace checkout, prefix the same commands with
 `cargo run -p ordvec-manifest --`.
 
-The schema version is `ordvec.index_manifest.v1`. Relative paths resolve from
+The schema version is `ordvec.index_manifest.v2`. The v2 schema is
+deterministic: identical bundle content serializes to identical manifest
+bytes, so `sha256(manifest.json)` is the bundle's content address. Manifests
+carry no `manifest_id` or `created_at`, auxiliary artifact entries are sorted
+by `(name, path)`, and embedded paths must be canonical (bundle-relative,
+forward slashes, no `.`, `..`, or empty segments). Relative paths resolve from
 the manifest file's directory, absolute paths are rejected by default, and
 relative paths may not escape the manifest directory unless explicitly allowed.
 `create` follows the same policy: by default it emits only paths that should
@@ -229,11 +234,11 @@ A consuming database can keep the ordvec row identity as
 `RowIdentity::RowIdIdentity { row_count }` and declare its ID sidecar file as a
 required auxiliary artifact (e.g. `app.ids`). That makes the vector row count an
 ordvec invariant while leaving the caller's `u64` document IDs as caller-owned
-sidecar bytes. Do not encode the ID sidecar as `RowIdentity::Jsonl`: v1 JSONL
+sidecar bytes. Do not encode the ID sidecar as `RowIdentity::Jsonl`: JSONL
 row identity is UUID-oriented (`id_kind = "uuid"`), and generic row-map ID
 formats are intentionally deferred to
 [#145](https://github.com/Project-Navi/ordvec/issues/145). The reserved
-`row_identity.db` metadata block is rejected in v1 because it is not byte-bound
+`row_identity.db` metadata block is rejected because it is not byte-bound
 or path-checked.
 
 Stable row-identity boundary codes:
@@ -273,6 +278,7 @@ Stable sidecar states:
 | `failed` | Code-specific | Path policy, hashing, size, digest, or limit validation failed. |
 
 Common `failed` reason codes include `auxiliary_artifact_path_empty`,
+`auxiliary_artifact_path_not_canonical`,
 `auxiliary_artifact_base_dir_unavailable`,
 `auxiliary_artifact_path_unavailable`,
 `auxiliary_artifact_path_escape_rejected`,
@@ -287,7 +293,6 @@ and records checks that were intentionally not run, such as
 {
   "ok": true,
   "checked_at": "2026-06-03T17:20:00Z",
-  "manifest_id": "urn:uuid:11111111-1111-4111-8111-111111111111",
   "artifact": {
     "manifest_path": "index.ovrq",
     "observed_path": "index.ovrq",
@@ -346,7 +351,6 @@ read and absent when the file is missing:
 {
   "ok": false,
   "checked_at": "2026-06-03T17:21:00Z",
-  "manifest_id": "urn:uuid:11111111-1111-4111-8111-111111111111",
   "artifact": {
     "manifest_path": "index.ovrq",
     "observed_path": "index.ovrq",

@@ -8,8 +8,8 @@ use ordvec_manifest::{
     DistortionEvidenceKind, DistortionProfileArtifactRef, DistortionScope,
     EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind, ManifestIndexParams, MetricSpec,
     NullModelSpec, ProfileArtifactRef, ProfileParameterization, RequireAuxiliaryError,
-    ResourceLimits, RowIdentity, VerifiedLoadPlanError, VerifyOptions, CALIBRATION_SCHEMA_VERSION,
-    ENCODER_DISTORTION_SCHEMA_VERSION,
+    ResourceLimits, RowIdentity, VerificationCode, VerifiedLoadPlanError, VerifyOptions,
+    CALIBRATION_SCHEMA_VERSION, ENCODER_DISTORTION_SCHEMA_VERSION,
 };
 use serde_json::json;
 use std::fs;
@@ -499,7 +499,17 @@ fn create_manifest_rejects_invalid_auxiliary_artifact_declarations() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("No such file") || err.to_string().contains("not found"));
+    // The missing-file io error text is platform-worded: unix says "No such
+    // file or directory", Windows says "The system cannot find the file
+    // specified."; both raw io displays end with "(os error 2)".
+    let message = err.to_string();
+    assert!(
+        message.contains("No such file")
+            || message.contains("not found")
+            || message.contains("cannot find the file")
+            || message.contains("os error 2"),
+        "{message}"
+    );
 
     let outside = root.path().join("outside.bin");
     fs::write(&outside, b"outside").unwrap();
@@ -590,7 +600,7 @@ fn manifest_loader_enforces_size_limit_with_exact_boundary_success() {
         },
     )
     .unwrap();
-    assert_eq!(loaded.manifest.manifest_id, manifest.manifest_id);
+    assert_eq!(loaded.manifest.artifact.sha256, manifest.artifact.sha256);
 }
 
 #[test]
@@ -1013,7 +1023,14 @@ fn schema_enforces_lowercase_sha256_and_optional_field_shapes() {
     manifest.embedding.corpus_digest = Some("A".repeat(64));
     manifest.embedding.embedding_matrix_digest = Some("not-a-digest".to_string());
     manifest.embedding.normalization = Some("".to_string());
-    manifest.build.as_mut().unwrap().source_repo = Some("".to_string());
+    manifest.build = Some(ordvec_manifest::BuildInfo {
+        invocation_id: "urn:uuid:7c66ad6e-bdde-49a8-b420-f1136d04f5bd".to_string(),
+        builder_id: None,
+        source_repo: Some("".to_string()),
+        source_commit: None,
+        ci_provider: None,
+        ci_run_id: None,
+    });
 
     let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
     for code in [
@@ -1389,6 +1406,52 @@ fn encoder_distortion_profile_artifact_checks_are_enforced() {
     absolute_profile.file_size_bytes = outside_hash.size_bytes;
     let report = verify_manifest_with_base(absolute, case.path(), VerifyOptions::default());
     assert!(error_codes(&report).contains(&"encoder_distortion_profile_absolute_path_rejected"));
+}
+
+#[test]
+fn profile_ref_paths_must_be_canonical() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("profiles");
+    fs::create_dir(&profile_dir).unwrap();
+    let index = write_index_kind(temp.path(), FixtureKind::RankQuant);
+    let manifest_path = temp.path().join("manifest.json");
+    let distortion_hash = write_profile(&profile_dir.join("distortion.json"), 128);
+    let bucket_hash = write_profile(&temp.path().join("bucket.f64"), 16 * 4 * 8);
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.encoder_distortion = Some(distortion_profile(
+        &manifest,
+        Some("profiles/./distortion.json".to_string()),
+        Some(distortion_hash),
+        DistortionEvidenceKind::EmpiricalSample,
+    ));
+    manifest.calibration = Some(weighted_calibration(
+        &manifest,
+        "a/../bucket.f64",
+        bucket_hash,
+        CalibrationOrdinalization::Bucket {
+            dim: manifest.artifact.dim,
+            bits: 2,
+        },
+        ProfileParameterization::BucketFrequency,
+        vec![manifest.artifact.dim, 4],
+    ));
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    for code in [
+        "encoder_distortion_profile_path_not_canonical",
+        "calibration_profile_path_not_canonical",
+    ] {
+        assert!(
+            error_codes(&report).contains(&code),
+            "missing {code}: {:?}",
+            report.errors
+        );
+    }
 }
 
 #[test]
@@ -1927,10 +1990,41 @@ fn missing_artifact_and_row_count_mismatch_are_reported() {
     manifest.row_identity = RowIdentity::RowIdIdentity { row_count: 2 };
     fs::remove_file(temp.path().join(&manifest.artifact.path)).unwrap();
     let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
-    assert!(report
+    // An absent primary artifact reports the NotFound-specific `artifact_missing`
+    // code, which classifies as ArtifactMissing — not the generic
+    // `artifact_path_unavailable` (reserved for permission/I/O failures).
+    let missing = report
         .errors
         .iter()
-        .any(|issue| issue.code == "artifact_path_unavailable"));
+        .find(|issue| issue.code == "artifact_missing")
+        .expect("missing artifact must report artifact_missing");
+    assert_eq!(missing.classification(), VerificationCode::ArtifactMissing);
+}
+
+#[test]
+fn missing_row_identity_jsonl_classifies_as_row_identity_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
+    // The artifact stays present; only the row-identity JSONL is absent, so a
+    // consumer sees the row-identity file distinctly as missing rather than as
+    // an unclassified path failure.
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: "0".repeat(64),
+        row_count: 1,
+        id_kind: "uuid".to_string(),
+        db: None,
+    };
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    let missing = report
+        .errors
+        .iter()
+        .find(|issue| issue.code == "row_identity_missing")
+        .expect("missing row-identity file must report row_identity_missing");
+    assert_eq!(
+        missing.classification(),
+        VerificationCode::RowIdentityMissing
+    );
 }
 
 #[test]
@@ -1986,6 +2080,96 @@ fn path_policy_rejects_escapes_and_absolute_paths_by_default() {
         },
     );
     assert!(report.ok, "{:?}", report.errors);
+}
+
+#[cfg(unix)]
+#[test]
+fn single_backslash_artifact_path_fails_canonical_check_under_all_policies() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    // On Unix a backslash is an ordinary file-name byte, so a crafted bundle
+    // can carry a matching artifact literally named `\evil`. Classifying a
+    // single leading backslash as absolute skipped the canonical-form check
+    // while resolution still treated the path as relative, so this manifest
+    // verified successfully before the fix. The lint misreads the backslash
+    // as a path separator; on Unix this join produces a child file name.
+    #[allow(clippy::join_absolute_paths)]
+    fs::copy(&index, temp.path().join("\\evil")).unwrap();
+    manifest.artifact.path = "\\evil".to_string();
+
+    let report = verify_manifest_with_base(manifest.clone(), temp.path(), VerifyOptions::default());
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_path_not_canonical"));
+
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            allow_absolute_paths: true,
+            allow_path_escape: true,
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_path_not_canonical"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unc_artifact_path_stays_policy_gated_and_never_resolves_relative() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.artifact.path = "\\\\server\\share\\index.ovrq".to_string();
+
+    // UNC paths remain classified absolute, so the default policy rejects
+    // them outright.
+    let report = verify_manifest_with_base(manifest.clone(), temp.path(), VerifyOptions::default());
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_absolute_path_rejected"));
+
+    // Even with absolute paths allowed, a path that is absolute for policy
+    // purposes must never silently resolve relative to the manifest base on
+    // a platform (Unix) that cannot resolve it as absolute.
+    let report = verify_manifest_with_base(
+        manifest,
+        temp.path(),
+        VerifyOptions {
+            allow_absolute_paths: true,
+            allow_path_escape: true,
+            ..VerifyOptions::default()
+        },
+    );
+    assert!(!report.ok);
+    assert!(report
+        .errors
+        .iter()
+        .any(|issue| issue.code == "artifact_absolute_path_unresolvable"));
 }
 
 #[cfg(unix)]
@@ -2176,7 +2360,10 @@ fn verify_for_load_returns_row_map_path_and_optional_absent_auxiliary() {
     assert_eq!(sidecar_plan.path(), None);
 }
 
-#[cfg(unix)]
+// Linux-only, not cfg(unix): macOS APFS rejects non-UTF-8 filenames with
+// EILSEQ at creation, so the non-UTF-8 base path this exercises cannot
+// exist there.
+#[cfg(target_os = "linux")]
 #[test]
 fn verify_for_load_preserves_non_utf8_base_paths() {
     use std::ffi::OsString;
@@ -2283,6 +2470,21 @@ fn verify_for_load_fails_closed_with_report_for_corrupted_artifact() {
         panic!("expected verification failure");
     };
     assert!(error_codes(&report).contains(&"artifact_sha256_mismatch"));
+    let issue = report
+        .errors
+        .iter()
+        .find(|issue| issue.code == "artifact_sha256_mismatch")
+        .expect("sha256 mismatch issue is reported");
+    assert_eq!(
+        issue.classification(),
+        VerificationCode::ArtifactSha256Mismatch
+    );
+    assert_eq!(
+        issue.expected_sha256.as_deref(),
+        Some(manifest.artifact.sha256.as_str())
+    );
+    assert!(issue.actual_sha256.is_some());
+    assert_ne!(issue.actual_sha256, issue.expected_sha256);
 }
 
 #[test]
@@ -3223,6 +3425,77 @@ fn sqlite_migrates_legacy_verification_reports_by_required_column_names() {
     assert!(columns.contains(&"report_id".to_string()));
     assert!(columns.contains(&"manifest_sha256".to_string()));
     assert!(!columns.contains(&"extra".to_string()));
+    assert!(!columns.contains(&"manifest_id".to_string()));
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_migration_recovers_from_leftover_old_table() {
+    use rusqlite::Connection;
+
+    // A prior migration that was interrupted after the RENAME leaves a stray
+    // `verification_reports_old`. The migration must drop it and still succeed,
+    // not wedge every future open on "table verification_reports_old already
+    // exists".
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+    let db = temp.path().join("wedged.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "CREATE TABLE verification_reports(
+            report_json TEXT, checked_at TEXT, ok INTEGER,
+            manifest_path TEXT, manifest_id TEXT
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute("CREATE TABLE verification_reports_old(stale TEXT)", [])
+        .unwrap();
+    drop(conn);
+
+    let report = ordvec_manifest::sqlite::verify_with_registry(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let leftover: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table' AND name='verification_reports_old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, 0, "stray _old table must be gone after migration");
+    let columns = conn
+        .prepare("PRAGMA table_info(verification_reports)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.contains(&"manifest_sha256".to_string()));
+    assert!(!columns.contains(&"manifest_id".to_string()));
 }
 
 #[cfg(feature = "sqlite")]
@@ -3359,6 +3632,94 @@ fn sqlite_cache_is_explicit_and_activation_reverifies_by_default() {
             .iter()
             .any(|issue| issue.code == "sqlite_activation_forced"));
     }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_activate_recreates_legacy_active_manifest_schema() {
+    use rusqlite::Connection;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let document = load_manifest_file(&manifest_path).unwrap();
+
+    let db = temp.path().join("registry.sqlite");
+    {
+        let conn = Connection::open(&db).unwrap();
+        // Legacy pre-schema-v2 registry: activate() no longer supplies
+        // manifest_id, so this NOT NULL column must trigger the
+        // drop-and-recreate on init instead of failing the INSERT.
+        conn.execute_batch(
+            "CREATE TABLE active_manifest(
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                manifest_id TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                forced INTEGER NOT NULL
+            );
+            INSERT INTO active_manifest(id, manifest_id, manifest_path, activated_at, forced)
+            VALUES(1, 'urn:uuid:legacy', 'legacy-manifest.json', '2026-01-01T00:00:00Z', 0);",
+        )
+        .unwrap();
+    }
+
+    let report = ordvec_manifest::sqlite::activate(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert!(report.ok, "{:?}", report.errors);
+
+    // Re-activating against the recreated table must stay idempotent.
+    let second = ordvec_manifest::sqlite::activate(
+        &db,
+        &document,
+        &manifest_path,
+        VerifyOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert!(second.ok, "{:?}", second.errors);
+
+    let conn = Connection::open(&db).unwrap();
+    let columns = {
+        let mut stmt = conn.prepare("PRAGMA table_info(active_manifest)").unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        columns
+    };
+    assert_eq!(
+        columns,
+        vec!["id", "manifest_path", "activated_at", "forced"]
+    );
+    let (active_path, forced): (String, i64) = conn
+        .query_row(
+            "SELECT manifest_path, forced FROM active_manifest WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(active_path, manifest_path.display().to_string());
+    assert_eq!(forced, 0);
 }
 
 #[cfg(feature = "sqlite")]

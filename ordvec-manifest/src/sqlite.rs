@@ -1,12 +1,12 @@
 use crate::{
-    resolve_existing_path, sha256_file_bounded, validate_jsonl_rows, verify_auxiliary_artifacts,
-    verify_manifest, AuxiliaryArtifactState, ManifestDocument, ManifestError, ReportIssue,
-    ResourceLimits, RowIdentity, VerificationPathCapture, VerificationReport, VerifyOptions,
+    codes, resolve_existing_path, sha256_bytes, sha256_file_bounded, validate_jsonl_rows,
+    verify_auxiliary_artifacts, verify_manifest, AuxiliaryArtifactState, ManifestDocument,
+    ManifestError, ReportIssue, ResourceLimits, RowIdentity, VerificationPathCapture,
+    VerificationReport, VerifyOptions,
 };
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,15 +18,10 @@ pub fn verify_with_registry(
     use_cache: bool,
 ) -> Result<VerificationReport, ManifestError> {
     let mut conn = Connection::open(db_path).map_err(sqlite_err)?;
-    init(&conn)?;
+    init(&mut conn)?;
     if use_cache {
         if let Some(cache_key) = current_cache_key(document, manifest_path.as_ref(), &options)? {
-            if let Some(report) = load_cached_report(
-                &conn,
-                &document.manifest.manifest_id,
-                &cache_key,
-                &options.limits,
-            )? {
+            if let Some(report) = load_cached_report(&conn, &cache_key, &options.limits)? {
                 return Ok(report);
             }
         }
@@ -38,7 +33,6 @@ pub fn verify_with_registry(
         cache_key_from_report(manifest_path.as_ref(), &report, document, &store_options)?;
     store_report(
         &mut conn,
-        document,
         manifest_path.as_ref(),
         &report,
         cache_key.as_ref(),
@@ -55,12 +49,12 @@ pub fn activate(
     force: bool,
 ) -> Result<VerificationReport, ManifestError> {
     let mut conn = Connection::open(db_path).map_err(sqlite_err)?;
-    init(&conn)?;
+    init(&mut conn)?;
     let store_options = options.clone();
     let mut report = verify_manifest(document, options);
     if !report.ok && force {
         report.warnings.push(ReportIssue::new(
-            "sqlite_activation_forced",
+            codes::SQLITE_ACTIVATION_FORCED,
             "sqlite activation was forced even though verification failed",
         ));
     }
@@ -71,7 +65,6 @@ pub fn activate(
     };
     store_report(
         &mut conn,
-        document,
         manifest_path.as_ref(),
         &report,
         cache_key.as_ref(),
@@ -82,15 +75,13 @@ pub fn activate(
     }
 
     conn.execute(
-        "INSERT INTO active_manifest(id, manifest_id, manifest_path, activated_at, forced)
-         VALUES(1, ?1, ?2, ?3, ?4)
+        "INSERT INTO active_manifest(id, manifest_path, activated_at, forced)
+         VALUES(1, ?1, ?2, ?3)
          ON CONFLICT(id) DO UPDATE SET
-           manifest_id=excluded.manifest_id,
            manifest_path=excluded.manifest_path,
            activated_at=excluded.activated_at,
            forced=excluded.forced",
         params![
-            document.manifest.manifest_id,
             manifest_path.as_ref().display().to_string(),
             Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
             i64::from(force),
@@ -100,39 +91,65 @@ pub fn activate(
     Ok(report)
 }
 
-fn init(conn: &Connection) -> Result<(), ManifestError> {
+fn init(conn: &mut Connection) -> Result<(), ManifestError> {
     if verification_reports_needs_migration(conn)? {
-        conn.execute_batch(
-            "ALTER TABLE verification_reports RENAME TO verification_reports_old;
-             CREATE TABLE verification_reports(
-                report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manifest_id TEXT NOT NULL,
-                manifest_path TEXT NOT NULL,
-                checked_at TEXT NOT NULL,
-                ok INTEGER NOT NULL,
-                manifest_location_sha256 TEXT,
-                manifest_sha256 TEXT,
-                options_sha256 TEXT,
-                artifact_sha256 TEXT,
-                row_identity_sha256 TEXT,
-                calibration_profile_sha256 TEXT,
-                auxiliary_artifacts_sha256 TEXT,
-                encoder_distortion_profile_sha256 TEXT,
-                report_json TEXT NOT NULL
-             );
-             INSERT INTO verification_reports(
-                manifest_id, manifest_path, checked_at, ok, report_json
-             )
-             SELECT manifest_id, manifest_path, checked_at, ok, report_json
-             FROM verification_reports_old;
-             DROP TABLE verification_reports_old;",
-        )
-        .map_err(sqlite_err)?;
+        // Migrate atomically. `execute_batch` runs each statement in its own
+        // implicit transaction, so a crash between the RENAME and the DROP
+        // (or two processes racing this path) would leave a stray
+        // `verification_reports_old` behind — after which every future open
+        // fails, because the RENAME target already exists. Run the whole
+        // migration inside one IMMEDIATE transaction (write lock taken up
+        // front), drop any leftover `_old` from a prior interrupted attempt,
+        // and re-check need under the lock so a process that lost the race
+        // commits a no-op instead of re-migrating an already-v2 table.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_err)?;
+        if verification_reports_needs_migration(&tx)? {
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS verification_reports_old;
+                 ALTER TABLE verification_reports RENAME TO verification_reports_old;
+                 CREATE TABLE verification_reports(
+                    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manifest_path TEXT NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    ok INTEGER NOT NULL,
+                    manifest_location_sha256 TEXT,
+                    manifest_sha256 TEXT,
+                    options_sha256 TEXT,
+                    artifact_sha256 TEXT,
+                    row_identity_sha256 TEXT,
+                    calibration_profile_sha256 TEXT,
+                    auxiliary_artifacts_sha256 TEXT,
+                    encoder_distortion_profile_sha256 TEXT,
+                    report_json TEXT NOT NULL
+                 );
+                 INSERT INTO verification_reports(
+                    manifest_path, checked_at, ok, report_json
+                 )
+                 SELECT manifest_path, checked_at, ok, report_json
+                 FROM verification_reports_old;
+                 DROP TABLE verification_reports_old;",
+            )
+            .map_err(sqlite_err)?;
+        }
+        tx.commit().map_err(sqlite_err)?;
     }
+    // Schema v2 dropped active_manifest's manifest_id column, and `CREATE
+    // TABLE IF NOT EXISTS` below would leave such a stale table in place,
+    // making activate()'s INSERT fail at runtime on its NOT NULL column. The
+    // registry is rebuildable cache/pointer state — cached verification
+    // reports and the active-manifest pointer, never source of truth — so a
+    // table whose live schema mismatches the current one is dropped and
+    // recreated empty rather than migrated.
+    drop_registry_table_on_schema_mismatch(
+        conn,
+        "active_manifest",
+        &["id", "manifest_path", "activated_at", "forced"],
+    )?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS verification_reports(
             report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            manifest_id TEXT NOT NULL,
             manifest_path TEXT NOT NULL,
             checked_at TEXT NOT NULL,
             ok INTEGER NOT NULL,
@@ -148,7 +165,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
         );
         CREATE INDEX IF NOT EXISTS verification_reports_cache_idx
           ON verification_reports(
-            manifest_id,
             manifest_location_sha256,
             manifest_sha256,
             options_sha256,
@@ -161,7 +177,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
           );
         CREATE TABLE IF NOT EXISTS active_manifest(
             id INTEGER PRIMARY KEY CHECK(id = 1),
-            manifest_id TEXT NOT NULL,
             manifest_path TEXT NOT NULL,
             activated_at TEXT NOT NULL,
             forced INTEGER NOT NULL
@@ -173,7 +188,6 @@ fn init(conn: &Connection) -> Result<(), ManifestError> {
 
 fn store_report(
     conn: &mut Connection,
-    document: &ManifestDocument,
     manifest_path: &Path,
     report: &VerificationReport,
     cache_key: Option<&CacheKey>,
@@ -183,7 +197,7 @@ fn store_report(
     let report_json = serde_json::to_string(report)?;
     if report_json.len() as u64 > limits.max_cached_report_bytes {
         return Err(ManifestError::limit_exceeded(
-            "sqlite_cached_report_too_large",
+            codes::SQLITE_CACHED_REPORT_TOO_LARGE,
             format!(
                 "cached report is {} bytes, exceeding max_cached_report_bytes={}",
                 report_json.len(),
@@ -193,7 +207,6 @@ fn store_report(
     }
     tx.execute(
         "INSERT INTO verification_reports(
-            manifest_id,
             manifest_path,
             checked_at,
             ok,
@@ -206,9 +219,8 @@ fn store_report(
             auxiliary_artifacts_sha256,
             encoder_distortion_profile_sha256,
             report_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
-            document.manifest.manifest_id,
             manifest_path.display().to_string(),
             report.checked_at,
             i64::from(report.ok),
@@ -230,7 +242,6 @@ fn store_report(
 
 fn load_cached_report(
     conn: &Connection,
-    manifest_id: &str,
     cache_key: &CacheKey,
     limits: &ResourceLimits,
 ) -> Result<Option<VerificationReport>, ManifestError> {
@@ -238,31 +249,29 @@ fn load_cached_report(
         .query_row(
             "SELECT report_id, length(CAST(report_json AS BLOB))
              FROM verification_reports
-             WHERE manifest_id = ?1
-               AND manifest_location_sha256 = ?2
-               AND manifest_sha256 = ?3
-               AND options_sha256 = ?4
-               AND artifact_sha256 = ?5
+             WHERE manifest_location_sha256 = ?1
+               AND manifest_sha256 = ?2
+               AND options_sha256 = ?3
+               AND artifact_sha256 = ?4
                AND (
-                 (row_identity_sha256 IS NULL AND ?6 IS NULL)
-                 OR row_identity_sha256 = ?6
+                 (row_identity_sha256 IS NULL AND ?5 IS NULL)
+                 OR row_identity_sha256 = ?5
                )
                AND (
-                 (calibration_profile_sha256 IS NULL AND ?7 IS NULL)
-                 OR calibration_profile_sha256 = ?7
+                 (calibration_profile_sha256 IS NULL AND ?6 IS NULL)
+                 OR calibration_profile_sha256 = ?6
                )
                AND (
-                 (auxiliary_artifacts_sha256 IS NULL AND ?8 IS NULL)
-                 OR auxiliary_artifacts_sha256 = ?8
+                 (auxiliary_artifacts_sha256 IS NULL AND ?7 IS NULL)
+                 OR auxiliary_artifacts_sha256 = ?7
                )
                AND (
-                 (encoder_distortion_profile_sha256 IS NULL AND ?9 IS NULL)
-                 OR encoder_distortion_profile_sha256 = ?9
+                 (encoder_distortion_profile_sha256 IS NULL AND ?8 IS NULL)
+                 OR encoder_distortion_profile_sha256 = ?8
                )
              ORDER BY report_id DESC
              LIMIT 1",
             params![
-                manifest_id,
                 cache_key.manifest_location_sha256.as_str(),
                 cache_key.manifest_sha256.as_str(),
                 cache_key.options_sha256.as_str(),
@@ -281,7 +290,7 @@ fn load_cached_report(
     };
     if report_len as u64 > limits.max_cached_report_bytes {
         return Err(ManifestError::limit_exceeded(
-            "sqlite_cached_report_too_large",
+            codes::SQLITE_CACHED_REPORT_TOO_LARGE,
             format!(
                 "cached report is {report_len} bytes, exceeding max_cached_report_bytes={}",
                 limits.max_cached_report_bytes
@@ -360,7 +369,7 @@ fn manifest_location_sha256(
         base_dir: hex::encode(base_dir.as_os_str().as_encoded_bytes()),
     };
     let json = serde_json::to_vec(&material)?;
-    Ok(Some(sha256_bytes(&json)))
+    Ok(Some(sha256_bytes(&json).sha256))
 }
 
 fn current_cache_key(
@@ -371,7 +380,7 @@ fn current_cache_key(
     let manifest_sha256 = match sha256_file_bounded(
         manifest_path,
         options.limits.max_manifest_bytes,
-        "manifest_file_too_large",
+        codes::MANIFEST_FILE_TOO_LARGE,
         "manifest file",
     ) {
         Ok(hash) => hash.sha256,
@@ -381,7 +390,7 @@ fn current_cache_key(
         return Ok(None);
     };
     let options_json = serde_json::to_vec(&CacheableVerifyOptions::from_options(options))?;
-    let options_sha256 = sha256_bytes(&options_json);
+    let options_sha256 = sha256_bytes(&options_json).sha256;
 
     let artifact_path = options
         .index_override
@@ -393,7 +402,7 @@ fn current_cache_key(
         &artifact_path,
         &document.base_dir,
         options,
-        "artifact",
+        &crate::ARTIFACT_PATH_ISSUES,
         &mut path_errors,
     ) else {
         return Ok(None);
@@ -407,7 +416,7 @@ fn current_cache_key(
             .artifact
             .file_size_bytes
             .min(options.limits.max_index_artifact_bytes),
-        "artifact_file_too_large",
+        codes::ARTIFACT_FILE_TOO_LARGE,
         "index artifact",
     ) {
         Ok(hash) => hash.sha256,
@@ -427,7 +436,7 @@ fn current_cache_key(
                 &row_path,
                 &document.base_dir,
                 options,
-                "row_identity",
+                &crate::ROW_IDENTITY_PATH_ISSUES,
                 &mut path_errors,
             ) else {
                 return Ok(None);
@@ -475,7 +484,7 @@ fn cache_key_from_report(
     let manifest_sha256 = match sha256_file_bounded(
         manifest_path,
         options.limits.max_manifest_bytes,
-        "manifest_file_too_large",
+        codes::MANIFEST_FILE_TOO_LARGE,
         "manifest file",
     ) {
         Ok(hash) => hash.sha256,
@@ -485,7 +494,7 @@ fn cache_key_from_report(
         return Ok(None);
     };
     let options_json = serde_json::to_vec(&CacheableVerifyOptions::from_options(options))?;
-    let options_sha256 = sha256_bytes(&options_json);
+    let options_sha256 = sha256_bytes(&options_json).sha256;
     let Some(artifact_sha256) = report.artifact.sha256.clone() else {
         return Ok(None);
     };
@@ -546,7 +555,7 @@ fn current_auxiliary_artifacts_sha256(
     if document.manifest.auxiliary_artifacts.is_empty() {
         return Ok(None);
     }
-    let mut report = VerificationReport::new(None);
+    let mut report = VerificationReport::new();
     let mut paths = VerificationPathCapture::default();
     verify_auxiliary_artifacts(document, options, &mut report, &mut paths);
     auxiliary_artifacts_sha256_from_report(document, &report)
@@ -589,7 +598,7 @@ fn auxiliary_artifacts_sha256_from_report(
     }
 
     let json = serde_json::to_vec(&entries)?;
-    Ok(Some(sha256_bytes(&json)))
+    Ok(Some(sha256_bytes(&json).sha256))
 }
 
 #[derive(Serialize)]
@@ -621,7 +630,7 @@ fn current_calibration_profile_sha256(
         &path,
         &document.base_dir,
         options,
-        "calibration_profile",
+        &crate::CALIBRATION_PROFILE_PATH_ISSUES,
         &mut path_errors,
     ) else {
         return Ok(None);
@@ -631,7 +640,7 @@ fn current_calibration_profile_sha256(
         profile
             .file_size_bytes
             .min(options.limits.max_calibration_profile_bytes),
-        "calibration_profile_too_large",
+        codes::CALIBRATION_PROFILE_TOO_LARGE,
         "calibration profile",
     ) {
         Ok(hash) => Ok(Some(hash.sha256)),
@@ -657,7 +666,7 @@ fn current_encoder_distortion_profile_sha256(
         &path,
         &document.base_dir,
         options,
-        "encoder_distortion_profile",
+        &crate::ENCODER_DISTORTION_PROFILE_PATH_ISSUES,
         &mut path_errors,
     ) else {
         return Ok(None);
@@ -667,18 +676,12 @@ fn current_encoder_distortion_profile_sha256(
         profile
             .file_size_bytes
             .min(options.limits.max_encoder_distortion_profile_bytes),
-        "encoder_distortion_profile_too_large",
+        codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE,
         "encoder distortion profile",
     ) {
         Ok(hash) => Ok(Some(hash.sha256)),
         Err(_) => Ok(None),
     }
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
 }
 
 fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, ManifestError> {
@@ -706,7 +709,6 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         .map_err(sqlite_err)?;
     let current_required = [
         "report_id",
-        "manifest_id",
         "manifest_path",
         "checked_at",
         "ok",
@@ -720,17 +722,14 @@ fn verification_reports_needs_migration(conn: &Connection) -> Result<bool, Manif
         "encoder_distortion_profile_sha256",
         "report_json",
     ];
-    if has_required_columns(&columns, &current_required) {
+    // A stale manifest_id column carries a NOT NULL constraint the current
+    // inserts no longer satisfy, so its presence always forces migration.
+    let has_stale_manifest_id = columns.iter().any(|column| column == "manifest_id");
+    if !has_stale_manifest_id && has_required_columns(&columns, &current_required) {
         return Ok(false);
     }
 
-    let legacy_required = [
-        "manifest_id",
-        "manifest_path",
-        "checked_at",
-        "ok",
-        "report_json",
-    ];
+    let legacy_required = ["manifest_path", "checked_at", "ok", "report_json"];
     if has_required_columns(&columns, &legacy_required) {
         return Ok(true);
     }
@@ -745,6 +744,38 @@ fn has_required_columns(columns: &[String], required: &[&str]) -> bool {
     required
         .iter()
         .all(|required| columns.iter().any(|column| column == required))
+}
+
+/// Drops `table` when its live column set differs from `expected_columns`.
+/// The sqlite registry is rebuildable cache/pointer state, so a stale-schema
+/// table from an older build is dropped here and recreated empty by the
+/// `CREATE TABLE IF NOT EXISTS` statements that `init` runs immediately
+/// afterwards — legacy rows are never migrated. Idempotent: once the table
+/// matches the current schema this is a no-op, and an absent table is left
+/// for `CREATE TABLE IF NOT EXISTS` to create.
+fn drop_registry_table_on_schema_mismatch(
+    conn: &Connection,
+    table: &str,
+    expected_columns: &[&str],
+) -> Result<(), ManifestError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sqlite_err)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_err)?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let matches_current =
+        columns.len() == expected_columns.len() && has_required_columns(&columns, expected_columns);
+    if !matches_current {
+        conn.execute_batch(&format!("DROP TABLE {table}"))
+            .map_err(sqlite_err)?;
+    }
+    Ok(())
 }
 
 fn sqlite_err(err: rusqlite::Error) -> ManifestError {

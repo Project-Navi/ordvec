@@ -189,6 +189,11 @@ jobs:
         run: cargo test --features test-utils
       - name: cargo test (no default features)
         run: cargo test --no-default-features
+      # The manifest crate embeds and resolves bundle paths, so its path
+      # handling is OS-sensitive; the dedicated ubuntu lane covers its
+      # feature matrix while this step covers the other OSes.
+      - name: cargo test -p ordvec-manifest
+        run: cargo test -p ordvec-manifest
       - name: cargo build --release --features bench-utils --example bench_rank
         run: cargo build --release --features bench-utils --example bench_rank
 

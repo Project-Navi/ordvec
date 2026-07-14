@@ -1,6 +1,6 @@
 # Threat Model — `ordvec`
 
-> **Status:** v0.6.0 (pre-1.0), 2026-06-15. This is the maintained threat model
+> **Status:** v0.7.0 (pre-1.0), 2026-06-15. This is the maintained threat model
 > for the `ordvec` Rust crate, C ABI, Go wrapper, PyO3/maturin Python bindings,
 > and the `ordvec-manifest` sidecar verifier. It is reviewed when the
 > attack surface changes (new persistence formats, new `unsafe` kernels, new

@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## 0.7.0 - 2026-07-13
+
+### Added
+
+- **`ordvec-manifest`: typed verification classification.** Every
+  verification issue code is now a named `pub const` in a `codes` module
+  (zero bare literals at emit sites), with a `#[non_exhaustive]`
+  `VerificationCode` enum and `ReportIssue::classification()` so
+  downstream integrity handling can branch on typed values instead of
+  comparing strings. A missing primary artifact or row-identity file is
+  reported with a dedicated `artifact_missing` / `row_identity_missing`
+  code (classified `ArtifactMissing` / `RowIdentityMissing`) only when the
+  file is genuinely absent; permission or I/O failures keep the generic
+  `*_path_unavailable` code and classify as `Unknown`, so a consumer never
+  mistakes an unreadable file for a missing one. `ReportIssue` gains optional structured mismatch
+  detail — artifact name plus expected/actual SHA-256 and sizes — at the
+  artifact, auxiliary, and row-identity mismatch sites, for lossless
+  downstream error construction. Reports without the new detail
+  serialize byte-identically to before (regression-tested).
+- **`ordvec-manifest`: shared hash helpers.** New `sha256_bytes` and
+  bounded `sha256_reader` share `sha256_file_bounded`'s bounded/EINTR
+  read core; the sqlite registry's private duplicate hasher is deduped
+  onto the public helper.
+
+### Changed
+
+- **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
+  manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
+  and `created_at` are removed from `IndexManifest`, creation omits the
+  optional `build` field (serialized as absent, not `null`), and auxiliary
+  artifact entries are sorted by
+  `(name, path)`, so identical bundle content serializes to byte-identical
+  manifests and `sha256(manifest.json)` is the bundle's content address.
+  Existing v1 manifests no longer parse; loading one fails with an error
+  naming both schema versions (zero back-compat, pre-release). Embedded
+  paths must now be canonical — bundle-relative, forward slashes, no `.`,
+  `..`, or empty segments — enforced both at creation (non-embeddable
+  inputs fail `create` instead of minting a manifest that fails its own
+  verification) and at verification (`*_path_not_canonical` codes, now
+  also covering calibration and encoder-distortion profile refs). Absolute
+  paths and escaping `..` paths remain available behind the existing
+  `allow_absolute_paths` / `allow_path_escape` opt-ins. The
+  `write_manifest_file` serialization form is documented as the single
+  canonical byte form: hashing and signing operate on stored bytes, and any
+  serializer change is a schema-version event. The sqlite report registry
+  drops its `manifest_id` column: the cached `verification_reports` table is
+  migrated in place on open (rows preserved, under one atomic transaction),
+  while the rebuildable `active_manifest` pointer is reset and must be
+  re-activated.
+
 ## 0.6.0 - 2026-07-04
 
 ### Performance

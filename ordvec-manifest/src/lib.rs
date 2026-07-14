@@ -28,7 +28,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v1";
+pub const SCHEMA_VERSION: &str = "ordvec.index_manifest.v2";
 pub const CALIBRATION_SCHEMA_VERSION: &str = "ordvec.calibration.v1";
 pub const ENCODER_DISTORTION_SCHEMA_VERSION: &str = "ordvec.encoder_distortion.v1";
 pub const DEFAULT_MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -119,10 +119,24 @@ pub fn load_manifest_file_with_options(
     let manifest_bytes = read_bounded_file(
         path,
         options.limits.max_manifest_bytes,
-        "manifest_file_too_large",
+        codes::MANIFEST_FILE_TOO_LARGE,
         "manifest file",
     )?;
-    let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)?;
+    let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|err| manifest_parse_error(&manifest_bytes, err))?;
+    // A genuine v1 manifest fails the parse above (its required `manifest_id`
+    // / `created_at` fields trip `deny_unknown_fields`), but a document that is
+    // v2-shaped yet labels itself an unsupported `schema_version` would
+    // otherwise load and only be caught at verify. Enforce the version at load
+    // so loading any non-current schema fails here, as documented.
+    if manifest.schema_version != SCHEMA_VERSION {
+        return Err(ManifestError::invalid(format!(
+            "manifest declares schema_version {:?} but this build supports \
+             {SCHEMA_VERSION:?}; the manifest was written by an older or newer \
+             manifest schema",
+            manifest.schema_version
+        )));
+    }
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -133,6 +147,30 @@ pub fn load_manifest_file_with_options(
         source_path: Some(path.to_path_buf()),
         base_dir,
     })
+}
+
+/// Wraps a manifest parse failure with schema-version context. Old or new
+/// schema generations fail the strict `deny_unknown_fields` parse before the
+/// `schema_version` field is ever validated, so a targeted probe of that one
+/// field is needed to say *why* the document does not parse.
+fn manifest_parse_error(manifest_bytes: &[u8], err: serde_json::Error) -> ManifestError {
+    #[derive(Deserialize)]
+    struct SchemaVersionProbe {
+        schema_version: Option<String>,
+    }
+    if let Ok(SchemaVersionProbe {
+        schema_version: Some(version),
+    }) = serde_json::from_slice::<SchemaVersionProbe>(manifest_bytes)
+    {
+        if version != SCHEMA_VERSION {
+            return ManifestError::invalid(format!(
+                "manifest declares schema_version {version:?} but this build supports \
+                 {SCHEMA_VERSION:?}; the manifest was written by an older or newer \
+                 manifest schema: {err}"
+            ));
+        }
+    }
+    ManifestError::Json(err)
 }
 
 fn read_bounded_file(
@@ -237,8 +275,8 @@ fn verify_manifest_with_path_capture(
     options: VerifyOptions,
 ) -> (VerificationReport, VerificationPathCapture) {
     let mut paths = VerificationPathCapture::default();
-    let mut report = VerificationReport::new(Some(document.manifest.manifest_id.clone()));
-    validate_manifest_shape(&document.manifest, &options.limits, &mut report);
+    let mut report = VerificationReport::new();
+    validate_manifest_shape(&document.manifest, &options, &mut report);
 
     let artifact_display_path = document.manifest.artifact.path.clone();
     report.artifact.manifest_path = Some(artifact_display_path.clone());
@@ -253,7 +291,7 @@ fn verify_manifest_with_path_capture(
         &artifact_path,
         &document.base_dir,
         &options,
-        "artifact",
+        &ARTIFACT_PATH_ISSUES,
         &mut report.errors,
     ) {
         paths.artifact_path = Some(resolved.canonical_path.clone());
@@ -268,34 +306,46 @@ fn verify_manifest_with_path_capture(
                 .artifact
                 .file_size_bytes
                 .min(options.limits.max_index_artifact_bytes),
-            "artifact_file_too_large",
+            codes::ARTIFACT_FILE_TOO_LARGE,
             "index artifact",
         ) {
             Ok(hash) => {
                 report.artifact.sha256 = Some(hash.sha256.clone());
                 report.artifact.size_bytes = Some(hash.size_bytes);
                 if !hex_digest_eq(&hash.sha256, &document.manifest.artifact.sha256) {
-                    report.error(
-                        "artifact_sha256_mismatch",
-                        format!(
-                            "artifact SHA-256 was {}, manifest declares {}",
-                            hash.sha256, document.manifest.artifact.sha256
+                    report.errors.push(
+                        ReportIssue::new(
+                            codes::ARTIFACT_SHA256_MISMATCH,
+                            format!(
+                                "artifact SHA-256 was {}, manifest declares {}",
+                                hash.sha256, document.manifest.artifact.sha256
+                            ),
+                        )
+                        .with_sha256_detail(
+                            document.manifest.artifact.sha256.as_str(),
+                            hash.sha256.as_str(),
                         ),
                     );
                 }
                 if hash.size_bytes != document.manifest.artifact.file_size_bytes {
-                    report.error(
-                        "artifact_file_size_mismatch",
-                        format!(
-                            "artifact size was {}, manifest declares {}",
-                            hash.size_bytes, document.manifest.artifact.file_size_bytes
+                    report.errors.push(
+                        ReportIssue::new(
+                            codes::ARTIFACT_FILE_SIZE_MISMATCH,
+                            format!(
+                                "artifact size was {}, manifest declares {}",
+                                hash.size_bytes, document.manifest.artifact.file_size_bytes
+                            ),
+                        )
+                        .with_size_detail(
+                            document.manifest.artifact.file_size_bytes,
+                            hash.size_bytes,
                         ),
                     );
                 }
             }
             Err(ManifestError::LimitExceeded { code, message }) => report.error(code, message),
             Err(err) => report.error(
-                "artifact_hash_failed",
+                codes::ARTIFACT_HASH_FAILED,
                 format!("failed to hash artifact: {err}"),
             ),
         }
@@ -308,7 +358,7 @@ fn verify_manifest_with_path_capture(
                 compare_artifact_metadata(&document.manifest.artifact, &metadata, &mut report);
             }
             Err(err) => report.error(
-                "artifact_probe_failed",
+                codes::ARTIFACT_PROBE_FAILED,
                 format!("failed to probe artifact metadata: {err}"),
             ),
         }
@@ -327,57 +377,64 @@ fn verify_manifest_with_path_capture(
 
 fn validate_manifest_shape(
     manifest: &IndexManifest,
-    limits: &ResourceLimits,
+    options: &VerifyOptions,
     report: &mut VerificationReport,
 ) {
     if manifest.schema_version != SCHEMA_VERSION {
         report.error(
-            "schema_version_unsupported",
+            codes::SCHEMA_VERSION_UNSUPPORTED,
             format!(
                 "schema_version must be {SCHEMA_VERSION}, got {}",
                 manifest.schema_version
             ),
         );
     }
-    if manifest.manifest_id.trim().is_empty() {
-        report.error("manifest_id_empty", "manifest_id must be non-empty");
-    }
-    if DateTime::parse_from_rfc3339(&manifest.created_at).is_err() {
-        report.error("created_at_invalid", "created_at must parse as RFC3339");
-    }
     if manifest.embedding.model.trim().is_empty() {
-        report.error("embedding_model_empty", "embedding.model must be non-empty");
+        report.error(
+            codes::EMBEDDING_MODEL_EMPTY,
+            "embedding.model must be non-empty",
+        );
     }
     if manifest.embedding.dim == 0 {
         report.error(
-            "embedding_dim_zero",
+            codes::EMBEDDING_DIM_ZERO,
             "embedding.dim must be greater than zero",
         );
     }
     if manifest.artifact.path.trim().is_empty() {
-        report.error("artifact_path_empty", "artifact.path must be non-empty");
+        report.error(
+            codes::ARTIFACT_PATH_EMPTY,
+            "artifact.path must be non-empty",
+        );
+    } else if !is_manifest_path_absolute(&manifest.artifact.path)
+        && !is_canonical_manifest_path(&manifest.artifact.path, options.allow_path_escape)
+    {
+        report.error(
+            codes::ARTIFACT_PATH_NOT_CANONICAL,
+            "artifact.path must use forward slashes with no `.`, `..`, or empty segments",
+        );
     }
     if !is_sha256_hex(&manifest.artifact.sha256) {
         report.error(
-            "artifact_sha256_invalid",
+            codes::ARTIFACT_SHA256_INVALID,
             "artifact.sha256 must be a lowercase 64-character hex SHA-256 digest",
         );
     }
     if manifest.artifact.file_size_bytes == 0 {
         report.error(
-            "artifact_file_size_zero",
+            codes::ARTIFACT_FILE_SIZE_ZERO,
             "artifact.file_size_bytes must be greater than zero",
         );
     }
     if manifest.artifact.bytes_per_vec == 0 {
         report.error(
-            "artifact_bytes_per_vec_zero",
+            codes::ARTIFACT_BYTES_PER_VEC_ZERO,
             "artifact.bytes_per_vec must be greater than zero",
         );
     }
     if manifest.artifact.dim != manifest.embedding.dim {
         report.error(
-            "artifact_embedding_dim_mismatch",
+            codes::ARTIFACT_EMBEDDING_DIM_MISMATCH,
             format!(
                 "artifact.dim {} does not match embedding.dim {}",
                 manifest.artifact.dim, manifest.embedding.dim
@@ -386,7 +443,7 @@ fn validate_manifest_shape(
     }
     if !artifact_kind_matches_params(manifest.artifact.kind, &manifest.artifact.params) {
         report.error(
-            "artifact_params_kind_mismatch",
+            codes::ARTIFACT_PARAMS_KIND_MISMATCH,
             "artifact.params discriminator does not match artifact.kind",
         );
     }
@@ -394,7 +451,7 @@ fn validate_manifest_shape(
     let row_count = manifest.row_identity.row_count();
     if manifest.artifact.vector_count != row_count {
         report.error(
-            "artifact_row_count_mismatch",
+            codes::ARTIFACT_ROW_COUNT_MISMATCH,
             format!(
                 "artifact.vector_count {} does not match row_identity.row_count {}",
                 manifest.artifact.vector_count, row_count
@@ -411,64 +468,71 @@ fn validate_manifest_shape(
     {
         if path.trim().is_empty() {
             report.error(
-                "row_identity_path_empty",
+                codes::ROW_IDENTITY_PATH_EMPTY,
                 "row_identity.path must be non-empty",
+            );
+        } else if !is_manifest_path_absolute(path)
+            && !is_canonical_manifest_path(path, options.allow_path_escape)
+        {
+            report.error(
+                codes::ROW_IDENTITY_PATH_NOT_CANONICAL,
+                "row_identity.path must use forward slashes with no `.`, `..`, or empty segments",
             );
         }
         if !is_sha256_hex(sha256) {
             report.error(
-                "row_identity_sha256_invalid",
+                codes::ROW_IDENTITY_SHA256_INVALID,
                 "row_identity.sha256 must be a lowercase 64-character hex SHA-256 digest",
             );
         }
         if id_kind != "uuid" {
             report.error(
-                "row_identity_id_kind_unsupported",
+                codes::ROW_IDENTITY_ID_KIND_UNSUPPORTED,
                 "row_identity.id_kind must be uuid in v1",
             );
         }
         if db.is_some() {
             report.error(
-                "row_identity_db_unsupported",
+                codes::ROW_IDENTITY_DB_UNSUPPORTED,
                 "row_identity.db is reserved for a future schema and is not verified in v1",
             );
         }
     }
 
-    validate_auxiliary_artifact_shape(manifest, limits, report);
+    validate_auxiliary_artifact_shape(manifest, options, report);
 
     validate_optional_non_empty(
-        "embedding_model_revision_empty",
+        codes::EMBEDDING_MODEL_REVISION_EMPTY,
         "embedding.model_revision must be non-empty when present",
         manifest.embedding.model_revision.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "embedding_tokenizer_revision_empty",
+        codes::EMBEDDING_TOKENIZER_REVISION_EMPTY,
         "embedding.tokenizer_revision must be non-empty when present",
         manifest.embedding.tokenizer_revision.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "embedding_pooling_empty",
+        codes::EMBEDDING_POOLING_EMPTY,
         "embedding.pooling must be non-empty when present",
         manifest.embedding.pooling.as_deref(),
         report,
     );
     validate_optional_sha256(
-        "embedding_corpus_digest_invalid",
+        codes::EMBEDDING_CORPUS_DIGEST_INVALID,
         "embedding.corpus_digest must be a lowercase 64-character hex SHA-256 digest",
         manifest.embedding.corpus_digest.as_deref(),
         report,
     );
     validate_optional_sha256(
-        "embedding_matrix_digest_invalid",
+        codes::EMBEDDING_MATRIX_DIGEST_INVALID,
         "embedding.embedding_matrix_digest must be a lowercase 64-character hex SHA-256 digest",
         manifest.embedding.embedding_matrix_digest.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "embedding_normalization_empty",
+        codes::EMBEDDING_NORMALIZATION_EMPTY,
         "embedding.normalization must be non-empty when present",
         manifest.embedding.normalization.as_deref(),
         report,
@@ -477,7 +541,7 @@ fn validate_manifest_shape(
     if let Some(build) = &manifest.build {
         if build.invocation_id.trim().is_empty() {
             report.error(
-                "build_invocation_id_empty",
+                codes::BUILD_INVOCATION_ID_EMPTY,
                 "build.invocation_id must be non-empty",
             );
         }
@@ -487,30 +551,30 @@ fn validate_manifest_shape(
             .is_some_and(|builder_id| builder_id.trim().is_empty())
         {
             report.error(
-                "build_builder_id_empty",
+                codes::BUILD_BUILDER_ID_EMPTY,
                 "build.builder_id must be non-empty",
             );
         }
         validate_optional_non_empty(
-            "build_source_repo_empty",
+            codes::BUILD_SOURCE_REPO_EMPTY,
             "build.source_repo must be non-empty when present",
             build.source_repo.as_deref(),
             report,
         );
         validate_optional_non_empty(
-            "build_source_commit_empty",
+            codes::BUILD_SOURCE_COMMIT_EMPTY,
             "build.source_commit must be non-empty when present",
             build.source_commit.as_deref(),
             report,
         );
         validate_optional_non_empty(
-            "build_ci_provider_empty",
+            codes::BUILD_CI_PROVIDER_EMPTY,
             "build.ci_provider must be non-empty when present",
             build.ci_provider.as_deref(),
             report,
         );
         validate_optional_non_empty(
-            "build_ci_run_id_empty",
+            codes::BUILD_CI_RUN_ID_EMPTY,
             "build.ci_run_id must be non-empty when present",
             build.ci_run_id.as_deref(),
             report,
@@ -520,7 +584,7 @@ fn validate_manifest_shape(
     for key in manifest.extensions.keys() {
         if !extension_key_is_namespaced(key) {
             report.error(
-                "extension_key_not_namespaced",
+                codes::EXTENSION_KEY_NOT_NAMESPACED,
                 format!("extension key {key:?} must be namespaced"),
             );
         }
@@ -529,10 +593,10 @@ fn validate_manifest_shape(
 
 fn validate_auxiliary_artifact_shape(
     manifest: &IndexManifest,
-    limits: &ResourceLimits,
+    options: &VerifyOptions,
     report: &mut VerificationReport,
 ) {
-    if !check_auxiliary_artifact_count(manifest, limits, report) {
+    if !check_auxiliary_artifact_count(manifest, &options.limits, report) {
         return;
     }
     let mut names = HashSet::new();
@@ -540,32 +604,41 @@ fn validate_auxiliary_artifact_shape(
         let name = artifact.name.trim();
         if name.is_empty() {
             report.error(
-                "auxiliary_artifact_name_empty",
+                codes::AUXILIARY_ARTIFACT_NAME_EMPTY,
                 "auxiliary artifact name must be non-empty",
             );
         } else if artifact.name != name {
             report.error(
-                "auxiliary_artifact_name_not_trimmed",
+                codes::AUXILIARY_ARTIFACT_NAME_NOT_TRIMMED,
                 format!(
                     "auxiliary artifact name {name:?} must not have leading or trailing whitespace"
                 ),
             );
         } else if !names.insert(name.to_string()) {
             report.error(
-                "auxiliary_artifact_name_duplicate",
+                codes::AUXILIARY_ARTIFACT_NAME_DUPLICATE,
                 format!("auxiliary artifact name {name:?} is duplicated"),
             );
         }
 
         if artifact.path.trim().is_empty() {
             report.error(
-                "auxiliary_artifact_path_empty",
+                codes::AUXILIARY_ARTIFACT_PATH_EMPTY,
                 format!("auxiliary artifact {name:?} path must be non-empty"),
+            );
+        } else if !is_manifest_path_absolute(&artifact.path)
+            && !is_canonical_manifest_path(&artifact.path, options.allow_path_escape)
+        {
+            report.error(
+                codes::AUXILIARY_ARTIFACT_PATH_NOT_CANONICAL,
+                format!(
+                    "auxiliary artifact {name:?} path must use forward slashes with no `.`, `..`, or empty segments"
+                ),
             );
         }
         if !is_sha256_hex(&artifact.sha256) {
             report.error(
-                "auxiliary_artifact_sha256_invalid",
+                codes::AUXILIARY_ARTIFACT_SHA256_INVALID,
                 format!(
                     "auxiliary artifact {name:?} sha256 must be a lowercase 64-character hex SHA-256 digest"
                 ),
@@ -576,7 +649,7 @@ fn validate_auxiliary_artifact_shape(
         // only required declarations must carry a real size.
         if artifact.required && artifact.file_size_bytes == 0 {
             report.error(
-                "auxiliary_artifact_file_size_zero",
+                codes::AUXILIARY_ARTIFACT_FILE_SIZE_ZERO,
                 format!(
                     "required auxiliary artifact {name:?} file_size_bytes must be greater than zero"
                 ),
@@ -686,7 +759,7 @@ fn compare_artifact_metadata(
         Ok(observed_kind) => {
             if artifact.kind != observed_kind {
                 report.error(
-                    "artifact_kind_mismatch",
+                    codes::ARTIFACT_KIND_MISMATCH,
                     format!(
                         "artifact kind was {:?}, manifest declares {:?}",
                         observed_kind, artifact.kind
@@ -700,7 +773,7 @@ fn compare_artifact_metadata(
         Ok(observed_params) => {
             if artifact.params != observed_params {
                 report.error(
-                    "artifact_params_mismatch",
+                    codes::ARTIFACT_PARAMS_MISMATCH,
                     format!(
                         "artifact params were {:?}, manifest declares {:?}",
                         observed_params, artifact.params
@@ -712,7 +785,7 @@ fn compare_artifact_metadata(
     }
     if artifact.format_version != metadata.format_version {
         report.error(
-            "artifact_format_version_mismatch",
+            codes::ARTIFACT_FORMAT_VERSION_MISMATCH,
             format!(
                 "artifact format_version was {}, manifest declares {}",
                 metadata.format_version, artifact.format_version
@@ -721,7 +794,7 @@ fn compare_artifact_metadata(
     }
     if artifact.dim != metadata.dim {
         report.error(
-            "artifact_dim_mismatch",
+            codes::ARTIFACT_DIM_MISMATCH,
             format!(
                 "artifact dim was {}, manifest declares {}",
                 metadata.dim, artifact.dim
@@ -730,7 +803,7 @@ fn compare_artifact_metadata(
     }
     if artifact.vector_count != metadata.vector_count {
         report.error(
-            "artifact_vector_count_mismatch",
+            codes::ARTIFACT_VECTOR_COUNT_MISMATCH,
             format!(
                 "artifact vector_count was {}, manifest declares {}",
                 metadata.vector_count, artifact.vector_count
@@ -739,7 +812,7 @@ fn compare_artifact_metadata(
     }
     if artifact.bytes_per_vec != metadata.bytes_per_vec {
         report.error(
-            "artifact_bytes_per_vec_mismatch",
+            codes::ARTIFACT_BYTES_PER_VEC_MISMATCH,
             format!(
                 "artifact bytes_per_vec was {}, manifest declares {}",
                 metadata.bytes_per_vec, artifact.bytes_per_vec
@@ -748,7 +821,7 @@ fn compare_artifact_metadata(
     }
     if artifact.file_size_bytes != metadata.file_size_bytes {
         report.error(
-            "artifact_metadata_file_size_mismatch",
+            codes::ARTIFACT_METADATA_FILE_SIZE_MISMATCH,
             format!(
                 "artifact metadata file_size_bytes was {}, manifest declares {}",
                 metadata.file_size_bytes, artifact.file_size_bytes
@@ -779,7 +852,7 @@ fn verify_row_identity(
             report.row_identity.row_count = Some(*row_count);
             if *row_count > options.limits.max_row_identity_rows {
                 report.error(
-                    "row_identity_row_count_limit_exceeded",
+                    codes::ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED,
                     format!(
                         "row_identity.row_count {row_count} exceeds max_row_identity_rows={}",
                         options.limits.max_row_identity_rows
@@ -792,7 +865,7 @@ fn verify_row_identity(
                 &row_path,
                 &document.base_dir,
                 options,
-                "row_identity",
+                &ROW_IDENTITY_PATH_ISSUES,
                 &mut report.errors,
             ) {
                 paths.row_identity_path = Some(resolved.canonical_path.clone());
@@ -810,11 +883,14 @@ fn verify_row_identity(
                         if let Some(hash) = &stats.sha256 {
                             report.row_identity.sha256 = Some(hash.clone());
                             if !hex_digest_eq(hash, sha256) {
-                                report.error(
-                                    "row_identity_sha256_mismatch",
-                                    format!(
-                                        "row_identity SHA-256 was {hash}, manifest declares {sha256}"
-                                    ),
+                                report.errors.push(
+                                    ReportIssue::new(
+                                        codes::ROW_IDENTITY_SHA256_MISMATCH,
+                                        format!(
+                                            "row_identity SHA-256 was {hash}, manifest declares {sha256}"
+                                        ),
+                                    )
+                                    .with_sha256_detail(sha256.as_str(), hash.as_str()),
                                 );
                             }
                         }
@@ -822,7 +898,7 @@ fn verify_row_identity(
                             && !report
                                 .errors
                                 .iter()
-                                .any(|issue| issue.code == "row_identity_row_count_mismatch")
+                                .any(|issue| issue.code == codes::ROW_IDENTITY_ROW_COUNT_MISMATCH)
                         {
                             let observed_rows = if stats.sha256.is_some() {
                                 stats.row_count.to_string()
@@ -830,7 +906,7 @@ fn verify_row_identity(
                                 format!("at least {}", stats.row_count)
                             };
                             report.error(
-                                "row_identity_row_count_mismatch",
+                                codes::ROW_IDENTITY_ROW_COUNT_MISMATCH,
                                 format!(
                                     "row identity file has {observed_rows} rows, manifest declares {row_count}"
                                 ),
@@ -838,7 +914,7 @@ fn verify_row_identity(
                         }
                     }
                     Err(err) => report.error(
-                        "row_identity_read_failed",
+                        codes::ROW_IDENTITY_READ_FAILED,
                         format!("failed to read row identity file: {err}"),
                     ),
                 }
@@ -882,7 +958,7 @@ fn validate_encoder_distortion_shape(
 ) {
     if profile.schema_version != ENCODER_DISTORTION_SCHEMA_VERSION {
         report.error(
-            "encoder_distortion_schema_version_unsupported",
+            codes::ENCODER_DISTORTION_SCHEMA_VERSION_UNSUPPORTED,
             format!(
                 "encoder_distortion.schema_version must be {ENCODER_DISTORTION_SCHEMA_VERSION}, got {}",
                 profile.schema_version
@@ -891,7 +967,7 @@ fn validate_encoder_distortion_shape(
     }
     if profile.profile_id.trim().is_empty() {
         report.error(
-            "encoder_distortion_profile_id_empty",
+            codes::ENCODER_DISTORTION_PROFILE_ID_EMPTY,
             "encoder_distortion.profile_id must be non-empty",
         );
     }
@@ -901,42 +977,42 @@ fn validate_encoder_distortion_shape(
         .is_some_and(|created_at| DateTime::parse_from_rfc3339(created_at).is_err())
     {
         report.error(
-            "encoder_distortion_created_at_invalid",
+            codes::ENCODER_DISTORTION_CREATED_AT_INVALID,
             "encoder_distortion.created_at must parse as RFC3339 when present",
         );
     }
     if profile.encoder.model.trim().is_empty() {
         report.error(
-            "encoder_distortion_encoder_model_empty",
+            codes::ENCODER_DISTORTION_ENCODER_MODEL_EMPTY,
             "encoder_distortion.encoder.model must be non-empty",
         );
     }
     if profile.encoder.dim == 0 {
         report.error(
-            "encoder_distortion_encoder_dim_zero",
+            codes::ENCODER_DISTORTION_ENCODER_DIM_ZERO,
             "encoder_distortion.encoder.dim must be greater than zero",
         );
     }
     validate_optional_non_empty(
-        "encoder_distortion_encoder_model_revision_empty",
+        codes::ENCODER_DISTORTION_ENCODER_MODEL_REVISION_EMPTY,
         "encoder_distortion.encoder.model_revision must be non-empty when present",
         profile.encoder.model_revision.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "encoder_distortion_encoder_normalization_empty",
+        codes::ENCODER_DISTORTION_ENCODER_NORMALIZATION_EMPTY,
         "encoder_distortion.encoder.normalization must be non-empty when present",
         profile.encoder.normalization.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "encoder_distortion_tokenizer_revision_empty",
+        codes::ENCODER_DISTORTION_TOKENIZER_REVISION_EMPTY,
         "encoder_distortion.tokenizer_revision must be non-empty when present",
         profile.tokenizer_revision.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "encoder_distortion_pooling_empty",
+        codes::ENCODER_DISTORTION_POOLING_EMPTY,
         "encoder_distortion.pooling must be non-empty when present",
         profile.pooling.as_deref(),
         report,
@@ -950,7 +1026,7 @@ fn validate_encoder_distortion_encoder(
 ) {
     if profile.encoder.model != embedding.model {
         report.error(
-            "encoder_distortion_encoder_model_mismatch",
+            codes::ENCODER_DISTORTION_ENCODER_MODEL_MISMATCH,
             format!(
                 "encoder_distortion model {:?} does not match embedding.model {:?}",
                 profile.encoder.model, embedding.model
@@ -959,7 +1035,7 @@ fn validate_encoder_distortion_encoder(
     }
     if profile.encoder.dim != embedding.dim {
         report.error(
-            "encoder_distortion_encoder_dim_mismatch",
+            codes::ENCODER_DISTORTION_ENCODER_DIM_MISMATCH,
             format!(
                 "encoder_distortion dim {} does not match embedding.dim {}",
                 profile.encoder.dim, embedding.dim
@@ -967,7 +1043,7 @@ fn validate_encoder_distortion_encoder(
         );
     }
     compare_optional_encoder_identity(
-        "encoder_distortion_encoder_model_revision_mismatch",
+        codes::ENCODER_DISTORTION_ENCODER_MODEL_REVISION_MISMATCH,
         "encoder_distortion encoder",
         "model_revision",
         embedding.model_revision.as_deref(),
@@ -975,7 +1051,7 @@ fn validate_encoder_distortion_encoder(
         report,
     );
     compare_optional_encoder_identity(
-        "encoder_distortion_encoder_normalization_mismatch",
+        codes::ENCODER_DISTORTION_ENCODER_NORMALIZATION_MISMATCH,
         "encoder_distortion encoder",
         "normalization",
         embedding.normalization.as_deref(),
@@ -983,7 +1059,7 @@ fn validate_encoder_distortion_encoder(
         report,
     );
     compare_optional_encoder_identity(
-        "encoder_distortion_tokenizer_revision_mismatch",
+        codes::ENCODER_DISTORTION_TOKENIZER_REVISION_MISMATCH,
         "encoder_distortion",
         "tokenizer_revision",
         embedding.tokenizer_revision.as_deref(),
@@ -991,7 +1067,7 @@ fn validate_encoder_distortion_encoder(
         report,
     );
     compare_optional_encoder_identity(
-        "encoder_distortion_pooling_mismatch",
+        codes::ENCODER_DISTORTION_POOLING_MISMATCH,
         "encoder_distortion",
         "pooling",
         embedding.pooling.as_deref(),
@@ -1006,31 +1082,58 @@ fn validate_encoder_distortion_metrics(
 ) {
     validate_metric_spec(
         "encoder_distortion_source_metric",
+        &SOURCE_METRIC_ISSUES,
         &profile.source_metric,
         report,
     );
     validate_metric_spec(
         "encoder_distortion_embedding_metric",
+        &EMBEDDING_METRIC_ISSUES,
         &profile.embedding_metric,
         report,
     );
 }
 
-fn validate_metric_spec(prefix: &str, metric: &MetricSpec, report: &mut VerificationReport) {
+/// Per-metric issue codes for [`validate_metric_spec`], so every emitted
+/// code stays a named constant in [`codes`].
+struct MetricSpecIssueCodes {
+    name_empty: &'static str,
+    version_empty: &'static str,
+    digest_invalid: &'static str,
+}
+
+const SOURCE_METRIC_ISSUES: MetricSpecIssueCodes = MetricSpecIssueCodes {
+    name_empty: codes::ENCODER_DISTORTION_SOURCE_METRIC_NAME_EMPTY,
+    version_empty: codes::ENCODER_DISTORTION_SOURCE_METRIC_VERSION_EMPTY,
+    digest_invalid: codes::ENCODER_DISTORTION_SOURCE_METRIC_DIGEST_INVALID,
+};
+
+const EMBEDDING_METRIC_ISSUES: MetricSpecIssueCodes = MetricSpecIssueCodes {
+    name_empty: codes::ENCODER_DISTORTION_EMBEDDING_METRIC_NAME_EMPTY,
+    version_empty: codes::ENCODER_DISTORTION_EMBEDDING_METRIC_VERSION_EMPTY,
+    digest_invalid: codes::ENCODER_DISTORTION_EMBEDDING_METRIC_DIGEST_INVALID,
+};
+
+fn validate_metric_spec(
+    prefix: &str,
+    issue_codes: &MetricSpecIssueCodes,
+    metric: &MetricSpec,
+    report: &mut VerificationReport,
+) {
     if metric.name.trim().is_empty() {
         report.error(
-            format!("{prefix}_name_empty"),
+            issue_codes.name_empty,
             format!("{prefix}.name must be non-empty"),
         );
     }
     validate_optional_non_empty(
-        &format!("{prefix}_version_empty"),
+        issue_codes.version_empty,
         &format!("{prefix}.version must be non-empty when present"),
         metric.version.as_deref(),
         report,
     );
     validate_optional_sha256_uri(
-        &format!("{prefix}_digest_invalid"),
+        issue_codes.digest_invalid,
         &format!("{prefix}.digest must be sha256:<lowercase-hex> when present"),
         metric.digest.as_deref(),
         report,
@@ -1046,43 +1149,43 @@ fn validate_encoder_distortion_bounds(bounds: &DistortionBounds, report: &mut Ve
         && bounds.quantile_observed_violation.is_none()
     {
         report.error(
-            "encoder_distortion_bounds_empty",
+            codes::ENCODER_DISTORTION_BOUNDS_EMPTY,
             "encoder_distortion.bounds must declare at least one bound or observed violation statistic",
         );
     }
 
     validate_optional_positive_f64(
-        "encoder_distortion_lower_bound_invalid",
+        codes::ENCODER_DISTORTION_LOWER_BOUND_INVALID,
         "encoder_distortion.bounds.declared_lower_bound must be finite and greater than zero",
         bounds.declared_lower_bound,
         report,
     );
     validate_optional_positive_f64(
-        "encoder_distortion_upper_bound_invalid",
+        codes::ENCODER_DISTORTION_UPPER_BOUND_INVALID,
         "encoder_distortion.bounds.declared_upper_bound must be finite and greater than zero",
         bounds.declared_upper_bound,
         report,
     );
     validate_optional_positive_f64(
-        "encoder_distortion_estimated_distortion_invalid",
+        codes::ENCODER_DISTORTION_ESTIMATED_DISTORTION_INVALID,
         "encoder_distortion.bounds.estimated_distortion must be finite and greater than zero",
         bounds.estimated_distortion,
         report,
     );
     validate_optional_probability(
-        "encoder_distortion_violation_rate_invalid",
+        codes::ENCODER_DISTORTION_VIOLATION_RATE_INVALID,
         "encoder_distortion.bounds.violation_rate must be finite and within [0, 1]",
         bounds.violation_rate,
         report,
     );
     validate_optional_nonnegative_f64(
-        "encoder_distortion_max_observed_violation_invalid",
+        codes::ENCODER_DISTORTION_MAX_OBSERVED_VIOLATION_INVALID,
         "encoder_distortion.bounds.max_observed_violation must be finite and non-negative",
         bounds.max_observed_violation,
         report,
     );
     validate_optional_nonnegative_f64(
-        "encoder_distortion_quantile_observed_violation_invalid",
+        codes::ENCODER_DISTORTION_QUANTILE_OBSERVED_VIOLATION_INVALID,
         "encoder_distortion.bounds.quantile_observed_violation must be finite and non-negative",
         bounds.quantile_observed_violation,
         report,
@@ -1091,7 +1194,7 @@ fn validate_encoder_distortion_bounds(bounds: &DistortionBounds, report: &mut Ve
     if let (Some(lower), Some(upper)) = (bounds.declared_lower_bound, bounds.declared_upper_bound) {
         if lower.is_finite() && upper.is_finite() && lower > upper {
             report.error(
-                "encoder_distortion_bounds_order_invalid",
+                codes::ENCODER_DISTORTION_BOUNDS_ORDER_INVALID,
                 "encoder_distortion.bounds.declared_lower_bound must be less than or equal to declared_upper_bound",
             );
         }
@@ -1100,14 +1203,14 @@ fn validate_encoder_distortion_bounds(bounds: &DistortionBounds, report: &mut Ve
                 let expected = upper / lower;
                 if !expected.is_finite() {
                     report.error(
-                        "encoder_distortion_distortion_mismatch",
+                        codes::ENCODER_DISTORTION_DISTORTION_MISMATCH,
                         "encoder_distortion.bounds.declared_upper_bound / declared_lower_bound must be finite",
                     );
                 } else {
                     let tolerance = 1e-9_f64.max(expected.abs() * 1e-9);
                     if estimated.is_finite() && (estimated - expected).abs() > tolerance {
                         report.error(
-                            "encoder_distortion_distortion_mismatch",
+                            codes::ENCODER_DISTORTION_DISTORTION_MISMATCH,
                             format!(
                                 "encoder_distortion.bounds.estimated_distortion {} does not match declared_upper_bound / declared_lower_bound {}",
                                 estimated, expected
@@ -1122,31 +1225,31 @@ fn validate_encoder_distortion_bounds(bounds: &DistortionBounds, report: &mut Ve
 
 fn validate_encoder_distortion_scope(scope: &DistortionScope, report: &mut VerificationReport) {
     validate_optional_sha256_uri(
-        "encoder_distortion_scope_corpus_digest_invalid",
+        codes::ENCODER_DISTORTION_SCOPE_CORPUS_DIGEST_INVALID,
         "encoder_distortion.scope.corpus_digest must be sha256:<lowercase-hex> when present",
         scope.corpus_digest.as_deref(),
         report,
     );
     validate_optional_sha256_uri(
-        "encoder_distortion_scope_query_set_digest_invalid",
+        codes::ENCODER_DISTORTION_SCOPE_QUERY_SET_DIGEST_INVALID,
         "encoder_distortion.scope.query_set_digest must be sha256:<lowercase-hex> when present",
         scope.query_set_digest.as_deref(),
         report,
     );
     validate_optional_sha256_uri(
-        "encoder_distortion_scope_pair_sample_digest_invalid",
+        codes::ENCODER_DISTORTION_SCOPE_PAIR_SAMPLE_DIGEST_INVALID,
         "encoder_distortion.scope.pair_sample_digest must be sha256:<lowercase-hex> when present",
         scope.pair_sample_digest.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "encoder_distortion_scope_domain_empty",
+        codes::ENCODER_DISTORTION_SCOPE_DOMAIN_EMPTY,
         "encoder_distortion.scope.domain must be non-empty when present",
         scope.domain.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "encoder_distortion_scope_estimator_version_empty",
+        codes::ENCODER_DISTORTION_SCOPE_ESTIMATOR_VERSION_EMPTY,
         "encoder_distortion.scope.estimator_version must be non-empty when present",
         scope.estimator_version.as_deref(),
         report,
@@ -1156,18 +1259,18 @@ fn validate_encoder_distortion_scope(scope: &DistortionScope, report: &mut Verif
         .is_some_and(|sample_size| sample_size == 0)
     {
         report.error(
-            "encoder_distortion_scope_sample_size_zero",
+            codes::ENCODER_DISTORTION_SCOPE_SAMPLE_SIZE_ZERO,
             "encoder_distortion.scope.sample_size must be greater than zero when present",
         );
     }
     validate_optional_probability(
-        "encoder_distortion_scope_confidence_invalid",
+        codes::ENCODER_DISTORTION_SCOPE_CONFIDENCE_INVALID,
         "encoder_distortion.scope.confidence must be finite and within [0, 1]",
         scope.confidence,
         report,
     );
     validate_optional_probability(
-        "encoder_distortion_scope_coverage_invalid",
+        codes::ENCODER_DISTORTION_SCOPE_COVERAGE_INVALID,
         "encoder_distortion.scope.coverage must be finite and within [0, 1]",
         scope.coverage,
         report,
@@ -1181,13 +1284,13 @@ fn validate_encoder_distortion_evidence(
     report: &mut VerificationReport,
 ) {
     validate_optional_non_empty(
-        "encoder_distortion_evidence_estimator_id_empty",
+        codes::ENCODER_DISTORTION_EVIDENCE_ESTIMATOR_ID_EMPTY,
         "encoder_distortion.evidence.estimator_id must be non-empty when present",
         profile.evidence.estimator_id.as_deref(),
         report,
     );
     validate_optional_sha256_uri(
-        "encoder_distortion_evidence_estimator_hash_invalid",
+        codes::ENCODER_DISTORTION_EVIDENCE_ESTIMATOR_HASH_INVALID,
         "encoder_distortion.evidence.estimator_hash must be sha256:<lowercase-hex> when present",
         profile.evidence.estimator_hash.as_deref(),
         report,
@@ -1196,7 +1299,7 @@ fn validate_encoder_distortion_evidence(
     if profile.profile.is_none() && profile.evidence.kind != DistortionEvidenceKind::CallerAsserted
     {
         report.error(
-            "encoder_distortion_profile_required",
+            codes::ENCODER_DISTORTION_PROFILE_REQUIRED,
             "non-caller-asserted encoder distortion evidence requires a profile artifact",
         );
         return;
@@ -1216,30 +1319,37 @@ fn validate_encoder_distortion_profile_artifact(
     report.encoder_distortion.profile_manifest_path = Some(profile.path.clone());
     if profile.path.trim().is_empty() {
         report.error(
-            "encoder_distortion_profile_path_empty",
+            codes::ENCODER_DISTORTION_PROFILE_PATH_EMPTY,
             "encoder_distortion.profile.path must be non-empty",
+        );
+    } else if !is_manifest_path_absolute(&profile.path)
+        && !is_canonical_manifest_path(&profile.path, options.allow_path_escape)
+    {
+        report.error(
+            codes::ENCODER_DISTORTION_PROFILE_PATH_NOT_CANONICAL,
+            "encoder_distortion.profile.path must use forward slashes with no `.`, `..`, or empty segments",
         );
     }
     if !is_sha256_hex(&profile.sha256) {
         report.error(
-            "encoder_distortion_profile_sha256_invalid",
+            codes::ENCODER_DISTORTION_PROFILE_SHA256_INVALID,
             "encoder_distortion.profile.sha256 must be a lowercase 64-character hex SHA-256 digest",
         );
     }
     if profile.file_size_bytes == 0 {
         report.error(
-            "encoder_distortion_profile_file_size_zero",
+            codes::ENCODER_DISTORTION_PROFILE_FILE_SIZE_ZERO,
             "encoder_distortion.profile.file_size_bytes must be greater than zero",
         );
     }
     if profile.format.trim().is_empty() {
         report.error(
-            "encoder_distortion_profile_format_empty",
+            codes::ENCODER_DISTORTION_PROFILE_FORMAT_EMPTY,
             "encoder_distortion.profile.format must be non-empty",
         );
     }
     validate_optional_sha256_uri(
-        "encoder_distortion_profile_source_digest_invalid",
+        codes::ENCODER_DISTORTION_PROFILE_SOURCE_DIGEST_INVALID,
         "encoder_distortion.profile.source_digest must be sha256:<lowercase-hex> when present",
         profile.source_digest.as_deref(),
         report,
@@ -1251,7 +1361,7 @@ fn validate_encoder_distortion_profile_artifact(
             &path,
             base_dir,
             options,
-            "encoder_distortion_profile",
+            &ENCODER_DISTORTION_PROFILE_PATH_ISSUES,
             &mut report.errors,
         ) {
             report.encoder_distortion.profile_canonical_path =
@@ -1261,7 +1371,7 @@ fn validate_encoder_distortion_profile_artifact(
                 profile
                     .file_size_bytes
                     .min(options.limits.max_encoder_distortion_profile_bytes),
-                "encoder_distortion_profile_too_large",
+                codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE,
                 "encoder distortion profile",
             ) {
                 Ok(hash) => {
@@ -1269,7 +1379,7 @@ fn validate_encoder_distortion_profile_artifact(
                     report.encoder_distortion.profile_size_bytes = Some(hash.size_bytes);
                     if !hex_digest_eq(&hash.sha256, &profile.sha256) {
                         report.error(
-                            "encoder_distortion_profile_sha256_mismatch",
+                            codes::ENCODER_DISTORTION_PROFILE_SHA256_MISMATCH,
                             format!(
                                 "encoder distortion profile SHA-256 was {}, manifest declares {}",
                                 hash.sha256, profile.sha256
@@ -1278,7 +1388,7 @@ fn validate_encoder_distortion_profile_artifact(
                     }
                     if hash.size_bytes != profile.file_size_bytes {
                         report.error(
-                            "encoder_distortion_profile_file_size_mismatch",
+                            codes::ENCODER_DISTORTION_PROFILE_FILE_SIZE_MISMATCH,
                             format!(
                                 "encoder distortion profile size was {}, manifest declares {}",
                                 hash.size_bytes, profile.file_size_bytes
@@ -1288,7 +1398,7 @@ fn validate_encoder_distortion_profile_artifact(
                 }
                 Err(ManifestError::LimitExceeded { code, message }) => report.error(code, message),
                 Err(err) => report.error(
-                    "encoder_distortion_profile_hash_failed",
+                    codes::ENCODER_DISTORTION_PROFILE_HASH_FAILED,
                     format!("failed to hash encoder distortion profile: {err}"),
                 ),
             }
@@ -1306,21 +1416,21 @@ fn validate_encoder_distortion_calibration(
     };
     if calibration_profile_id.trim().is_empty() {
         report.error(
-            "encoder_distortion_calibration_profile_id_empty",
+            codes::ENCODER_DISTORTION_CALIBRATION_PROFILE_ID_EMPTY,
             "encoder_distortion.calibration_profile_id must be non-empty when present",
         );
         return;
     }
     if calibration_profile_id.trim() != calibration_profile_id {
         report.error(
-            "encoder_distortion_calibration_profile_id_whitespace",
+            codes::ENCODER_DISTORTION_CALIBRATION_PROFILE_ID_WHITESPACE,
             "encoder_distortion.calibration_profile_id must not contain leading or trailing whitespace",
         );
         return;
     }
     let Some(calibration) = calibration else {
         report.error(
-            "encoder_distortion_calibration_missing",
+            codes::ENCODER_DISTORTION_CALIBRATION_MISSING,
             "encoder_distortion.calibration_profile_id requires a calibration block",
         );
         return;
@@ -1328,7 +1438,7 @@ fn validate_encoder_distortion_calibration(
     // Calibration profile ids are manifest identifiers; keep matching exact.
     if calibration.profile_id != *calibration_profile_id {
         report.error(
-            "encoder_distortion_calibration_profile_mismatch",
+            codes::ENCODER_DISTORTION_CALIBRATION_PROFILE_MISMATCH,
             format!(
                 "encoder_distortion.calibration_profile_id {:?} does not match calibration.profile_id {:?}",
                 calibration_profile_id, calibration.profile_id
@@ -1372,7 +1482,7 @@ fn validate_calibration_shape(
 ) {
     if calibration.schema_version != CALIBRATION_SCHEMA_VERSION {
         report.error(
-            "calibration_schema_version_unsupported",
+            codes::CALIBRATION_SCHEMA_VERSION_UNSUPPORTED,
             format!(
                 "calibration.schema_version must be {CALIBRATION_SCHEMA_VERSION}, got {}",
                 calibration.schema_version
@@ -1381,7 +1491,7 @@ fn validate_calibration_shape(
     }
     if calibration.profile_id.trim().is_empty() {
         report.error(
-            "calibration_profile_id_empty",
+            codes::CALIBRATION_PROFILE_ID_EMPTY,
             "calibration.profile_id must be non-empty",
         );
     }
@@ -1391,56 +1501,56 @@ fn validate_calibration_shape(
         .is_some_and(|created_at| DateTime::parse_from_rfc3339(created_at).is_err())
     {
         report.error(
-            "calibration_created_at_invalid",
+            codes::CALIBRATION_CREATED_AT_INVALID,
             "calibration.created_at must parse as RFC3339 when present",
         );
     }
     if calibration.calibrated_for.model.trim().is_empty() {
         report.error(
-            "calibration_encoder_model_empty",
+            codes::CALIBRATION_ENCODER_MODEL_EMPTY,
             "calibration.calibrated_for.model must be non-empty",
         );
     }
     if calibration.calibrated_for.dim == 0 {
         report.error(
-            "calibration_encoder_dim_zero",
+            codes::CALIBRATION_ENCODER_DIM_ZERO,
             "calibration.calibrated_for.dim must be greater than zero",
         );
     }
     validate_optional_non_empty(
-        "calibration_encoder_model_revision_empty",
+        codes::CALIBRATION_ENCODER_MODEL_REVISION_EMPTY,
         "calibration.calibrated_for.model_revision must be non-empty when present",
         calibration.calibrated_for.model_revision.as_deref(),
         report,
     );
     validate_optional_non_empty(
-        "calibration_encoder_normalization_empty",
+        codes::CALIBRATION_ENCODER_NORMALIZATION_EMPTY,
         "calibration.calibrated_for.normalization must be non-empty when present",
         calibration.calibrated_for.normalization.as_deref(),
         report,
     );
     if calibration.ordinalization.dim() == 0 {
         report.error(
-            "calibration_ordinalization_dim_zero",
+            codes::CALIBRATION_ORDINALIZATION_DIM_ZERO,
             "calibration.ordinalization.dim must be greater than zero",
         );
     }
     match &calibration.ordinalization {
         CalibrationOrdinalization::TopK { k, .. } if *k == 0 => {
             report.error(
-                "calibration_ordinalization_artifact_mismatch",
+                codes::CALIBRATION_ORDINALIZATION_ARTIFACT_MISMATCH,
                 "calibration top_k.k must be greater than zero",
             );
         }
         CalibrationOrdinalization::Bucket { bits, .. } if !matches!(*bits, 1 | 2 | 4) => {
             report.error(
-                "calibration_ordinalization_artifact_mismatch",
+                codes::CALIBRATION_ORDINALIZATION_ARTIFACT_MISMATCH,
                 "calibration bucket.bits must be 1, 2, or 4",
             );
         }
         CalibrationOrdinalization::CallerDefined { name, .. } if name.trim().is_empty() => {
             report.error(
-                "calibration_ordinalization_artifact_mismatch",
+                codes::CALIBRATION_ORDINALIZATION_ARTIFACT_MISMATCH,
                 "calibration caller_defined.name must be non-empty",
             );
         }
@@ -1449,7 +1559,7 @@ fn validate_calibration_shape(
     match &calibration.null_model {
         NullModelSpec::EmpiricalTailTable { statistic } if statistic.trim().is_empty() => {
             report.error(
-                "calibration_null_statistic_empty",
+                codes::CALIBRATION_NULL_STATISTIC_EMPTY,
                 "calibration.null_model.statistic must be non-empty",
             );
         }
@@ -1459,12 +1569,12 @@ fn validate_calibration_shape(
         } => {
             if name.trim().is_empty() {
                 report.error(
-                    "calibration_null_name_empty",
+                    codes::CALIBRATION_NULL_NAME_EMPTY,
                     "calibration.null_model.name must be non-empty",
                 );
             }
             validate_optional_non_empty(
-                "calibration_null_parameterization_empty",
+                codes::CALIBRATION_NULL_PARAMETERIZATION_EMPTY,
                 "calibration.null_model.parameterization must be non-empty when present",
                 parameterization.as_deref(),
                 report,
@@ -1481,7 +1591,7 @@ fn validate_calibration_encoder(
 ) {
     if calibration.calibrated_for.model != embedding.model {
         report.error(
-            "calibration_encoder_model_mismatch",
+            codes::CALIBRATION_ENCODER_MODEL_MISMATCH,
             format!(
                 "calibration model {:?} does not match embedding.model {:?}",
                 calibration.calibrated_for.model, embedding.model
@@ -1490,7 +1600,7 @@ fn validate_calibration_encoder(
     }
     if calibration.calibrated_for.dim != embedding.dim {
         report.error(
-            "calibration_encoder_dim_mismatch",
+            codes::CALIBRATION_ENCODER_DIM_MISMATCH,
             format!(
                 "calibration dim {} does not match embedding.dim {}",
                 calibration.calibrated_for.dim, embedding.dim
@@ -1498,7 +1608,7 @@ fn validate_calibration_encoder(
         );
     }
     compare_optional_identity(
-        "calibration_encoder_model_revision_mismatch",
+        codes::CALIBRATION_ENCODER_MODEL_REVISION_MISMATCH,
         "calibration encoder",
         "model_revision",
         embedding.model_revision.as_deref(),
@@ -1506,7 +1616,7 @@ fn validate_calibration_encoder(
         report,
     );
     compare_optional_identity(
-        "calibration_encoder_normalization_mismatch",
+        codes::CALIBRATION_ENCODER_NORMALIZATION_MISMATCH,
         "calibration encoder",
         "normalization",
         embedding.normalization.as_deref(),
@@ -1558,7 +1668,7 @@ fn validate_calibration_ordinalization(
 ) {
     if calibration.ordinalization.dim() != artifact.dim {
         report.error(
-            "calibration_ordinalization_dim_mismatch",
+            codes::CALIBRATION_ORDINALIZATION_DIM_MISMATCH,
             format!(
                 "calibration ordinalization dim {} does not match artifact.dim {}",
                 calibration.ordinalization.dim(),
@@ -1597,7 +1707,7 @@ fn validate_calibration_ordinalization(
 
     if !compatible {
         report.error(
-            "calibration_ordinalization_artifact_mismatch",
+            codes::CALIBRATION_ORDINALIZATION_ARTIFACT_MISMATCH,
             "calibration.ordinalization is incompatible with artifact.kind/artifact.params",
         );
     }
@@ -1621,7 +1731,7 @@ fn validate_calibration_null_model_ordinalization(
         NullModelSpec::UniformHypergeometric
     ) {
         report.error(
-            "calibration_null_model_ordinalization_mismatch",
+            codes::CALIBRATION_NULL_MODEL_ORDINALIZATION_MISMATCH,
             "uniform_hypergeometric calibration requires top_k ordinalization",
         );
     }
@@ -1640,7 +1750,7 @@ fn validate_calibration_profile(
     ) {
         if calibration.profile.is_some() {
             report.error(
-                "calibration_profile_unexpected",
+                codes::CALIBRATION_PROFILE_UNEXPECTED,
                 "uniform_hypergeometric calibration must not include a profile artifact",
             );
         }
@@ -1649,7 +1759,7 @@ fn validate_calibration_profile(
 
     let Some(profile) = &calibration.profile else {
         report.error(
-            "calibration_profile_required",
+            codes::CALIBRATION_PROFILE_REQUIRED,
             "non-uniform calibration requires a profile artifact",
         );
         return;
@@ -1658,25 +1768,32 @@ fn validate_calibration_profile(
     report.calibration.profile_manifest_path = Some(profile.path.clone());
     if profile.path.trim().is_empty() {
         report.error(
-            "calibration_profile_path_empty",
+            codes::CALIBRATION_PROFILE_PATH_EMPTY,
             "calibration.profile.path must be non-empty",
+        );
+    } else if !is_manifest_path_absolute(&profile.path)
+        && !is_canonical_manifest_path(&profile.path, options.allow_path_escape)
+    {
+        report.error(
+            codes::CALIBRATION_PROFILE_PATH_NOT_CANONICAL,
+            "calibration.profile.path must use forward slashes with no `.`, `..`, or empty segments",
         );
     }
     if !is_sha256_hex(&profile.sha256) {
         report.error(
-            "calibration_profile_sha256_invalid",
+            codes::CALIBRATION_PROFILE_SHA256_INVALID,
             "calibration.profile.sha256 must be a lowercase 64-character hex SHA-256 digest",
         );
     }
     if profile.file_size_bytes == 0 {
         report.error(
-            "calibration_profile_file_size_zero",
+            codes::CALIBRATION_PROFILE_FILE_SIZE_ZERO,
             "calibration.profile.file_size_bytes must be greater than zero",
         );
     }
     if profile.dim != artifact.dim {
         report.error(
-            "calibration_profile_dim_mismatch",
+            codes::CALIBRATION_PROFILE_DIM_MISMATCH,
             format!(
                 "calibration profile dim {} does not match artifact.dim {}",
                 profile.dim, artifact.dim
@@ -1685,7 +1802,7 @@ fn validate_calibration_profile(
     }
     if profile.sample_count == 0 {
         report.error(
-            "calibration_profile_sample_count_zero",
+            codes::CALIBRATION_PROFILE_SAMPLE_COUNT_ZERO,
             "calibration.profile.sample_count must be greater than zero",
         );
     }
@@ -1699,7 +1816,7 @@ fn validate_calibration_profile(
             &path,
             base_dir,
             options,
-            "calibration_profile",
+            &CALIBRATION_PROFILE_PATH_ISSUES,
             &mut report.errors,
         ) {
             report.calibration.profile_canonical_path =
@@ -1709,7 +1826,7 @@ fn validate_calibration_profile(
                 profile
                     .file_size_bytes
                     .min(options.limits.max_calibration_profile_bytes),
-                "calibration_profile_too_large",
+                codes::CALIBRATION_PROFILE_TOO_LARGE,
                 "calibration profile",
             ) {
                 Ok(hash) => {
@@ -1717,7 +1834,7 @@ fn validate_calibration_profile(
                     report.calibration.profile_size_bytes = Some(hash.size_bytes);
                     if !hex_digest_eq(&hash.sha256, &profile.sha256) {
                         report.error(
-                            "calibration_profile_sha256_mismatch",
+                            codes::CALIBRATION_PROFILE_SHA256_MISMATCH,
                             format!(
                                 "calibration profile SHA-256 was {}, manifest declares {}",
                                 hash.sha256, profile.sha256
@@ -1726,7 +1843,7 @@ fn validate_calibration_profile(
                     }
                     if hash.size_bytes != profile.file_size_bytes {
                         report.error(
-                            "calibration_profile_file_size_mismatch",
+                            codes::CALIBRATION_PROFILE_FILE_SIZE_MISMATCH,
                             format!(
                                 "calibration profile size was {}, manifest declares {}",
                                 hash.size_bytes, profile.file_size_bytes
@@ -1736,7 +1853,7 @@ fn validate_calibration_profile(
                 }
                 Err(ManifestError::LimitExceeded { code, message }) => report.error(code, message),
                 Err(err) => report.error(
-                    "calibration_profile_hash_failed",
+                    codes::CALIBRATION_PROFILE_HASH_FAILED,
                     format!("failed to hash calibration profile: {err}"),
                 ),
             }
@@ -1750,14 +1867,14 @@ fn validate_optional_source_digest(value: Option<&str>, report: &mut Verificatio
     };
     let Some(digest) = value.strip_prefix("sha256:") else {
         report.error(
-            "calibration_profile_source_digest_invalid",
+            codes::CALIBRATION_PROFILE_SOURCE_DIGEST_INVALID,
             "calibration.profile.source_digest must be sha256:<lowercase-hex>",
         );
         return;
     };
     if !is_sha256_hex(digest) {
         report.error(
-            "calibration_profile_source_digest_invalid",
+            codes::CALIBRATION_PROFILE_SOURCE_DIGEST_INVALID,
             "calibration.profile.source_digest must be sha256:<lowercase-hex>",
         );
     }
@@ -1773,7 +1890,7 @@ fn validate_calibration_parameterization(
             if *parameterization != profile.parameterization =>
         {
             report.error(
-                "calibration_null_parameterization_mismatch",
+                codes::CALIBRATION_NULL_PARAMETERIZATION_MISMATCH,
                 format!(
                     "null_model parameterization {:?} does not match profile parameterization {:?}",
                     parameterization, profile.parameterization
@@ -1784,7 +1901,7 @@ fn validate_calibration_parameterization(
             if profile.parameterization != ProfileParameterization::EmpiricalTailTable =>
         {
             report.error(
-                "calibration_null_parameterization_mismatch",
+                codes::CALIBRATION_NULL_PARAMETERIZATION_MISMATCH,
                 "empirical_tail_table null_model requires empirical_tail_table profile parameterization",
             );
         }
@@ -1795,7 +1912,7 @@ fn validate_calibration_parameterization(
         &calibration.ordinalization,
     ) {
         report.error(
-            "calibration_profile_parameterization_ordinalization_mismatch",
+            codes::CALIBRATION_PROFILE_PARAMETERIZATION_ORDINALIZATION_MISMATCH,
             "calibration profile parameterization is incompatible with calibration ordinalization",
         );
     }
@@ -1835,7 +1952,7 @@ fn validate_calibration_profile_shape(
 ) {
     if profile.format.trim().is_empty() {
         report.error(
-            "calibration_profile_format_empty",
+            codes::CALIBRATION_PROFILE_FORMAT_EMPTY,
             "calibration.profile.format must be non-empty",
         );
     }
@@ -1847,7 +1964,7 @@ fn validate_calibration_profile_shape(
     if let Some(expected) = expected_profile_shape(profile.parameterization, ordinalization) {
         if profile.shape != expected {
             report.error(
-                "calibration_profile_shape_mismatch",
+                codes::CALIBRATION_PROFILE_SHAPE_MISMATCH,
                 format!(
                     "calibration profile shape {:?} does not match expected {:?}",
                     profile.shape, expected
@@ -1870,21 +1987,21 @@ fn validate_calibration_profile_shape(
         .try_fold(1u64, |acc, value| acc.checked_mul(*value as u64))
     else {
         report.error(
-            "calibration_profile_shape_mismatch",
+            codes::CALIBRATION_PROFILE_SHAPE_MISMATCH,
             "calibration.profile.shape product overflows u64",
         );
         return;
     };
     let Some(expected_bytes) = values.checked_mul(bytes_per_value) else {
         report.error(
-            "calibration_profile_shape_mismatch",
+            codes::CALIBRATION_PROFILE_SHAPE_MISMATCH,
             "calibration.profile.shape byte size overflows u64",
         );
         return;
     };
     if profile.file_size_bytes != expected_bytes {
         report.error(
-            "calibration_profile_file_size_mismatch",
+            codes::CALIBRATION_PROFILE_FILE_SIZE_MISMATCH,
             format!(
                 "calibration profile size {} does not match shape/format size {}",
                 profile.file_size_bytes, expected_bytes
@@ -1932,10 +2049,13 @@ fn verify_auxiliary_artifacts(
                 for artifact in artifacts {
                     let mut entry = auxiliary_artifact_report_entry(artifact, &document.base_dir);
                     if artifact.path.trim().is_empty() {
-                        mark_auxiliary_artifact_failed(&mut entry, "auxiliary_artifact_path_empty");
+                        mark_auxiliary_artifact_failed(
+                            &mut entry,
+                            codes::AUXILIARY_ARTIFACT_PATH_EMPTY,
+                        );
                     } else {
                         report.error(
-                            "auxiliary_artifact_base_dir_unavailable",
+                            codes::AUXILIARY_ARTIFACT_BASE_DIR_UNAVAILABLE,
                             format!(
                                 "failed to canonicalize base_dir {} for auxiliary artifact {:?}: {err}",
                                 document.base_dir.display(),
@@ -1944,7 +2064,7 @@ fn verify_auxiliary_artifacts(
                         );
                         mark_auxiliary_artifact_failed(
                             &mut entry,
-                            "auxiliary_artifact_base_dir_unavailable",
+                            codes::AUXILIARY_ARTIFACT_BASE_DIR_UNAVAILABLE,
                         );
                     }
                     report.auxiliary_artifacts.push(entry);
@@ -1959,7 +2079,7 @@ fn verify_auxiliary_artifacts(
         let mut captured_path = None;
 
         if artifact.path.trim().is_empty() {
-            mark_auxiliary_artifact_failed(&mut entry, "auxiliary_artifact_path_empty");
+            mark_auxiliary_artifact_failed(&mut entry, codes::AUXILIARY_ARTIFACT_PATH_EMPTY);
             report.auxiliary_artifacts.push(entry);
             paths.auxiliary_artifact_paths.push(None);
             continue;
@@ -1983,7 +2103,7 @@ fn verify_auxiliary_artifacts(
                     artifact
                         .file_size_bytes
                         .min(options.limits.max_auxiliary_artifact_bytes),
-                    "auxiliary_artifact_file_too_large",
+                    codes::AUXILIARY_ARTIFACT_FILE_TOO_LARGE,
                     "auxiliary artifact",
                 ) {
                     Ok(hash) => {
@@ -1992,27 +2112,38 @@ fn verify_auxiliary_artifacts(
                         if !hex_digest_eq(&hash.sha256, &artifact.sha256) {
                             mark_auxiliary_artifact_failed(
                                 &mut entry,
-                                "auxiliary_artifact_sha256_mismatch",
+                                codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
                             );
-                            report.error(
-                                "auxiliary_artifact_sha256_mismatch",
-                                format!(
-                                    "auxiliary artifact {:?} SHA-256 was {}, manifest declares {}",
-                                    artifact.name, hash.sha256, artifact.sha256
+                            report.errors.push(
+                                ReportIssue::new(
+                                    codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
+                                    format!(
+                                        "auxiliary artifact {:?} SHA-256 was {}, manifest declares {}",
+                                        artifact.name, hash.sha256, artifact.sha256
+                                    ),
+                                )
+                                .with_artifact_name(artifact.name.as_str())
+                                .with_sha256_detail(
+                                    artifact.sha256.as_str(),
+                                    hash.sha256.as_str(),
                                 ),
                             );
                         }
                         if hash.size_bytes != artifact.file_size_bytes {
                             mark_auxiliary_artifact_failed(
                                 &mut entry,
-                                "auxiliary_artifact_file_size_mismatch",
+                                codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH,
                             );
-                            report.error(
-                                "auxiliary_artifact_file_size_mismatch",
-                                format!(
-                                    "auxiliary artifact {:?} size was {}, manifest declares {}",
-                                    artifact.name, hash.size_bytes, artifact.file_size_bytes
-                                ),
+                            report.errors.push(
+                                ReportIssue::new(
+                                    codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH,
+                                    format!(
+                                        "auxiliary artifact {:?} size was {}, manifest declares {}",
+                                        artifact.name, hash.size_bytes, artifact.file_size_bytes
+                                    ),
+                                )
+                                .with_artifact_name(artifact.name.as_str())
+                                .with_size_detail(artifact.file_size_bytes, hash.size_bytes),
                             );
                         }
                         if entry.reason_code.is_none() {
@@ -2020,7 +2151,7 @@ fn verify_auxiliary_artifacts(
                         }
                     }
                     Err(err) => {
-                        let code = err.code().unwrap_or("auxiliary_artifact_hash_failed");
+                        let code = err.code().unwrap_or(codes::AUXILIARY_ARTIFACT_HASH_FAILED);
                         mark_auxiliary_artifact_failed(&mut entry, code);
                         let message = if err.code().is_some() {
                             err.to_string()
@@ -2036,11 +2167,11 @@ fn verify_auxiliary_artifacts(
             }
             AuxiliaryPathResolution::OptionalAbsent => {
                 entry.state = AuxiliaryArtifactState::OptionalAbsent;
-                entry.reason_code = Some("auxiliary_artifact_optional_absent".to_string());
+                entry.reason_code = Some(codes::AUXILIARY_ARTIFACT_OPTIONAL_ABSENT.to_string());
             }
             AuxiliaryPathResolution::MissingRequired => {
                 entry.state = AuxiliaryArtifactState::MissingRequired;
-                entry.reason_code = Some("auxiliary_artifact_missing_required".to_string());
+                entry.reason_code = Some(codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED.to_string());
             }
             AuxiliaryPathResolution::Failed(code) => {
                 entry.state = AuxiliaryArtifactState::Failed;
@@ -2091,12 +2222,12 @@ fn check_auxiliary_artifact_count(
     if !report
         .errors
         .iter()
-        .any(|issue| issue.code == "auxiliary_artifact_count_limit_exceeded")
+        .any(|issue| issue.code == codes::AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED)
     {
         push_report_issue_bounded(
             &mut report.errors,
             limits,
-            "auxiliary_artifact_count_limit_exceeded",
+            codes::AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED,
             format!(
                 "auxiliary_artifacts has {count} entries, exceeding max_auxiliary_artifacts={}",
                 limits.max_auxiliary_artifacts
@@ -2132,9 +2263,13 @@ fn resolve_auxiliary_artifact_path(
     report: &mut VerificationReport,
 ) -> AuxiliaryPathResolution {
     let path = Path::new(&artifact.path);
-    if path.is_absolute() && !options.allow_absolute_paths {
+    // Same classification rule as `resolve_existing_path`: the policy gate
+    // and the mismatch rejection below keep the platform-independent manifest
+    // classification and this platform's resolution semantics aligned.
+    let manifest_absolute = is_manifest_path_absolute(&artifact.path);
+    if manifest_absolute && !options.allow_absolute_paths {
         report.error(
-            "auxiliary_artifact_absolute_path_rejected",
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_REJECTED,
             format!(
                 "absolute auxiliary artifact path {} for {:?} is rejected by default",
                 path.display(),
@@ -2142,13 +2277,27 @@ fn resolve_auxiliary_artifact_path(
             ),
         );
         return AuxiliaryPathResolution::Failed(
-            "auxiliary_artifact_absolute_path_rejected".to_string(),
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_REJECTED.to_string(),
+        );
+    }
+
+    if manifest_absolute != path.is_absolute() {
+        report.error(
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE,
+            format!(
+                "auxiliary artifact path {} for {:?} is classified absolute by manifest policy but cannot resolve as absolute on this platform; refusing to resolve it against the manifest base",
+                path.display(),
+                artifact.name
+            ),
+        );
+        return AuxiliaryPathResolution::Failed(
+            codes::AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE.to_string(),
         );
     }
 
     if !path.is_absolute() && !options.allow_path_escape && has_lexical_escape(path) {
         report.error(
-            "auxiliary_artifact_path_escape_rejected",
+            codes::AUXILIARY_ARTIFACT_PATH_ESCAPE_REJECTED,
             format!(
                 "relative auxiliary artifact path {} for {:?} escapes the manifest base",
                 path.display(),
@@ -2156,7 +2305,7 @@ fn resolve_auxiliary_artifact_path(
             ),
         );
         return AuxiliaryPathResolution::Failed(
-            "auxiliary_artifact_path_escape_rejected".to_string(),
+            codes::AUXILIARY_ARTIFACT_PATH_ESCAPE_REJECTED.to_string(),
         );
     }
 
@@ -2167,19 +2316,22 @@ fn resolve_auxiliary_artifact_path(
             return AuxiliaryPathResolution::OptionalAbsent;
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            report.error(
-                "auxiliary_artifact_missing_required",
-                format!(
-                    "required auxiliary artifact {:?} is missing at {}",
-                    artifact.name,
-                    resolved_path.display()
-                ),
+            report.errors.push(
+                ReportIssue::new(
+                    codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED,
+                    format!(
+                        "required auxiliary artifact {:?} is missing at {}",
+                        artifact.name,
+                        resolved_path.display()
+                    ),
+                )
+                .with_artifact_name(artifact.name.as_str()),
             );
             return AuxiliaryPathResolution::MissingRequired;
         }
         Err(err) => {
             report.error(
-                "auxiliary_artifact_path_unavailable",
+                codes::AUXILIARY_ARTIFACT_PATH_UNAVAILABLE,
                 format!(
                     "failed to canonicalize auxiliary artifact {:?} at {}: {err}",
                     artifact.name,
@@ -2187,7 +2339,7 @@ fn resolve_auxiliary_artifact_path(
                 ),
             );
             return AuxiliaryPathResolution::Failed(
-                "auxiliary_artifact_path_unavailable".to_string(),
+                codes::AUXILIARY_ARTIFACT_PATH_UNAVAILABLE.to_string(),
             );
         }
     };
@@ -2195,7 +2347,7 @@ fn resolve_auxiliary_artifact_path(
     if let Some(base_canonical) = base_canonical {
         if !canonical_path.starts_with(base_canonical) {
             report.error(
-                "auxiliary_artifact_path_escape_rejected",
+                codes::AUXILIARY_ARTIFACT_PATH_ESCAPE_REJECTED,
                 format!(
                     "canonical auxiliary artifact path {} for {:?} is outside manifest base {}",
                     canonical_path.display(),
@@ -2204,7 +2356,7 @@ fn resolve_auxiliary_artifact_path(
                 ),
             );
             return AuxiliaryPathResolution::Failed(
-                "auxiliary_artifact_path_escape_rejected".to_string(),
+                codes::AUXILIARY_ARTIFACT_PATH_ESCAPE_REJECTED.to_string(),
             );
         }
     }
@@ -2250,7 +2402,7 @@ fn verify_attestations(manifest: &IndexManifest, report: &mut VerificationReport
             .map(ToOwned::to_owned);
         if predicate_type.is_none() {
             report.error(
-                "attestation_predicate_type_missing",
+                codes::ATTESTATION_PREDICATE_TYPE_MISSING,
                 format!("attestation {idx} has no predicateType"),
             );
         }
@@ -2282,7 +2434,7 @@ fn verify_attestations(manifest: &IndexManifest, report: &mut VerificationReport
 
     if !any_subject_match {
         report.error(
-            "attestation_subject_sha256_mismatch",
+            codes::ATTESTATION_SUBJECT_SHA256_MISMATCH,
             "no supplied attestation subject digest matches the artifact SHA-256",
         );
     }
@@ -2344,17 +2496,89 @@ struct VerificationPathCapture {
     auxiliary_artifact_paths: Vec<Option<PathBuf>>,
 }
 
+/// Per-context issue codes for [`resolve_existing_path`], so every emitted
+/// code stays a named constant in [`codes`].
+struct PathIssueCodes {
+    absolute_path_rejected: &'static str,
+    absolute_path_unresolvable: &'static str,
+    base_dir_unavailable: &'static str,
+    path_escape_rejected: &'static str,
+    path_unavailable: &'static str,
+    /// Code for a `NotFound` canonicalize error, when this context wants that
+    /// distinguished from other I/O failures (permission denied, symlink
+    /// loop, …). `None` keeps a single `path_unavailable` code for every
+    /// error kind — used where a missing referenced file is not classified
+    /// distinctly downstream.
+    path_missing: Option<&'static str>,
+}
+
+const ARTIFACT_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
+    absolute_path_rejected: codes::ARTIFACT_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE,
+    base_dir_unavailable: codes::ARTIFACT_BASE_DIR_UNAVAILABLE,
+    path_escape_rejected: codes::ARTIFACT_PATH_ESCAPE_REJECTED,
+    path_unavailable: codes::ARTIFACT_PATH_UNAVAILABLE,
+    path_missing: Some(codes::ARTIFACT_MISSING),
+};
+
+const ROW_IDENTITY_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
+    absolute_path_rejected: codes::ROW_IDENTITY_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::ROW_IDENTITY_ABSOLUTE_PATH_UNRESOLVABLE,
+    base_dir_unavailable: codes::ROW_IDENTITY_BASE_DIR_UNAVAILABLE,
+    path_escape_rejected: codes::ROW_IDENTITY_PATH_ESCAPE_REJECTED,
+    path_unavailable: codes::ROW_IDENTITY_PATH_UNAVAILABLE,
+    path_missing: Some(codes::ROW_IDENTITY_MISSING),
+};
+
+const ENCODER_DISTORTION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
+    absolute_path_rejected: codes::ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE,
+    base_dir_unavailable: codes::ENCODER_DISTORTION_PROFILE_BASE_DIR_UNAVAILABLE,
+    path_escape_rejected: codes::ENCODER_DISTORTION_PROFILE_PATH_ESCAPE_REJECTED,
+    path_unavailable: codes::ENCODER_DISTORTION_PROFILE_PATH_UNAVAILABLE,
+    path_missing: None,
+};
+
+const CALIBRATION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
+    absolute_path_rejected: codes::CALIBRATION_PROFILE_ABSOLUTE_PATH_REJECTED,
+    absolute_path_unresolvable: codes::CALIBRATION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE,
+    base_dir_unavailable: codes::CALIBRATION_PROFILE_BASE_DIR_UNAVAILABLE,
+    path_escape_rejected: codes::CALIBRATION_PROFILE_PATH_ESCAPE_REJECTED,
+    path_unavailable: codes::CALIBRATION_PROFILE_PATH_UNAVAILABLE,
+    path_missing: None,
+};
+
 fn resolve_existing_path(
     path: &Path,
     base_dir: &Path,
     options: &VerifyOptions,
-    context: &str,
+    issue_codes: &PathIssueCodes,
     errors: &mut Vec<ReportIssue>,
 ) -> Option<ResolvedPath> {
-    if path.is_absolute() && !options.allow_absolute_paths {
+    // Policy classification uses the platform-independent manifest rule, not
+    // `Path::is_absolute`, so an absolute-for-policy path can never dodge the
+    // `allow_absolute_paths` gate on a platform whose native semantics would
+    // read it as relative (e.g. `C:/...` or UNC on Unix, `/...` on Windows).
+    let manifest_absolute = is_manifest_path_absolute(&path.to_string_lossy());
+    if manifest_absolute && !options.allow_absolute_paths {
         errors.push(ReportIssue::new(
-            format!("{context}_absolute_path_rejected"),
+            issue_codes.absolute_path_rejected,
             format!("absolute path {} is rejected by default", path.display()),
+        ));
+        return None;
+    }
+
+    // A path classified absolute for policy purposes must never silently
+    // resolve relative to the manifest base (or vice versa): when the
+    // manifest classification and this platform's semantics disagree, reject
+    // outright instead of resolving inconsistently across OSes.
+    if manifest_absolute != path.is_absolute() {
+        errors.push(ReportIssue::new(
+            issue_codes.absolute_path_unresolvable,
+            format!(
+                "path {} is classified absolute by manifest policy but cannot resolve as absolute on this platform; refusing to resolve it against the manifest base",
+                path.display()
+            ),
         ));
         return None;
     }
@@ -2363,7 +2587,7 @@ fn resolve_existing_path(
         Ok(path) => path,
         Err(err) => {
             errors.push(ReportIssue::new(
-                format!("{context}_base_dir_unavailable"),
+                issue_codes.base_dir_unavailable,
                 format!(
                     "failed to canonicalize base_dir {}: {err}",
                     base_dir.display()
@@ -2375,7 +2599,7 @@ fn resolve_existing_path(
 
     if !path.is_absolute() && !options.allow_path_escape && has_lexical_escape(path) {
         errors.push(ReportIssue::new(
-            format!("{context}_path_escape_rejected"),
+            issue_codes.path_escape_rejected,
             format!("relative path {} escapes the manifest base", path.display()),
         ));
         return None;
@@ -2389,8 +2613,16 @@ fn resolve_existing_path(
     let canonical_path = match fs::canonicalize(&resolved_path) {
         Ok(path) => path,
         Err(err) => {
+            // Distinguish an absent file (NotFound) from other canonicalize
+            // failures (permission denied, symlink loop, I/O) when this
+            // context asks for it, so a downstream consumer branching on the
+            // typed code never reads a permission error as a missing file.
+            let code = match issue_codes.path_missing {
+                Some(missing) if err.kind() == io::ErrorKind::NotFound => missing,
+                _ => issue_codes.path_unavailable,
+            };
             errors.push(ReportIssue::new(
-                format!("{context}_path_unavailable"),
+                code,
                 format!("failed to canonicalize {}: {err}", resolved_path.display()),
             ));
             return None;
@@ -2399,7 +2631,7 @@ fn resolve_existing_path(
 
     if !options.allow_path_escape && !canonical_path.starts_with(&base_canonical) {
         errors.push(ReportIssue::new(
-            format!("{context}_path_escape_rejected"),
+            issue_codes.path_escape_rejected,
             format!(
                 "canonical path {} is outside manifest base {}",
                 canonical_path.display(),
@@ -2442,8 +2674,6 @@ fn is_true(value: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct IndexManifest {
     pub schema_version: String,
-    pub manifest_id: String,
-    pub created_at: String,
     pub artifact: Artifact,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auxiliary_artifacts: Vec<AuxiliaryArtifact>,
@@ -2841,10 +3071,10 @@ enum UnsupportedCoreMetadata {
 impl UnsupportedCoreMetadata {
     fn code(self) -> &'static str {
         match self {
-            Self::Kind(_) => "artifact_kind_unsupported",
-            Self::Params(_) => "artifact_params_unsupported",
-            Self::RegistryMissing(_) => "artifact_format_registry_missing",
-            Self::ManifestNotCovered { .. } => "artifact_manifest_coverage_unsupported",
+            Self::Kind(_) => codes::ARTIFACT_KIND_UNSUPPORTED,
+            Self::Params(_) => codes::ARTIFACT_PARAMS_UNSUPPORTED,
+            Self::RegistryMissing(_) => codes::ARTIFACT_FORMAT_REGISTRY_MISSING,
+            Self::ManifestNotCovered { .. } => codes::ARTIFACT_MANIFEST_COVERAGE_UNSUPPORTED,
         }
     }
 
@@ -3269,7 +3499,6 @@ fn report_issue_summary(errors: &[ReportIssue]) -> String {
 pub struct VerificationReport {
     pub ok: bool,
     pub checked_at: String,
-    pub manifest_id: Option<String>,
     pub artifact: ArtifactReport,
     #[serde(default)]
     pub auxiliary_artifacts: Vec<AuxiliaryArtifactReport>,
@@ -3284,11 +3513,10 @@ pub struct VerificationReport {
 }
 
 impl VerificationReport {
-    fn new(manifest_id: Option<String>) -> Self {
+    fn new() -> Self {
         Self {
             ok: false,
             checked_at: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            manifest_id,
             artifact: ArtifactReport::default(),
             auxiliary_artifacts: Vec::new(),
             row_identity: RowIdentityReport::default(),
@@ -3414,10 +3642,338 @@ pub struct AttestationShapeCheck {
     pub subject_sha256_matched: bool,
 }
 
+/// Stable machine-readable issue codes.
+///
+/// Every code emitted through [`crate::ReportIssue`] (including
+/// [`crate::AuxiliaryArtifactReport`] reason codes and
+/// [`crate::ManifestError::LimitExceeded`]) is named here so downstream
+/// consumers can branch on constants instead of retyping string literals.
+pub mod codes {
+    pub const ARTIFACT_ABSOLUTE_PATH_REJECTED: &str = "artifact_absolute_path_rejected";
+    pub const ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE: &str = "artifact_absolute_path_unresolvable";
+    pub const ARTIFACT_BASE_DIR_UNAVAILABLE: &str = "artifact_base_dir_unavailable";
+    pub const ARTIFACT_BYTES_PER_VEC_MISMATCH: &str = "artifact_bytes_per_vec_mismatch";
+    pub const ARTIFACT_BYTES_PER_VEC_ZERO: &str = "artifact_bytes_per_vec_zero";
+    pub const ARTIFACT_DIM_MISMATCH: &str = "artifact_dim_mismatch";
+    pub const ARTIFACT_EMBEDDING_DIM_MISMATCH: &str = "artifact_embedding_dim_mismatch";
+    pub const ARTIFACT_FILE_SIZE_MISMATCH: &str = "artifact_file_size_mismatch";
+    pub const ARTIFACT_FILE_SIZE_ZERO: &str = "artifact_file_size_zero";
+    pub const ARTIFACT_FILE_TOO_LARGE: &str = "artifact_file_too_large";
+    pub const ARTIFACT_FORMAT_REGISTRY_MISSING: &str = "artifact_format_registry_missing";
+    pub const ARTIFACT_FORMAT_VERSION_MISMATCH: &str = "artifact_format_version_mismatch";
+    pub const ARTIFACT_HASH_FAILED: &str = "artifact_hash_failed";
+    pub const ARTIFACT_KIND_MISMATCH: &str = "artifact_kind_mismatch";
+    pub const ARTIFACT_KIND_UNSUPPORTED: &str = "artifact_kind_unsupported";
+    pub const ARTIFACT_MANIFEST_COVERAGE_UNSUPPORTED: &str =
+        "artifact_manifest_coverage_unsupported";
+    pub const ARTIFACT_METADATA_FILE_SIZE_MISMATCH: &str = "artifact_metadata_file_size_mismatch";
+    pub const ARTIFACT_MISSING: &str = "artifact_missing";
+    pub const ARTIFACT_PARAMS_KIND_MISMATCH: &str = "artifact_params_kind_mismatch";
+    pub const ARTIFACT_PARAMS_MISMATCH: &str = "artifact_params_mismatch";
+    pub const ARTIFACT_PARAMS_UNSUPPORTED: &str = "artifact_params_unsupported";
+    pub const ARTIFACT_PATH_EMPTY: &str = "artifact_path_empty";
+    pub const ARTIFACT_PATH_ESCAPE_REJECTED: &str = "artifact_path_escape_rejected";
+    pub const ARTIFACT_PATH_NOT_CANONICAL: &str = "artifact_path_not_canonical";
+    pub const ARTIFACT_PATH_UNAVAILABLE: &str = "artifact_path_unavailable";
+    pub const ARTIFACT_PROBE_FAILED: &str = "artifact_probe_failed";
+    pub const ARTIFACT_ROW_COUNT_MISMATCH: &str = "artifact_row_count_mismatch";
+    pub const ARTIFACT_SHA256_INVALID: &str = "artifact_sha256_invalid";
+    pub const ARTIFACT_SHA256_MISMATCH: &str = "artifact_sha256_mismatch";
+    pub const ARTIFACT_VECTOR_COUNT_MISMATCH: &str = "artifact_vector_count_mismatch";
+    pub const ATTESTATION_PREDICATE_TYPE_MISSING: &str = "attestation_predicate_type_missing";
+    pub const ATTESTATION_SUBJECT_SHA256_MISMATCH: &str = "attestation_subject_sha256_mismatch";
+    pub const AUXILIARY_ARTIFACT_ABSOLUTE_PATH_REJECTED: &str =
+        "auxiliary_artifact_absolute_path_rejected";
+    pub const AUXILIARY_ARTIFACT_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "auxiliary_artifact_absolute_path_unresolvable";
+    pub const AUXILIARY_ARTIFACT_BASE_DIR_UNAVAILABLE: &str =
+        "auxiliary_artifact_base_dir_unavailable";
+    pub const AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED: &str =
+        "auxiliary_artifact_count_limit_exceeded";
+    pub const AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH: &str = "auxiliary_artifact_file_size_mismatch";
+    pub const AUXILIARY_ARTIFACT_FILE_SIZE_ZERO: &str = "auxiliary_artifact_file_size_zero";
+    pub const AUXILIARY_ARTIFACT_FILE_TOO_LARGE: &str = "auxiliary_artifact_file_too_large";
+    pub const AUXILIARY_ARTIFACT_HASH_FAILED: &str = "auxiliary_artifact_hash_failed";
+    pub const AUXILIARY_ARTIFACT_MISSING_REQUIRED: &str = "auxiliary_artifact_missing_required";
+    pub const AUXILIARY_ARTIFACT_NAME_DUPLICATE: &str = "auxiliary_artifact_name_duplicate";
+    pub const AUXILIARY_ARTIFACT_NAME_EMPTY: &str = "auxiliary_artifact_name_empty";
+    pub const AUXILIARY_ARTIFACT_NAME_NOT_TRIMMED: &str = "auxiliary_artifact_name_not_trimmed";
+    pub const AUXILIARY_ARTIFACT_OPTIONAL_ABSENT: &str = "auxiliary_artifact_optional_absent";
+    pub const AUXILIARY_ARTIFACT_PATH_EMPTY: &str = "auxiliary_artifact_path_empty";
+    pub const AUXILIARY_ARTIFACT_PATH_ESCAPE_REJECTED: &str =
+        "auxiliary_artifact_path_escape_rejected";
+    pub const AUXILIARY_ARTIFACT_PATH_NOT_CANONICAL: &str = "auxiliary_artifact_path_not_canonical";
+    pub const AUXILIARY_ARTIFACT_PATH_UNAVAILABLE: &str = "auxiliary_artifact_path_unavailable";
+    pub const AUXILIARY_ARTIFACT_SHA256_INVALID: &str = "auxiliary_artifact_sha256_invalid";
+    pub const AUXILIARY_ARTIFACT_SHA256_MISMATCH: &str = "auxiliary_artifact_sha256_mismatch";
+    pub const BUILD_BUILDER_ID_EMPTY: &str = "build_builder_id_empty";
+    pub const BUILD_CI_PROVIDER_EMPTY: &str = "build_ci_provider_empty";
+    pub const BUILD_CI_RUN_ID_EMPTY: &str = "build_ci_run_id_empty";
+    pub const BUILD_INVOCATION_ID_EMPTY: &str = "build_invocation_id_empty";
+    pub const BUILD_SOURCE_COMMIT_EMPTY: &str = "build_source_commit_empty";
+    pub const BUILD_SOURCE_REPO_EMPTY: &str = "build_source_repo_empty";
+    pub const CALIBRATION_CREATED_AT_INVALID: &str = "calibration_created_at_invalid";
+    pub const CALIBRATION_ENCODER_DIM_MISMATCH: &str = "calibration_encoder_dim_mismatch";
+    pub const CALIBRATION_ENCODER_DIM_ZERO: &str = "calibration_encoder_dim_zero";
+    pub const CALIBRATION_ENCODER_MODEL_EMPTY: &str = "calibration_encoder_model_empty";
+    pub const CALIBRATION_ENCODER_MODEL_MISMATCH: &str = "calibration_encoder_model_mismatch";
+    pub const CALIBRATION_ENCODER_MODEL_REVISION_EMPTY: &str =
+        "calibration_encoder_model_revision_empty";
+    pub const CALIBRATION_ENCODER_MODEL_REVISION_MISMATCH: &str =
+        "calibration_encoder_model_revision_mismatch";
+    pub const CALIBRATION_ENCODER_NORMALIZATION_EMPTY: &str =
+        "calibration_encoder_normalization_empty";
+    pub const CALIBRATION_ENCODER_NORMALIZATION_MISMATCH: &str =
+        "calibration_encoder_normalization_mismatch";
+    pub const CALIBRATION_NULL_MODEL_ORDINALIZATION_MISMATCH: &str =
+        "calibration_null_model_ordinalization_mismatch";
+    pub const CALIBRATION_NULL_NAME_EMPTY: &str = "calibration_null_name_empty";
+    pub const CALIBRATION_NULL_PARAMETERIZATION_EMPTY: &str =
+        "calibration_null_parameterization_empty";
+    pub const CALIBRATION_NULL_PARAMETERIZATION_MISMATCH: &str =
+        "calibration_null_parameterization_mismatch";
+    pub const CALIBRATION_NULL_STATISTIC_EMPTY: &str = "calibration_null_statistic_empty";
+    pub const CALIBRATION_ORDINALIZATION_ARTIFACT_MISMATCH: &str =
+        "calibration_ordinalization_artifact_mismatch";
+    pub const CALIBRATION_ORDINALIZATION_DIM_MISMATCH: &str =
+        "calibration_ordinalization_dim_mismatch";
+    pub const CALIBRATION_ORDINALIZATION_DIM_ZERO: &str = "calibration_ordinalization_dim_zero";
+    pub const CALIBRATION_PROFILE_ABSOLUTE_PATH_REJECTED: &str =
+        "calibration_profile_absolute_path_rejected";
+    pub const CALIBRATION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "calibration_profile_absolute_path_unresolvable";
+    pub const CALIBRATION_PROFILE_BASE_DIR_UNAVAILABLE: &str =
+        "calibration_profile_base_dir_unavailable";
+    pub const CALIBRATION_PROFILE_DIM_MISMATCH: &str = "calibration_profile_dim_mismatch";
+    pub const CALIBRATION_PROFILE_FILE_SIZE_MISMATCH: &str =
+        "calibration_profile_file_size_mismatch";
+    pub const CALIBRATION_PROFILE_FILE_SIZE_ZERO: &str = "calibration_profile_file_size_zero";
+    pub const CALIBRATION_PROFILE_FORMAT_EMPTY: &str = "calibration_profile_format_empty";
+    pub const CALIBRATION_PROFILE_HASH_FAILED: &str = "calibration_profile_hash_failed";
+    pub const CALIBRATION_PROFILE_ID_EMPTY: &str = "calibration_profile_id_empty";
+    pub const CALIBRATION_PROFILE_PARAMETERIZATION_ORDINALIZATION_MISMATCH: &str =
+        "calibration_profile_parameterization_ordinalization_mismatch";
+    pub const CALIBRATION_PROFILE_PATH_EMPTY: &str = "calibration_profile_path_empty";
+    pub const CALIBRATION_PROFILE_PATH_ESCAPE_REJECTED: &str =
+        "calibration_profile_path_escape_rejected";
+    pub const CALIBRATION_PROFILE_PATH_NOT_CANONICAL: &str =
+        "calibration_profile_path_not_canonical";
+    pub const CALIBRATION_PROFILE_PATH_UNAVAILABLE: &str = "calibration_profile_path_unavailable";
+    pub const CALIBRATION_PROFILE_REQUIRED: &str = "calibration_profile_required";
+    pub const CALIBRATION_PROFILE_SAMPLE_COUNT_ZERO: &str = "calibration_profile_sample_count_zero";
+    pub const CALIBRATION_PROFILE_SHA256_INVALID: &str = "calibration_profile_sha256_invalid";
+    pub const CALIBRATION_PROFILE_SHA256_MISMATCH: &str = "calibration_profile_sha256_mismatch";
+    pub const CALIBRATION_PROFILE_SHAPE_MISMATCH: &str = "calibration_profile_shape_mismatch";
+    pub const CALIBRATION_PROFILE_SOURCE_DIGEST_INVALID: &str =
+        "calibration_profile_source_digest_invalid";
+    pub const CALIBRATION_PROFILE_TOO_LARGE: &str = "calibration_profile_too_large";
+    pub const CALIBRATION_PROFILE_UNEXPECTED: &str = "calibration_profile_unexpected";
+    pub const CALIBRATION_SCHEMA_VERSION_UNSUPPORTED: &str =
+        "calibration_schema_version_unsupported";
+    pub const EMBEDDING_CORPUS_DIGEST_INVALID: &str = "embedding_corpus_digest_invalid";
+    pub const EMBEDDING_DIM_ZERO: &str = "embedding_dim_zero";
+    pub const EMBEDDING_MATRIX_DIGEST_INVALID: &str = "embedding_matrix_digest_invalid";
+    pub const EMBEDDING_MODEL_EMPTY: &str = "embedding_model_empty";
+    pub const EMBEDDING_MODEL_REVISION_EMPTY: &str = "embedding_model_revision_empty";
+    pub const EMBEDDING_NORMALIZATION_EMPTY: &str = "embedding_normalization_empty";
+    pub const EMBEDDING_POOLING_EMPTY: &str = "embedding_pooling_empty";
+    pub const EMBEDDING_TOKENIZER_REVISION_EMPTY: &str = "embedding_tokenizer_revision_empty";
+    pub const ENCODER_DISTORTION_BOUNDS_EMPTY: &str = "encoder_distortion_bounds_empty";
+    pub const ENCODER_DISTORTION_BOUNDS_ORDER_INVALID: &str =
+        "encoder_distortion_bounds_order_invalid";
+    pub const ENCODER_DISTORTION_CALIBRATION_MISSING: &str =
+        "encoder_distortion_calibration_missing";
+    pub const ENCODER_DISTORTION_CALIBRATION_PROFILE_ID_EMPTY: &str =
+        "encoder_distortion_calibration_profile_id_empty";
+    pub const ENCODER_DISTORTION_CALIBRATION_PROFILE_ID_WHITESPACE: &str =
+        "encoder_distortion_calibration_profile_id_whitespace";
+    pub const ENCODER_DISTORTION_CALIBRATION_PROFILE_MISMATCH: &str =
+        "encoder_distortion_calibration_profile_mismatch";
+    pub const ENCODER_DISTORTION_CREATED_AT_INVALID: &str = "encoder_distortion_created_at_invalid";
+    pub const ENCODER_DISTORTION_DISTORTION_MISMATCH: &str =
+        "encoder_distortion_distortion_mismatch";
+    pub const ENCODER_DISTORTION_EMBEDDING_METRIC_DIGEST_INVALID: &str =
+        "encoder_distortion_embedding_metric_digest_invalid";
+    pub const ENCODER_DISTORTION_EMBEDDING_METRIC_NAME_EMPTY: &str =
+        "encoder_distortion_embedding_metric_name_empty";
+    pub const ENCODER_DISTORTION_EMBEDDING_METRIC_VERSION_EMPTY: &str =
+        "encoder_distortion_embedding_metric_version_empty";
+    pub const ENCODER_DISTORTION_ENCODER_DIM_MISMATCH: &str =
+        "encoder_distortion_encoder_dim_mismatch";
+    pub const ENCODER_DISTORTION_ENCODER_DIM_ZERO: &str = "encoder_distortion_encoder_dim_zero";
+    pub const ENCODER_DISTORTION_ENCODER_MODEL_EMPTY: &str =
+        "encoder_distortion_encoder_model_empty";
+    pub const ENCODER_DISTORTION_ENCODER_MODEL_MISMATCH: &str =
+        "encoder_distortion_encoder_model_mismatch";
+    pub const ENCODER_DISTORTION_ENCODER_MODEL_REVISION_EMPTY: &str =
+        "encoder_distortion_encoder_model_revision_empty";
+    pub const ENCODER_DISTORTION_ENCODER_MODEL_REVISION_MISMATCH: &str =
+        "encoder_distortion_encoder_model_revision_mismatch";
+    pub const ENCODER_DISTORTION_ENCODER_NORMALIZATION_EMPTY: &str =
+        "encoder_distortion_encoder_normalization_empty";
+    pub const ENCODER_DISTORTION_ENCODER_NORMALIZATION_MISMATCH: &str =
+        "encoder_distortion_encoder_normalization_mismatch";
+    pub const ENCODER_DISTORTION_ESTIMATED_DISTORTION_INVALID: &str =
+        "encoder_distortion_estimated_distortion_invalid";
+    pub const ENCODER_DISTORTION_EVIDENCE_ESTIMATOR_HASH_INVALID: &str =
+        "encoder_distortion_evidence_estimator_hash_invalid";
+    pub const ENCODER_DISTORTION_EVIDENCE_ESTIMATOR_ID_EMPTY: &str =
+        "encoder_distortion_evidence_estimator_id_empty";
+    pub const ENCODER_DISTORTION_LOWER_BOUND_INVALID: &str =
+        "encoder_distortion_lower_bound_invalid";
+    pub const ENCODER_DISTORTION_MAX_OBSERVED_VIOLATION_INVALID: &str =
+        "encoder_distortion_max_observed_violation_invalid";
+    pub const ENCODER_DISTORTION_POOLING_EMPTY: &str = "encoder_distortion_pooling_empty";
+    pub const ENCODER_DISTORTION_POOLING_MISMATCH: &str = "encoder_distortion_pooling_mismatch";
+    pub const ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_REJECTED: &str =
+        "encoder_distortion_profile_absolute_path_rejected";
+    pub const ENCODER_DISTORTION_PROFILE_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "encoder_distortion_profile_absolute_path_unresolvable";
+    pub const ENCODER_DISTORTION_PROFILE_BASE_DIR_UNAVAILABLE: &str =
+        "encoder_distortion_profile_base_dir_unavailable";
+    pub const ENCODER_DISTORTION_PROFILE_FILE_SIZE_MISMATCH: &str =
+        "encoder_distortion_profile_file_size_mismatch";
+    pub const ENCODER_DISTORTION_PROFILE_FILE_SIZE_ZERO: &str =
+        "encoder_distortion_profile_file_size_zero";
+    pub const ENCODER_DISTORTION_PROFILE_FORMAT_EMPTY: &str =
+        "encoder_distortion_profile_format_empty";
+    pub const ENCODER_DISTORTION_PROFILE_HASH_FAILED: &str =
+        "encoder_distortion_profile_hash_failed";
+    pub const ENCODER_DISTORTION_PROFILE_ID_EMPTY: &str = "encoder_distortion_profile_id_empty";
+    pub const ENCODER_DISTORTION_PROFILE_PATH_EMPTY: &str = "encoder_distortion_profile_path_empty";
+    pub const ENCODER_DISTORTION_PROFILE_PATH_ESCAPE_REJECTED: &str =
+        "encoder_distortion_profile_path_escape_rejected";
+    pub const ENCODER_DISTORTION_PROFILE_PATH_NOT_CANONICAL: &str =
+        "encoder_distortion_profile_path_not_canonical";
+    pub const ENCODER_DISTORTION_PROFILE_PATH_UNAVAILABLE: &str =
+        "encoder_distortion_profile_path_unavailable";
+    pub const ENCODER_DISTORTION_PROFILE_REQUIRED: &str = "encoder_distortion_profile_required";
+    pub const ENCODER_DISTORTION_PROFILE_SHA256_INVALID: &str =
+        "encoder_distortion_profile_sha256_invalid";
+    pub const ENCODER_DISTORTION_PROFILE_SHA256_MISMATCH: &str =
+        "encoder_distortion_profile_sha256_mismatch";
+    pub const ENCODER_DISTORTION_PROFILE_SOURCE_DIGEST_INVALID: &str =
+        "encoder_distortion_profile_source_digest_invalid";
+    pub const ENCODER_DISTORTION_PROFILE_TOO_LARGE: &str = "encoder_distortion_profile_too_large";
+    pub const ENCODER_DISTORTION_QUANTILE_OBSERVED_VIOLATION_INVALID: &str =
+        "encoder_distortion_quantile_observed_violation_invalid";
+    pub const ENCODER_DISTORTION_SCHEMA_VERSION_UNSUPPORTED: &str =
+        "encoder_distortion_schema_version_unsupported";
+    pub const ENCODER_DISTORTION_SCOPE_CONFIDENCE_INVALID: &str =
+        "encoder_distortion_scope_confidence_invalid";
+    pub const ENCODER_DISTORTION_SCOPE_CORPUS_DIGEST_INVALID: &str =
+        "encoder_distortion_scope_corpus_digest_invalid";
+    pub const ENCODER_DISTORTION_SCOPE_COVERAGE_INVALID: &str =
+        "encoder_distortion_scope_coverage_invalid";
+    pub const ENCODER_DISTORTION_SCOPE_DOMAIN_EMPTY: &str = "encoder_distortion_scope_domain_empty";
+    pub const ENCODER_DISTORTION_SCOPE_ESTIMATOR_VERSION_EMPTY: &str =
+        "encoder_distortion_scope_estimator_version_empty";
+    pub const ENCODER_DISTORTION_SCOPE_PAIR_SAMPLE_DIGEST_INVALID: &str =
+        "encoder_distortion_scope_pair_sample_digest_invalid";
+    pub const ENCODER_DISTORTION_SCOPE_QUERY_SET_DIGEST_INVALID: &str =
+        "encoder_distortion_scope_query_set_digest_invalid";
+    pub const ENCODER_DISTORTION_SCOPE_SAMPLE_SIZE_ZERO: &str =
+        "encoder_distortion_scope_sample_size_zero";
+    pub const ENCODER_DISTORTION_SOURCE_METRIC_DIGEST_INVALID: &str =
+        "encoder_distortion_source_metric_digest_invalid";
+    pub const ENCODER_DISTORTION_SOURCE_METRIC_NAME_EMPTY: &str =
+        "encoder_distortion_source_metric_name_empty";
+    pub const ENCODER_DISTORTION_SOURCE_METRIC_VERSION_EMPTY: &str =
+        "encoder_distortion_source_metric_version_empty";
+    pub const ENCODER_DISTORTION_TOKENIZER_REVISION_EMPTY: &str =
+        "encoder_distortion_tokenizer_revision_empty";
+    pub const ENCODER_DISTORTION_TOKENIZER_REVISION_MISMATCH: &str =
+        "encoder_distortion_tokenizer_revision_mismatch";
+    pub const ENCODER_DISTORTION_UPPER_BOUND_INVALID: &str =
+        "encoder_distortion_upper_bound_invalid";
+    pub const ENCODER_DISTORTION_VIOLATION_RATE_INVALID: &str =
+        "encoder_distortion_violation_rate_invalid";
+    pub const EXTENSION_KEY_NOT_NAMESPACED: &str = "extension_key_not_namespaced";
+    pub const MANIFEST_FILE_TOO_LARGE: &str = "manifest_file_too_large";
+    pub const ROW_IDENTITY_ABSOLUTE_PATH_REJECTED: &str = "row_identity_absolute_path_rejected";
+    pub const ROW_IDENTITY_ABSOLUTE_PATH_UNRESOLVABLE: &str =
+        "row_identity_absolute_path_unresolvable";
+    pub const ROW_IDENTITY_BASE_DIR_UNAVAILABLE: &str = "row_identity_base_dir_unavailable";
+    pub const ROW_IDENTITY_DB_ID_CONTAINS_NUL: &str = "row_identity_db_id_contains_nul";
+    pub const ROW_IDENTITY_DB_ID_EMPTY: &str = "row_identity_db_id_empty";
+    pub const ROW_IDENTITY_DB_ID_INVALID_UUID: &str = "row_identity_db_id_invalid_uuid";
+    pub const ROW_IDENTITY_DB_UNSUPPORTED: &str = "row_identity_db_unsupported";
+    pub const ROW_IDENTITY_DUPLICATE_DB_ID: &str = "row_identity_duplicate_db_id";
+    pub const ROW_IDENTITY_DUPLICATE_TRACKING_LIMIT_EXCEEDED: &str =
+        "row_identity_duplicate_tracking_limit_exceeded";
+    pub const ROW_IDENTITY_ID_KIND_UNSUPPORTED: &str = "row_identity_id_kind_unsupported";
+    pub const ROW_IDENTITY_JSONL_INVALID_JSON: &str = "row_identity_jsonl_invalid_json";
+    pub const ROW_IDENTITY_LINE_TOO_LARGE: &str = "row_identity_line_too_large";
+    pub const ROW_IDENTITY_MISSING: &str = "row_identity_missing";
+    pub const ROW_IDENTITY_PARENT_ID_CONTAINS_NUL: &str = "row_identity_parent_id_contains_nul";
+    pub const ROW_IDENTITY_PARENT_ID_EMPTY: &str = "row_identity_parent_id_empty";
+    pub const ROW_IDENTITY_PARENT_ID_INVALID_UUID: &str = "row_identity_parent_id_invalid_uuid";
+    pub const ROW_IDENTITY_PATH_EMPTY: &str = "row_identity_path_empty";
+    pub const ROW_IDENTITY_PATH_ESCAPE_REJECTED: &str = "row_identity_path_escape_rejected";
+    pub const ROW_IDENTITY_PATH_NOT_CANONICAL: &str = "row_identity_path_not_canonical";
+    pub const ROW_IDENTITY_PATH_UNAVAILABLE: &str = "row_identity_path_unavailable";
+    pub const ROW_IDENTITY_READ_FAILED: &str = "row_identity_read_failed";
+    pub const ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED: &str = "row_identity_row_count_limit_exceeded";
+    pub const ROW_IDENTITY_ROW_COUNT_MISMATCH: &str = "row_identity_row_count_mismatch";
+    pub const ROW_IDENTITY_ROW_ID_MISMATCH: &str = "row_identity_row_id_mismatch";
+    pub const ROW_IDENTITY_SHA256_INVALID: &str = "row_identity_sha256_invalid";
+    pub const ROW_IDENTITY_SHA256_MISMATCH: &str = "row_identity_sha256_mismatch";
+    pub const SCHEMA_VERSION_UNSUPPORTED: &str = "schema_version_unsupported";
+    pub const SQLITE_ACTIVATION_FORCED: &str = "sqlite_activation_forced";
+    pub const SQLITE_CACHED_REPORT_TOO_LARGE: &str = "sqlite_cached_report_too_large";
+    pub const VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED: &str =
+        "verification_report_issue_limit_exceeded";
+}
+
+/// Typed classification of [`ReportIssue::code`] values so downstream
+/// security code can branch on enum variants instead of string compares.
+///
+/// The integrity-mismatch, missing-mandatory-file, schema-version, and
+/// resource-limit code families are classified into typed variants. Every
+/// other code maps to [`VerificationCode::Unknown`] — including the
+/// path-policy rejections (absolute / escape / non-canonical) and the
+/// diagnostic I/O failures (`*_path_unavailable`, `*_hash_failed`), which are
+/// deliberately not distinguished as typed variants. The enum is
+/// [`#[non_exhaustive]`](https://doc.rust-lang.org/reference/attributes/type_system.html),
+/// so treat `Unknown` as the required catch-all. Manifest parse failures never
+/// reach a report (they surface as [`ManifestError`]), so the schema family
+/// covers only the in-report [`codes::SCHEMA_VERSION_UNSUPPORTED`] check.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VerificationCode {
+    ArtifactSha256Mismatch,
+    ArtifactFileSizeMismatch,
+    ArtifactMissing,
+    AuxiliarySha256Mismatch,
+    AuxiliaryFileSizeMismatch,
+    AuxiliaryMissingRequired,
+    RowIdentitySha256Mismatch,
+    RowIdentityRowCountMismatch,
+    RowIdentityMissing,
+    ManifestSchema,
+    ResourceLimit,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReportIssue {
     pub code: String,
     pub message: String,
+    /// Auxiliary artifact name the issue refers to, when one applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_name: Option<String>,
+    /// Manifest-declared SHA-256 for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    /// Observed SHA-256 for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_sha256: Option<String>,
+    /// Manifest-declared byte size for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
+    /// Observed byte size for mismatch issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_size_bytes: Option<u64>,
 }
 
 impl ReportIssue {
@@ -3425,6 +3981,64 @@ impl ReportIssue {
         Self {
             code: code.into(),
             message: message.into(),
+            artifact_name: None,
+            expected_sha256: None,
+            actual_sha256: None,
+            expected_size_bytes: None,
+            actual_size_bytes: None,
+        }
+    }
+
+    pub fn with_artifact_name(mut self, name: impl Into<String>) -> Self {
+        self.artifact_name = Some(name.into());
+        self
+    }
+
+    pub fn with_sha256_detail(
+        mut self,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        self.expected_sha256 = Some(expected.into());
+        self.actual_sha256 = Some(actual.into());
+        self
+    }
+
+    pub fn with_size_detail(mut self, expected: u64, actual: u64) -> Self {
+        self.expected_size_bytes = Some(expected);
+        self.actual_size_bytes = Some(actual);
+        self
+    }
+
+    /// Maps this issue's code onto the typed [`VerificationCode`] families.
+    pub fn classification(&self) -> VerificationCode {
+        match self.code.as_str() {
+            codes::ARTIFACT_SHA256_MISMATCH => VerificationCode::ArtifactSha256Mismatch,
+            codes::ARTIFACT_FILE_SIZE_MISMATCH => VerificationCode::ArtifactFileSizeMismatch,
+            codes::ARTIFACT_MISSING => VerificationCode::ArtifactMissing,
+            codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH => VerificationCode::AuxiliarySha256Mismatch,
+            codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH => {
+                VerificationCode::AuxiliaryFileSizeMismatch
+            }
+            codes::AUXILIARY_ARTIFACT_MISSING_REQUIRED => {
+                VerificationCode::AuxiliaryMissingRequired
+            }
+            codes::ROW_IDENTITY_SHA256_MISMATCH => VerificationCode::RowIdentitySha256Mismatch,
+            codes::ROW_IDENTITY_ROW_COUNT_MISMATCH => VerificationCode::RowIdentityRowCountMismatch,
+            codes::ROW_IDENTITY_MISSING => VerificationCode::RowIdentityMissing,
+            codes::SCHEMA_VERSION_UNSUPPORTED => VerificationCode::ManifestSchema,
+            codes::MANIFEST_FILE_TOO_LARGE
+            | codes::ARTIFACT_FILE_TOO_LARGE
+            | codes::AUXILIARY_ARTIFACT_FILE_TOO_LARGE
+            | codes::AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED
+            | codes::CALIBRATION_PROFILE_TOO_LARGE
+            | codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE
+            | codes::ROW_IDENTITY_LINE_TOO_LARGE
+            | codes::ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED
+            | codes::ROW_IDENTITY_DUPLICATE_TRACKING_LIMIT_EXCEEDED
+            | codes::SQLITE_CACHED_REPORT_TOO_LARGE
+            | codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED => VerificationCode::ResourceLimit,
+            _ => VerificationCode::Unknown,
         }
     }
 }
@@ -3442,14 +4056,14 @@ fn push_report_issue_bounded(
     }
     if errors
         .iter()
-        .any(|issue| issue.code == "verification_report_issue_limit_exceeded")
+        .any(|issue| issue.code == codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED)
     {
         return;
     }
     let detail_limit = limit.saturating_sub(1);
     errors.truncate(detail_limit);
     errors.push(ReportIssue::new(
-        "verification_report_issue_limit_exceeded",
+        codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED,
         format!("verification report issue count exceeded max_report_issues={limit}"),
     ));
 }
@@ -3459,11 +4073,11 @@ fn enforce_report_issue_limit(errors: &mut Vec<ReportIssue>, limits: &ResourceLi
     if errors.len() <= limit {
         return;
     }
-    errors.retain(|issue| issue.code != "verification_report_issue_limit_exceeded");
+    errors.retain(|issue| issue.code != codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED);
     let detail_limit = limit.saturating_sub(1);
     errors.truncate(detail_limit);
     errors.push(ReportIssue::new(
-        "verification_report_issue_limit_exceeded",
+        codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED,
         format!("verification report issue count exceeded max_report_issues={limit}"),
     ));
 }
@@ -3497,6 +4111,64 @@ pub fn sha256_file(path: impl AsRef<Path>) -> io::Result<FileHash> {
     })
 }
 
+/// Hashes an in-memory byte slice with the same digest form as [`sha256_file`].
+pub fn sha256_bytes(bytes: &[u8]) -> FileHash {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    FileHash {
+        sha256: hex::encode(hasher.finalize()),
+        size_bytes: bytes.len() as u64,
+    }
+}
+
+/// Hashes a reader, refusing inputs larger than `max_bytes`.
+///
+/// Exceeding the bound fails with [`io::ErrorKind::InvalidData`]; inputs of
+/// exactly `max_bytes` succeed.
+pub fn sha256_reader<R: Read>(mut reader: R, max_bytes: u64) -> io::Result<FileHash> {
+    match sha256_read_bounded(&mut reader, max_bytes)? {
+        Some(hash) => Ok(hash),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("input exceeds {max_bytes} bytes"),
+        )),
+    }
+}
+
+/// Bounded hashing core shared by [`sha256_file_bounded`] and
+/// [`sha256_reader`]. Returns `Ok(None)` when the input exceeds `max_bytes`.
+fn sha256_read_bounded<R: Read>(reader: &mut R, max_bytes: u64) -> io::Result<Option<FileHash>> {
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        // Strict bound: never request bytes past max_bytes + 1 (the +1
+        // detects exceedance), mirroring read_bounded_file's take() pattern.
+        let allowance = max_bytes.saturating_add(1) - size_bytes;
+        if allowance == 0 {
+            break;
+        }
+        let want = allowance.min(buf.len() as u64) as usize;
+        let n = match reader.read(&mut buf[..want]) {
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if n == 0 {
+            break;
+        }
+        size_bytes += n as u64;
+        if size_bytes > max_bytes {
+            return Ok(None);
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(Some(FileHash {
+        sha256: hex::encode(hasher.finalize()),
+        size_bytes,
+    }))
+}
+
 pub fn sha256_file_bounded(
     path: impl AsRef<Path>,
     max_bytes: u64,
@@ -3518,41 +4190,16 @@ pub fn sha256_file_bounded(
         ));
     }
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut size_bytes = 0u64;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        // Strict bound: never request bytes past max_bytes + 1 (the +1
-        // detects exceedance), mirroring read_bounded_file's take() pattern.
-        let allowance = max_bytes.saturating_add(1) - size_bytes;
-        if allowance == 0 {
-            break;
-        }
-        let want = allowance.min(buf.len() as u64) as usize;
-        let n = match file.read(&mut buf[..want]) {
-            Ok(n) => n,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err.into()),
-        };
-        if n == 0 {
-            break;
-        }
-        size_bytes += n as u64;
-        if size_bytes > max_bytes {
-            return Err(ManifestError::limit_exceeded(
-                code,
-                format!(
-                    "{context} exceeds {max_bytes} bytes while reading {}",
-                    path.display()
-                ),
-            ));
-        }
-        hasher.update(&buf[..n]);
+    match sha256_read_bounded(&mut file, max_bytes)? {
+        Some(hash) => Ok(hash),
+        None => Err(ManifestError::limit_exceeded(
+            code,
+            format!(
+                "{context} exceeds {max_bytes} bytes while reading {}",
+                path.display()
+            ),
+        )),
     }
-    Ok(FileHash {
-        sha256: hex::encode(hasher.finalize()),
-        size_bytes,
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -3613,7 +4260,7 @@ pub fn create_manifest_for_index_with_options(
         metadata
             .file_size_bytes
             .min(options.limits.max_index_artifact_bytes),
-        "artifact_file_too_large",
+        codes::ARTIFACT_FILE_TOO_LARGE,
         "index artifact",
     )?;
     // One consistent snapshot: the manifest records the byte count that was
@@ -3696,11 +4343,8 @@ pub fn create_manifest_for_index_with_options(
     let auxiliary_artifacts =
         create_auxiliary_artifacts(&options.auxiliary_artifacts, out_base, &options)?;
 
-    let invocation_id = format!("urn:uuid:{}", Uuid::new_v4());
     Ok(IndexManifest {
         schema_version: SCHEMA_VERSION.to_string(),
-        manifest_id: format!("urn:uuid:{}", Uuid::new_v4()),
-        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         artifact,
         auxiliary_artifacts,
         embedding: Embedding {
@@ -3716,14 +4360,7 @@ pub fn create_manifest_for_index_with_options(
         encoder_distortion: None,
         calibration: None,
         row_identity,
-        build: Some(BuildInfo {
-            invocation_id,
-            builder_id: Some("ordvec-manifest".to_string()),
-            source_repo: None,
-            source_commit: None,
-            ci_provider: None,
-            ci_run_id: None,
-        }),
+        build: None,
         attestations: Vec::new(),
         extensions: BTreeMap::new(),
     })
@@ -3737,7 +4374,7 @@ fn create_auxiliary_artifacts(
     let count = artifacts.len();
     if count > options.limits.max_auxiliary_artifacts {
         return Err(ManifestError::limit_exceeded(
-            "auxiliary_artifact_count_limit_exceeded",
+            codes::AUXILIARY_ARTIFACT_COUNT_LIMIT_EXCEEDED,
             format!(
                 "auxiliary_artifacts has {count} entries, exceeding max_auxiliary_artifacts={}",
                 options.limits.max_auxiliary_artifacts
@@ -3768,7 +4405,7 @@ fn create_auxiliary_artifacts(
         let hash = sha256_file_bounded(
             &artifact.path,
             observed_len.min(options.limits.max_auxiliary_artifact_bytes),
-            "auxiliary_artifact_file_too_large",
+            codes::AUXILIARY_ARTIFACT_FILE_TOO_LARGE,
             "auxiliary artifact",
         )?;
         manifest_artifacts.push(AuxiliaryArtifact {
@@ -3784,9 +4421,28 @@ fn create_auxiliary_artifacts(
             required: artifact.required,
         });
     }
+    // Deterministic manifest bytes: entry order must not depend on
+    // declaration order.
+    manifest_artifacts.sort_by(|a, b| {
+        (a.name.as_str(), a.path.as_str()).cmp(&(b.name.as_str(), b.path.as_str()))
+    });
     Ok(manifest_artifacts)
 }
 
+/// Writes the manifest in its single canonical serialization: serde_json
+/// pretty-printing, struct-declaration field order, BTreeMap-sorted map keys.
+/// Content hashing and signing operate on the stored bytes, so changing the
+/// serializer or its settings changes every manifest's identity and is a
+/// schema-version event, not a cosmetic change.
+///
+/// The canonical bytes depend on `serde_json`'s default feature set. Nested
+/// [`serde_json::Value`] maps carried in `extensions` / `attestations` are
+/// key-sorted only while `serde_json` is built without `preserve_order`; a
+/// consumer whose dependency graph enables `serde_json/preserve_order` (or
+/// `arbitrary_precision`) via feature unification would serialize those maps
+/// in insertion order, changing the content address. Do not enable those
+/// features in a build that produces content-addressed manifests. See
+/// <https://github.com/Project-Navi/ordvec/issues/295>.
 pub fn write_manifest_file(
     manifest: &IndexManifest,
     path: impl AsRef<Path>,
@@ -3842,7 +4498,7 @@ fn validate_jsonl_rows(
             push_report_issue_bounded(
                 errors,
                 limits,
-                "row_identity_row_count_limit_exceeded",
+                codes::ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED,
                 format!(
                     "row identity file has more than max_row_identity_rows={} rows",
                     limits.max_row_identity_rows
@@ -3856,7 +4512,7 @@ fn validate_jsonl_rows(
                 push_report_issue_bounded(
                     errors,
                     limits,
-                    "row_identity_row_count_mismatch",
+                    codes::ROW_IDENTITY_ROW_COUNT_MISMATCH,
                     format!(
                         "row identity file has more than declared row_count={expected_row_count}"
                     ),
@@ -3869,7 +4525,7 @@ fn validate_jsonl_rows(
             push_report_issue_bounded(
                 errors,
                 limits,
-                "row_identity_line_too_large",
+                codes::ROW_IDENTITY_LINE_TOO_LARGE,
                 format!(
                     "line {line_idx} exceeds max_row_identity_jsonl_line_bytes={}",
                     limits.max_row_identity_jsonl_line_bytes
@@ -3884,7 +4540,7 @@ fn validate_jsonl_rows(
                 push_report_issue_bounded(
                     errors,
                     limits,
-                    "row_identity_jsonl_invalid_json",
+                    codes::ROW_IDENTITY_JSONL_INVALID_JSON,
                     format!("line {line_idx} is not a strict row object: {err}"),
                 );
                 continue;
@@ -3894,13 +4550,20 @@ fn validate_jsonl_rows(
             push_report_issue_bounded(
                 errors,
                 limits,
-                "row_identity_row_id_mismatch",
+                codes::ROW_IDENTITY_ROW_ID_MISMATCH,
                 format!("line {line_idx} has row_id {}", row.row_id),
             );
         }
-        validate_row_id_string("db_id", &row.db_id, line_idx, limits, errors);
+        validate_row_id_string("db_id", &DB_ID_ISSUES, &row.db_id, line_idx, limits, errors);
         if let Some(parent_id) = &row.parent_id {
-            validate_row_id_string("parent_id", parent_id, line_idx, limits, errors);
+            validate_row_id_string(
+                "parent_id",
+                &PARENT_ID_ISSUES,
+                parent_id,
+                line_idx,
+                limits,
+                errors,
+            );
         }
         validated_rows += 1;
         if !allow_duplicate_db_ids {
@@ -3908,7 +4571,7 @@ fn validate_jsonl_rows(
                 push_report_issue_bounded(
                     errors,
                     limits,
-                    "row_identity_duplicate_db_id",
+                    codes::ROW_IDENTITY_DUPLICATE_DB_ID,
                     format!("line {line_idx} repeats db_id"),
                 );
             } else {
@@ -3918,7 +4581,7 @@ fn validate_jsonl_rows(
                     push_report_issue_bounded(
                         errors,
                         limits,
-                        "row_identity_duplicate_tracking_limit_exceeded",
+                        codes::ROW_IDENTITY_DUPLICATE_TRACKING_LIMIT_EXCEEDED,
                         format!(
                             "tracked db_id bytes exceed max_row_identity_tracked_db_id_bytes={}",
                             limits.max_row_identity_tracked_db_id_bytes
@@ -3990,8 +4653,29 @@ fn trim_jsonl_terminator(line: &mut Vec<u8>) {
     }
 }
 
+/// Per-field issue codes for [`validate_row_id_string`], so every emitted
+/// code stays a named constant in [`codes`].
+struct RowIdIssueCodes {
+    empty: &'static str,
+    contains_nul: &'static str,
+    invalid_uuid: &'static str,
+}
+
+const DB_ID_ISSUES: RowIdIssueCodes = RowIdIssueCodes {
+    empty: codes::ROW_IDENTITY_DB_ID_EMPTY,
+    contains_nul: codes::ROW_IDENTITY_DB_ID_CONTAINS_NUL,
+    invalid_uuid: codes::ROW_IDENTITY_DB_ID_INVALID_UUID,
+};
+
+const PARENT_ID_ISSUES: RowIdIssueCodes = RowIdIssueCodes {
+    empty: codes::ROW_IDENTITY_PARENT_ID_EMPTY,
+    contains_nul: codes::ROW_IDENTITY_PARENT_ID_CONTAINS_NUL,
+    invalid_uuid: codes::ROW_IDENTITY_PARENT_ID_INVALID_UUID,
+};
+
 fn validate_row_id_string(
     field: &str,
+    issue_codes: &RowIdIssueCodes,
     value: &str,
     line_idx: usize,
     limits: &ResourceLimits,
@@ -4003,7 +4687,7 @@ fn validate_row_id_string(
         push_report_issue_bounded(
             errors,
             limits,
-            format!("row_identity_{field}_empty"),
+            issue_codes.empty,
             format!("line {line_idx} has empty {field}"),
         );
     }
@@ -4012,7 +4696,7 @@ fn validate_row_id_string(
         push_report_issue_bounded(
             errors,
             limits,
-            format!("row_identity_{field}_contains_nul"),
+            issue_codes.contains_nul,
             format!("line {line_idx} {field} contains NUL"),
         );
     }
@@ -4020,7 +4704,7 @@ fn validate_row_id_string(
         push_report_issue_bounded(
             errors,
             limits,
-            format!("row_identity_{field}_invalid_uuid"),
+            issue_codes.invalid_uuid,
             format!("line {line_idx} {field} must be a UUID in v1"),
         );
     }
@@ -4029,12 +4713,12 @@ fn validate_row_id_string(
 fn is_limit_issue_code(code: &str) -> bool {
     matches!(
         code,
-        "row_identity_line_too_large"
-            | "row_identity_row_count_limit_exceeded"
-            | "row_identity_duplicate_tracking_limit_exceeded"
-            | "calibration_profile_too_large"
-            | "encoder_distortion_profile_too_large"
-            | "verification_report_issue_limit_exceeded"
+        codes::ROW_IDENTITY_LINE_TOO_LARGE
+            | codes::ROW_IDENTITY_ROW_COUNT_LIMIT_EXCEEDED
+            | codes::ROW_IDENTITY_DUPLICATE_TRACKING_LIMIT_EXCEEDED
+            | codes::CALIBRATION_PROFILE_TOO_LARGE
+            | codes::ENCODER_DISTORTION_PROFILE_TOO_LARGE
+            | codes::VERIFICATION_REPORT_ISSUE_LIMIT_EXCEEDED
     )
 }
 
@@ -4046,34 +4730,40 @@ fn manifest_path_for_create(
 ) -> Result<String, ManifestError> {
     let canonical_path = fs::canonicalize(path)?;
     let canonical_base = fs::canonicalize(base_dir)?;
-    if let Ok(relative) = canonical_path.strip_prefix(&canonical_base) {
-        if !relative.as_os_str().is_empty() {
-            return Ok(path_to_manifest_string(relative));
+    let value = if let Ok(relative) = canonical_path.strip_prefix(&canonical_base) {
+        if relative.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            path_to_manifest_string(relative)
         }
-        return Ok(".".to_string());
-    }
-
-    if !options.allow_path_escape {
+    } else if !options.allow_path_escape {
         return Err(ManifestError::invalid(format!(
             "{context} path {} is outside manifest directory {}; use --allow-path-escape to create a manifest that requires non-default verification policy",
             canonical_path.display(),
             canonical_base.display()
         )));
-    }
+    } else if let Some(relative) = relative_path_between(&canonical_base, &canonical_path) {
+        path_to_manifest_string(&relative)
+    } else if options.allow_absolute_paths {
+        path_to_manifest_string(&canonical_path)
+    } else {
+        return Err(ManifestError::invalid(format!(
+            "{context} path {} cannot be expressed relative to manifest directory {}; use --allow-absolute-paths with --allow-path-escape",
+            canonical_path.display(),
+            canonical_base.display()
+        )));
+    };
 
-    if let Some(relative) = relative_path_between(&canonical_base, &canonical_path) {
-        return Ok(path_to_manifest_string(&relative));
+    // Never embed a path the manifest's own validation would reject: what
+    // create writes, verify (under the same policy flags) must accept.
+    if !is_manifest_path_absolute(&value)
+        && !is_canonical_manifest_path(&value, options.allow_path_escape)
+    {
+        return Err(ManifestError::invalid(format!(
+            "{context} path {value:?} cannot be embedded canonically (bundle-relative, forward slashes, no `.`, `..`, or empty segments); rename the file or move it into the manifest directory"
+        )));
     }
-
-    if options.allow_absolute_paths {
-        return Ok(path_to_manifest_string(&canonical_path));
-    }
-
-    Err(ManifestError::invalid(format!(
-        "{context} path {} cannot be expressed relative to manifest directory {}; use --allow-absolute-paths with --allow-path-escape",
-        canonical_path.display(),
-        canonical_base.display()
-    )))
+    Ok(value)
 }
 
 fn relative_path_between(base: &Path, target: &Path) -> Option<PathBuf> {
@@ -4108,9 +4798,54 @@ fn relative_path_between(base: &Path, target: &Path) -> Option<PathBuf> {
     Some(relative)
 }
 
+/// A canonical manifest path is bundle-relative, uses forward slashes only,
+/// and contains no `.`, `..`, or empty segments, so identical bundle content
+/// always embeds identical path strings. `..` segments are only accepted
+/// under `allow_path_escape`; absolute paths are excluded before this check
+/// and remain governed by the `allow_absolute_paths` policy at resolution.
+fn is_canonical_manifest_path(path: &str, allow_path_escape: bool) -> bool {
+    if path.is_empty() || path.contains('\\') {
+        return false;
+    }
+    path.split('/').all(|segment| {
+        !segment.is_empty() && segment != "." && (segment != ".." || allow_path_escape)
+    })
+}
+
+/// Detects absolute manifest path strings on any platform: POSIX (`/...`),
+/// Windows drive (`C:/...` or `C:\...`), and UNC/verbatim (`\\...`, `//...`).
+/// A single leading backslash is NOT absolute: on Unix it is an ordinary
+/// file-name byte, so treating it as absolute here while resolution treats
+/// it as relative would let `\evil` skip the canonical-form check and still
+/// resolve inside the bundle. It stays non-absolute and is rejected by the
+/// canonical-form check instead (backslashes are never canonical). The
+/// canonical-form check skips absolute paths; the `allow_absolute_paths`
+/// policy at path resolution accepts or rejects them.
+fn is_manifest_path_absolute(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with(r"\\") {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
 fn path_to_manifest_string(path: &Path) -> String {
     if path.is_absolute() {
-        return path.display().to_string().replace('\\', "/");
+        let display = path.display().to_string();
+        // fs::canonicalize returns verbatim paths on Windows; strip the
+        // verbatim prefix so the embedded string round-trips through
+        // PathBuf::from at verification time.
+        let display = if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = display.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            display
+        };
+        return display.replace('\\', "/");
     }
     let parts = path
         .components()
@@ -4175,6 +4910,39 @@ fn hex_digest_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_manifest_path_form_is_policy_aware() {
+        assert!(is_canonical_manifest_path("index.ovrq", false));
+        assert!(is_canonical_manifest_path("sub/dir/index.ovrq", false));
+        assert!(!is_canonical_manifest_path("", false));
+        assert!(!is_canonical_manifest_path("./index.ovrq", false));
+        assert!(!is_canonical_manifest_path("a//b", false));
+        assert!(!is_canonical_manifest_path("back\\slash.bin", false));
+        assert!(!is_canonical_manifest_path("a/../index.ovrq", false));
+        assert!(!is_canonical_manifest_path("../index.ovrq", false));
+        assert!(is_canonical_manifest_path("a/../index.ovrq", true));
+        assert!(is_canonical_manifest_path("../index.ovrq", true));
+        assert!(!is_canonical_manifest_path("back\\slash.bin", true));
+    }
+
+    #[test]
+    fn absolute_manifest_path_detection_covers_all_platform_forms() {
+        assert!(is_manifest_path_absolute("/srv/index.ovrq"));
+        assert!(is_manifest_path_absolute("C:/bundles/index.ovrq"));
+        assert!(is_manifest_path_absolute("C:\\bundles\\index.ovrq"));
+        assert!(is_manifest_path_absolute("\\\\server\\share\\index.ovrq"));
+        assert!(is_manifest_path_absolute("//?/C:/bundles/index.ovrq"));
+        assert!(is_manifest_path_absolute("\\\\?\\C:\\bundles\\index.ovrq"));
+        assert!(!is_manifest_path_absolute("index.ovrq"));
+        assert!(!is_manifest_path_absolute("sub/index.ovrq"));
+        assert!(!is_manifest_path_absolute("C:"));
+        // A single leading backslash is not absolute: it must fall through to
+        // the canonical-form check (which rejects backslashes) instead of
+        // skipping it and then resolving relative on Unix.
+        assert!(!is_manifest_path_absolute("\\evil"));
+        assert!(!is_manifest_path_absolute("\\"));
+    }
 
     #[test]
     fn manifest_kind_conversion_uses_format_registry_coverage() {
