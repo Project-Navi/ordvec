@@ -1990,10 +1990,41 @@ fn missing_artifact_and_row_count_mismatch_are_reported() {
     manifest.row_identity = RowIdentity::RowIdIdentity { row_count: 2 };
     fs::remove_file(temp.path().join(&manifest.artifact.path)).unwrap();
     let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
-    assert!(report
+    // An absent primary artifact reports the NotFound-specific `artifact_missing`
+    // code, which classifies as ArtifactMissing — not the generic
+    // `artifact_path_unavailable` (reserved for permission/I/O failures).
+    let missing = report
         .errors
         .iter()
-        .any(|issue| issue.code == "artifact_path_unavailable"));
+        .find(|issue| issue.code == "artifact_missing")
+        .expect("missing artifact must report artifact_missing");
+    assert_eq!(missing.classification(), VerificationCode::ArtifactMissing);
+}
+
+#[test]
+fn missing_row_identity_jsonl_classifies_as_row_identity_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let (temp, mut manifest, _manifest_path) = identity_manifest(root.path());
+    // The artifact stays present; only the row-identity JSONL is absent, so a
+    // consumer sees the row-identity file distinctly as missing rather than as
+    // an unclassified path failure.
+    manifest.row_identity = RowIdentity::Jsonl {
+        path: "rows.jsonl".to_string(),
+        sha256: "0".repeat(64),
+        row_count: 1,
+        id_kind: "uuid".to_string(),
+        db: None,
+    };
+    let report = verify_manifest_with_base(manifest, temp.path(), VerifyOptions::default());
+    let missing = report
+        .errors
+        .iter()
+        .find(|issue| issue.code == "row_identity_missing")
+        .expect("missing row-identity file must report row_identity_missing");
+    assert_eq!(
+        missing.classification(),
+        VerificationCode::RowIdentityMissing
+    );
 }
 
 #[test]

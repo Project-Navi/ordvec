@@ -2504,6 +2504,12 @@ struct PathIssueCodes {
     base_dir_unavailable: &'static str,
     path_escape_rejected: &'static str,
     path_unavailable: &'static str,
+    /// Code for a `NotFound` canonicalize error, when this context wants that
+    /// distinguished from other I/O failures (permission denied, symlink
+    /// loop, …). `None` keeps a single `path_unavailable` code for every
+    /// error kind — used where a missing referenced file is not classified
+    /// distinctly downstream.
+    path_missing: Option<&'static str>,
 }
 
 const ARTIFACT_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
@@ -2512,6 +2518,7 @@ const ARTIFACT_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     base_dir_unavailable: codes::ARTIFACT_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::ARTIFACT_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::ARTIFACT_PATH_UNAVAILABLE,
+    path_missing: Some(codes::ARTIFACT_MISSING),
 };
 
 const ROW_IDENTITY_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
@@ -2520,6 +2527,7 @@ const ROW_IDENTITY_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     base_dir_unavailable: codes::ROW_IDENTITY_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::ROW_IDENTITY_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::ROW_IDENTITY_PATH_UNAVAILABLE,
+    path_missing: Some(codes::ROW_IDENTITY_MISSING),
 };
 
 const ENCODER_DISTORTION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
@@ -2528,6 +2536,7 @@ const ENCODER_DISTORTION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     base_dir_unavailable: codes::ENCODER_DISTORTION_PROFILE_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::ENCODER_DISTORTION_PROFILE_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::ENCODER_DISTORTION_PROFILE_PATH_UNAVAILABLE,
+    path_missing: None,
 };
 
 const CALIBRATION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
@@ -2536,6 +2545,7 @@ const CALIBRATION_PROFILE_PATH_ISSUES: PathIssueCodes = PathIssueCodes {
     base_dir_unavailable: codes::CALIBRATION_PROFILE_BASE_DIR_UNAVAILABLE,
     path_escape_rejected: codes::CALIBRATION_PROFILE_PATH_ESCAPE_REJECTED,
     path_unavailable: codes::CALIBRATION_PROFILE_PATH_UNAVAILABLE,
+    path_missing: None,
 };
 
 fn resolve_existing_path(
@@ -2603,8 +2613,16 @@ fn resolve_existing_path(
     let canonical_path = match fs::canonicalize(&resolved_path) {
         Ok(path) => path,
         Err(err) => {
+            // Distinguish an absent file (NotFound) from other canonicalize
+            // failures (permission denied, symlink loop, I/O) when this
+            // context asks for it, so a downstream consumer branching on the
+            // typed code never reads a permission error as a missing file.
+            let code = match issue_codes.path_missing {
+                Some(missing) if err.kind() == io::ErrorKind::NotFound => missing,
+                _ => issue_codes.path_unavailable,
+            };
             errors.push(ReportIssue::new(
-                issue_codes.path_unavailable,
+                code,
                 format!("failed to canonicalize {}: {err}", resolved_path.display()),
             ));
             return None;
@@ -3649,6 +3667,7 @@ pub mod codes {
     pub const ARTIFACT_MANIFEST_COVERAGE_UNSUPPORTED: &str =
         "artifact_manifest_coverage_unsupported";
     pub const ARTIFACT_METADATA_FILE_SIZE_MISMATCH: &str = "artifact_metadata_file_size_mismatch";
+    pub const ARTIFACT_MISSING: &str = "artifact_missing";
     pub const ARTIFACT_PARAMS_KIND_MISMATCH: &str = "artifact_params_kind_mismatch";
     pub const ARTIFACT_PARAMS_MISMATCH: &str = "artifact_params_mismatch";
     pub const ARTIFACT_PARAMS_UNSUPPORTED: &str = "artifact_params_unsupported";
@@ -3885,6 +3904,7 @@ pub mod codes {
     pub const ROW_IDENTITY_ID_KIND_UNSUPPORTED: &str = "row_identity_id_kind_unsupported";
     pub const ROW_IDENTITY_JSONL_INVALID_JSON: &str = "row_identity_jsonl_invalid_json";
     pub const ROW_IDENTITY_LINE_TOO_LARGE: &str = "row_identity_line_too_large";
+    pub const ROW_IDENTITY_MISSING: &str = "row_identity_missing";
     pub const ROW_IDENTITY_PARENT_ID_CONTAINS_NUL: &str = "row_identity_parent_id_contains_nul";
     pub const ROW_IDENTITY_PARENT_ID_EMPTY: &str = "row_identity_parent_id_empty";
     pub const ROW_IDENTITY_PARENT_ID_INVALID_UUID: &str = "row_identity_parent_id_invalid_uuid";
@@ -3908,10 +3928,16 @@ pub mod codes {
 /// Typed classification of [`ReportIssue::code`] values so downstream
 /// security code can branch on enum variants instead of string compares.
 ///
-/// Only the load/security-relevant code families are classified; every other
-/// code maps to [`VerificationCode::Unknown`]. Manifest parse failures never
+/// The integrity-mismatch, missing-mandatory-file, schema-version, and
+/// resource-limit code families are classified into typed variants. Every
+/// other code maps to [`VerificationCode::Unknown`] — including the
+/// path-policy rejections (absolute / escape / non-canonical) and the
+/// diagnostic I/O failures (`*_path_unavailable`, `*_hash_failed`), which are
+/// deliberately not distinguished as typed variants. The enum is
+/// [`#[non_exhaustive]`](https://doc.rust-lang.org/reference/attributes/type_system.html),
+/// so treat `Unknown` as the required catch-all. Manifest parse failures never
 /// reach a report (they surface as [`ManifestError`]), so the schema family
-/// covers the in-report [`codes::SCHEMA_VERSION_UNSUPPORTED`] check.
+/// covers only the in-report [`codes::SCHEMA_VERSION_UNSUPPORTED`] check.
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VerificationCode {
@@ -3923,6 +3949,7 @@ pub enum VerificationCode {
     AuxiliaryMissingRequired,
     RowIdentitySha256Mismatch,
     RowIdentityRowCountMismatch,
+    RowIdentityMissing,
     ManifestSchema,
     ResourceLimit,
     Unknown,
@@ -3988,7 +4015,7 @@ impl ReportIssue {
         match self.code.as_str() {
             codes::ARTIFACT_SHA256_MISMATCH => VerificationCode::ArtifactSha256Mismatch,
             codes::ARTIFACT_FILE_SIZE_MISMATCH => VerificationCode::ArtifactFileSizeMismatch,
-            codes::ARTIFACT_PATH_UNAVAILABLE => VerificationCode::ArtifactMissing,
+            codes::ARTIFACT_MISSING => VerificationCode::ArtifactMissing,
             codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH => VerificationCode::AuxiliarySha256Mismatch,
             codes::AUXILIARY_ARTIFACT_FILE_SIZE_MISMATCH => {
                 VerificationCode::AuxiliaryFileSizeMismatch
@@ -3998,6 +4025,7 @@ impl ReportIssue {
             }
             codes::ROW_IDENTITY_SHA256_MISMATCH => VerificationCode::RowIdentitySha256Mismatch,
             codes::ROW_IDENTITY_ROW_COUNT_MISMATCH => VerificationCode::RowIdentityRowCountMismatch,
+            codes::ROW_IDENTITY_MISSING => VerificationCode::RowIdentityMissing,
             codes::SCHEMA_VERSION_UNSUPPORTED => VerificationCode::ManifestSchema,
             codes::MANIFEST_FILE_TOO_LARGE
             | codes::ARTIFACT_FILE_TOO_LARGE

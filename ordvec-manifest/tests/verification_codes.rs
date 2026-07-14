@@ -11,6 +11,7 @@ fn security_relevant_code_values_are_locked() {
             codes::ARTIFACT_FILE_SIZE_MISMATCH,
             "artifact_file_size_mismatch",
         ),
+        (codes::ARTIFACT_MISSING, "artifact_missing"),
         (
             codes::ARTIFACT_PATH_UNAVAILABLE,
             "artifact_path_unavailable",
@@ -59,6 +60,7 @@ fn security_relevant_code_values_are_locked() {
             codes::ROW_IDENTITY_ROW_COUNT_MISMATCH,
             "row_identity_row_count_mismatch",
         ),
+        (codes::ROW_IDENTITY_MISSING, "row_identity_missing"),
         (
             codes::SCHEMA_VERSION_UNSUPPORTED,
             "schema_version_unsupported",
@@ -213,10 +215,7 @@ fn classification_round_trips_every_mapped_variant() {
             codes::ARTIFACT_FILE_SIZE_MISMATCH,
             VerificationCode::ArtifactFileSizeMismatch,
         ),
-        (
-            codes::ARTIFACT_PATH_UNAVAILABLE,
-            VerificationCode::ArtifactMissing,
-        ),
+        (codes::ARTIFACT_MISSING, VerificationCode::ArtifactMissing),
         (
             codes::AUXILIARY_ARTIFACT_SHA256_MISMATCH,
             VerificationCode::AuxiliarySha256Mismatch,
@@ -236,6 +235,10 @@ fn classification_round_trips_every_mapped_variant() {
         (
             codes::ROW_IDENTITY_ROW_COUNT_MISMATCH,
             VerificationCode::RowIdentityRowCountMismatch,
+        ),
+        (
+            codes::ROW_IDENTITY_MISSING,
+            VerificationCode::RowIdentityMissing,
         ),
         (
             codes::SCHEMA_VERSION_UNSUPPORTED,
@@ -302,6 +305,12 @@ fn unmapped_and_unknown_codes_classify_as_unknown() {
         "",
         codes::EMBEDDING_MODEL_EMPTY,
         codes::ARTIFACT_PATH_EMPTY,
+        // A non-NotFound canonicalize failure (permission denied, symlink
+        // loop, I/O) surfaces as *_path_unavailable and must NOT be
+        // classified as a missing file — only the NotFound-specific
+        // *_missing codes carry the "missing" meaning.
+        codes::ARTIFACT_PATH_UNAVAILABLE,
+        codes::ROW_IDENTITY_PATH_UNAVAILABLE,
     ] {
         assert_eq!(
             ReportIssue::new(code, "message").classification(),

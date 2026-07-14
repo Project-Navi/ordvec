@@ -18,7 +18,12 @@ _No unreleased changes._
   (zero bare literals at emit sites), with a `#[non_exhaustive]`
   `VerificationCode` enum and `ReportIssue::classification()` so
   downstream integrity handling can branch on typed values instead of
-  comparing strings. `ReportIssue` gains optional structured mismatch
+  comparing strings. A missing primary artifact or row-identity file is
+  reported with a dedicated `artifact_missing` / `row_identity_missing`
+  code (classified `ArtifactMissing` / `RowIdentityMissing`) only when the
+  file is genuinely absent; permission or I/O failures keep the generic
+  `*_path_unavailable` code and classify as `Unknown`, so a consumer never
+  mistakes an unreadable file for a missing one. `ReportIssue` gains optional structured mismatch
   detail — artifact name plus expected/actual SHA-256 and sizes — at the
   artifact, auxiliary, and row-identity mismatch sites, for lossless
   downstream error construction. Reports without the new detail
