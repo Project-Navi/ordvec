@@ -1,0 +1,3 @@
+# Golden fixtures are byte-compared (include_bytes! in tests/deterministic.rs).
+# Never let checkout eol conversion (e.g. Windows autocrlf) rewrite them.
+* -text
