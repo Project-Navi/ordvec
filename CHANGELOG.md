@@ -11,6 +11,23 @@ _No unreleased changes._
 
 ## 0.7.0 - 2026-07-13
 
+### Added
+
+- **`ordvec-manifest`: typed verification classification.** Every
+  verification issue code is now a named `pub const` in a `codes` module
+  (zero bare literals at emit sites), with a `#[non_exhaustive]`
+  `VerificationCode` enum and `ReportIssue::classification()` so
+  downstream integrity handling can branch on typed values instead of
+  comparing strings. `ReportIssue` gains optional structured mismatch
+  detail — artifact name plus expected/actual SHA-256 and sizes — at the
+  artifact, auxiliary, and row-identity mismatch sites, for lossless
+  downstream error construction. Reports without the new detail
+  serialize byte-identically to before (regression-tested).
+- **`ordvec-manifest`: shared hash helpers.** New `sha256_bytes` and
+  bounded `sha256_reader` share `sha256_file_bounded`'s bounded/EINTR
+  read core; the sqlite registry's private duplicate hasher is deduped
+  onto the public helper.
+
 ### Changed
 
 - **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
