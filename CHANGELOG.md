@@ -32,8 +32,9 @@ _No unreleased changes._
 
 - **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
   manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
-  and `created_at` are removed from `IndexManifest`, creation writes
-  `build: null`, and auxiliary artifact entries are sorted by
+  and `created_at` are removed from `IndexManifest`, creation omits the
+  optional `build` field (serialized as absent, not `null`), and auxiliary
+  artifact entries are sorted by
   `(name, path)`, so identical bundle content serializes to byte-identical
   manifests and `sha256(manifest.json)` is the bundle's content address.
   Existing v1 manifests no longer parse; loading one fails with an error
@@ -48,7 +49,10 @@ _No unreleased changes._
   `write_manifest_file` serialization form is documented as the single
   canonical byte form: hashing and signing operate on stored bytes, and any
   serializer change is a schema-version event. The sqlite report registry
-  drops its `manifest_id` column (existing databases migrate on open).
+  drops its `manifest_id` column: the cached `verification_reports` table is
+  migrated in place on open (rows preserved, under one atomic transaction),
+  while the rebuildable `active_manifest` pointer is reset and must be
+  re-activated.
 
 ## 0.6.0 - 2026-07-04
 

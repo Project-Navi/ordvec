@@ -5,7 +5,7 @@ use crate::{
     VerificationReport, VerifyOptions,
 };
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ pub fn verify_with_registry(
     use_cache: bool,
 ) -> Result<VerificationReport, ManifestError> {
     let mut conn = Connection::open(db_path).map_err(sqlite_err)?;
-    init(&conn)?;
+    init(&mut conn)?;
     if use_cache {
         if let Some(cache_key) = current_cache_key(document, manifest_path.as_ref(), &options)? {
             if let Some(report) = load_cached_report(&conn, &cache_key, &options.limits)? {
@@ -49,7 +49,7 @@ pub fn activate(
     force: bool,
 ) -> Result<VerificationReport, ManifestError> {
     let mut conn = Connection::open(db_path).map_err(sqlite_err)?;
-    init(&conn)?;
+    init(&mut conn)?;
     let store_options = options.clone();
     let mut report = verify_manifest(document, options);
     if !report.ok && force {
@@ -91,33 +91,49 @@ pub fn activate(
     Ok(report)
 }
 
-fn init(conn: &Connection) -> Result<(), ManifestError> {
+fn init(conn: &mut Connection) -> Result<(), ManifestError> {
     if verification_reports_needs_migration(conn)? {
-        conn.execute_batch(
-            "ALTER TABLE verification_reports RENAME TO verification_reports_old;
-             CREATE TABLE verification_reports(
-                report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manifest_path TEXT NOT NULL,
-                checked_at TEXT NOT NULL,
-                ok INTEGER NOT NULL,
-                manifest_location_sha256 TEXT,
-                manifest_sha256 TEXT,
-                options_sha256 TEXT,
-                artifact_sha256 TEXT,
-                row_identity_sha256 TEXT,
-                calibration_profile_sha256 TEXT,
-                auxiliary_artifacts_sha256 TEXT,
-                encoder_distortion_profile_sha256 TEXT,
-                report_json TEXT NOT NULL
-             );
-             INSERT INTO verification_reports(
-                manifest_path, checked_at, ok, report_json
-             )
-             SELECT manifest_path, checked_at, ok, report_json
-             FROM verification_reports_old;
-             DROP TABLE verification_reports_old;",
-        )
-        .map_err(sqlite_err)?;
+        // Migrate atomically. `execute_batch` runs each statement in its own
+        // implicit transaction, so a crash between the RENAME and the DROP
+        // (or two processes racing this path) would leave a stray
+        // `verification_reports_old` behind — after which every future open
+        // fails, because the RENAME target already exists. Run the whole
+        // migration inside one IMMEDIATE transaction (write lock taken up
+        // front), drop any leftover `_old` from a prior interrupted attempt,
+        // and re-check need under the lock so a process that lost the race
+        // commits a no-op instead of re-migrating an already-v2 table.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_err)?;
+        if verification_reports_needs_migration(&tx)? {
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS verification_reports_old;
+                 ALTER TABLE verification_reports RENAME TO verification_reports_old;
+                 CREATE TABLE verification_reports(
+                    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manifest_path TEXT NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    ok INTEGER NOT NULL,
+                    manifest_location_sha256 TEXT,
+                    manifest_sha256 TEXT,
+                    options_sha256 TEXT,
+                    artifact_sha256 TEXT,
+                    row_identity_sha256 TEXT,
+                    calibration_profile_sha256 TEXT,
+                    auxiliary_artifacts_sha256 TEXT,
+                    encoder_distortion_profile_sha256 TEXT,
+                    report_json TEXT NOT NULL
+                 );
+                 INSERT INTO verification_reports(
+                    manifest_path, checked_at, ok, report_json
+                 )
+                 SELECT manifest_path, checked_at, ok, report_json
+                 FROM verification_reports_old;
+                 DROP TABLE verification_reports_old;",
+            )
+            .map_err(sqlite_err)?;
+        }
+        tx.commit().map_err(sqlite_err)?;
     }
     // Schema v2 dropped active_manifest's manifest_id column, and `CREATE
     // TABLE IF NOT EXISTS` below would leave such a stale table in place,
