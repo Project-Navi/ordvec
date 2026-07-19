@@ -10,8 +10,9 @@ name: audit
 # Read-only token, no `run:` steps (no injection surface). Because this runs
 # UNATTENDED on a cron schedule, the third-party actions are SHA-pinned (not the
 # mutable @v4/@v2 tags ci.yml uses on human-triggered push/PR) so a compromised
-# tag update cannot auto-execute on a scheduled runner. Scoped to
-# `check advisories`.
+# tag update cannot auto-execute on a scheduled runner. Scoped to `check
+# advisories`, but rooted at every workspace member so dev-only benchmark
+# dependencies cannot fall outside the advisory graph.
 
 on:
   schedule:
@@ -38,4 +39,6 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
-          command: check advisories
+          command: check
+          arguments: --workspace --all-features --locked
+          command-arguments: advisories

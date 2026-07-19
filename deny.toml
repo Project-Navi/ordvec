@@ -1,6 +1,6 @@
 # cargo-deny configuration for ordvec.
 #
-# Run locally with:  cargo deny check
+# Run locally with:  cargo deny --workspace --all-features --locked check
 # Schema validated against cargo-deny 0.19.x.
 #
 # ordvec ships no system/numerical dependencies (no BLAS, faer, ndarray,
@@ -36,6 +36,8 @@ ignore = ["RUSTSEC-2025-0141"]
 #   * BSD-2-Clause          — zerocopy / zerocopy-derive are
 #     `BSD-2-Clause OR Apache-2.0 OR MIT`; the OR resolves via Apache/MIT, but
 #     allowing BSD-2-Clause keeps the choice explicit and audit-clear.
+#   * Zlib                  — foldhash, transitively used by the workspace's
+#     dev-only HNSW benchmark and the optional manifest SQLite implementation.
 #   * Apache-2.0 WITH LLVM-exception — wasi's expression includes it; only
 #     pulled on wasm targets, harmless to allow and keeps cross-target clean.
 allow = [
@@ -44,6 +46,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "Unicode-3.0",
     "BSD-2-Clause",
+    "Zlib",
 ]
 # License text must match an SPDX template at >= this confidence to count.
 confidence-threshold = 0.8

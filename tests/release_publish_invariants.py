@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
 CI_WORKFLOW_PATH = os.environ.get("CI_WORKFLOW_PATH", ".github/workflows/ci.yml")
+AUDIT_WORKFLOW_PATH = os.environ.get("AUDIT_WORKFLOW_PATH", ".github/workflows/audit.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 STRICT_STABLE_TAG_PATTERN = r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 CHANGELOG_RELEASE_HEADING_RE = re.compile(
@@ -464,17 +465,26 @@ def check_release_version_sync() -> None:
         if version != core_version:
             fail(f"{label} is {version}, expected lockstep version {core_version}")
 
-    manifest = load_toml("ordvec-manifest/Cargo.toml")
-    dependencies = mapping(manifest.get("dependencies"), "ordvec-manifest/Cargo.toml: dependencies")
-    ordvec_dep = mapping(
-        dependencies.get("ordvec"), "ordvec-manifest/Cargo.toml: dependencies.ordvec"
+    internal_requirements = (
+        ("ordvec-manifest/Cargo.toml", "ordvec"),
+        ("ordvec-python/Cargo.toml", "ordvec_core"),
+        ("ordvec-manifest-python/Cargo.toml", "ordvec_manifest_core"),
+        ("ordvec-ffi/Cargo.toml", "ordvec"),
+        ("benchmarks/beir-bench/Cargo.toml", "ordvec"),
     )
-    dep_version = ordvec_dep.get("version")
-    if dep_version != core_version:
-        fail(
-            "ordvec-manifest/Cargo.toml: dependencies.ordvec.version "
-            f"is {dep_version!r}, expected {core_version!r}"
+    for path, dependency_name in internal_requirements:
+        manifest = load_toml(path)
+        dependencies = mapping(manifest.get("dependencies"), f"{path}: dependencies")
+        dependency = mapping(
+            dependencies.get(dependency_name),
+            f"{path}: dependencies.{dependency_name}",
         )
+        dep_version = dependency.get("version")
+        if dep_version != core_version:
+            fail(
+                f"{path}: dependencies.{dependency_name}.version is {dep_version!r}, "
+                f"expected lockstep version {core_version!r}"
+            )
 
     changelog = read_text("CHANGELOG.md")
     if not re.search(rf"^## \[?{re.escape(core_version)}\]? - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
@@ -1306,10 +1316,14 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
 
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     require_job = mapping(jobs.get("require-ci-green"), f"{path}: jobs.require-ci-green")
+    timeout_minutes = require_job.get("timeout-minutes")
+    if not isinstance(timeout_minutes, int) or not 30 < timeout_minutes <= 60:
+        fail(f"{path}: require-ci-green must have a bounded 31-60 minute job timeout")
     steps = sequence(require_job.get("steps"), f"{path}: jobs.require-ci-green.steps")
     gated_workflows = ("ci.yml", "python.yml", "fuzz.yml", "codeql.yml", "actionlint.yml", "zizmor.yml")
     found_loop: tuple[str, ...] | None = None
     found_gate_run: str | None = None
+    found_gate_env: dict[str, Any] | None = None
     for index, raw_step in enumerate(steps):
         step = mapping(raw_step, f"{path}: jobs.require-ci-green.steps[{index}]")
         run = step.get("run")
@@ -1319,6 +1333,9 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         if match:
             found_loop = tuple(shlex.split(match.group(1)))
             found_gate_run = run
+            found_gate_env = mapping(
+                step.get("env"), f"{path}: jobs.require-ci-green.steps[{index}].env"
+            )
             break
     if found_loop is None:
         fail(f"{path}: require-ci-green must loop over the release-gated workflow filenames")
@@ -1328,12 +1345,49 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         )
     if found_gate_run is None or "event=push" not in found_gate_run or '.event == "push"' not in found_gate_run:
         fail(f"{path}: require-ci-green must require successful push workflow runs")
+    if "status=success" in found_gate_run:
+        fail(f"{path}: require-ci-green must query all run states before classifying them")
     if (
         found_gate_run is None
         or "repos/${REPO}/commits/main" not in found_gate_run
         or "MAIN_SHA" not in found_gate_run
     ):
         fail(f"{path}: require-ci-green must verify the release tag points at current main")
+    if found_gate_env is None:
+        fail(f"{path}: require-ci-green poll environment was not found")
+    if found_gate_env.get("POLL_INTERVAL_SECONDS") != 30:
+        fail(f"{path}: require-ci-green must poll at the reviewed 30-second interval")
+    if found_gate_env.get("POLL_TIMEOUT_SECONDS") != 1800:
+        fail(f"{path}: require-ci-green must fail closed after the reviewed 30-minute deadline")
+    required_poll_fragments = (
+        "while :; do",
+        ".head_sha == $sha",
+        'sort_by([.run_number, .run_attempt, .id])',
+        "| last",
+        'status\" != \"completed',
+        'conclusion\" = \"success',
+        "SECONDS >= deadline",
+        'sleep \"$POLL_INTERVAL_SECONDS\"',
+    )
+    for fragment in required_poll_fragments:
+        if fragment not in found_gate_run:
+            fail(f"{path}: require-ci-green is missing bounded-poll behavior {fragment!r}")
+    loop_index = found_gate_run.find("while :; do")
+    main_check_index = found_gate_run.find('MAIN_SHA="$(gh api', loop_index)
+    workflow_loop_index = found_gate_run.find("for wf in ", loop_index)
+    if main_check_index < loop_index or main_check_index > workflow_loop_index:
+        fail(f"{path}: require-ci-green must re-check current main before every workflow poll")
+    success_index = found_gate_run.find('if "$all_green"; then', workflow_loop_index)
+    final_main_index = found_gate_run.find('FINAL_MAIN_SHA="$(gh api', success_index)
+    success_break_index = found_gate_run.find("break", success_index)
+    if (
+        success_index < workflow_loop_index
+        or final_main_index < success_index
+        or success_break_index < final_main_index
+        or '$SHA" != "$FINAL_MAIN_SHA' not in found_gate_run[final_main_index:success_break_index]
+    ):
+        fail(f"{path}: require-ci-green must re-check current main immediately before success")
+
 
     allowed_id_token_jobs = {
         "attest",
@@ -1375,6 +1429,37 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
             actual = raw_environment
         if actual != environment:
             fail(f"{path}: jobs.{job_name} must use environment {environment!r}; got {actual!r}")
+
+
+def check_cargo_deny_workspace_scope(
+    workflow: dict[str, Any], path: str, job_name: str, *, advisories_only: bool
+) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+    steps = sequence(job.get("steps"), f"{path}: jobs.{job_name}.steps")
+    deny_steps = [
+        mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        for index, raw_step in enumerate(steps)
+        if action_name(mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]"))
+        == "embarkstudios/cargo-deny-action"
+    ]
+    if len(deny_steps) != 1:
+        fail(f"{path}: jobs.{job_name} must use exactly one cargo-deny action")
+    inputs = mapping(deny_steps[0].get("with"), f"{path}: jobs.{job_name}.cargo-deny.with")
+    if inputs.get("command") != "check":
+        fail(f"{path}: jobs.{job_name} cargo-deny command must be check")
+    argument_words = shlex.split(str(inputs.get("arguments", "")))
+    if "--workspace" not in argument_words:
+        fail(f"{path}: jobs.{job_name} cargo-deny must root the full workspace graph")
+    if "--all-features" not in argument_words:
+        fail(f"{path}: jobs.{job_name} cargo-deny must activate all workspace features")
+    if "--locked" not in argument_words:
+        fail(f"{path}: jobs.{job_name} cargo-deny must audit the committed lockfile")
+    command_arguments = str(inputs.get("command-arguments", "")).strip()
+    if advisories_only and command_arguments != "advisories":
+        fail(f"{path}: jobs.{job_name} scheduled scan must be scoped to advisories")
+    if not advisories_only and command_arguments:
+        fail(f"{path}: jobs.{job_name} PR gate must run every cargo-deny check")
 
 
 def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:
@@ -2057,6 +2142,7 @@ def check_sde_cache_invariants() -> None:
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
     ci_workflow = load_workflow(CI_WORKFLOW_PATH)
+    audit_workflow = load_workflow(AUDIT_WORKFLOW_PATH)
     check_release_version_sync()
     check_release_compatibility_sync()
     check_python_binding_safety_docs_sync()
@@ -2068,6 +2154,12 @@ def main() -> None:
     check_strict_release_tag_patterns(workflow, WORKFLOW_PATH)
     check_package_contents()
     check_ci_package_guards(ci_workflow, CI_WORKFLOW_PATH)
+    check_cargo_deny_workspace_scope(
+        ci_workflow, CI_WORKFLOW_PATH, "deny", advisories_only=False
+    )
+    check_cargo_deny_workspace_scope(
+        audit_workflow, AUDIT_WORKFLOW_PATH, "advisories", advisories_only=True
+    )
     check_hash_requirement_temp_paths(
         [WORKFLOW_PATH, PYTHON_WORKFLOW_PATH, CI_WORKFLOW_PATH, COVERAGE_WORKFLOW_PATH]
     )

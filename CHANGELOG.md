@@ -154,6 +154,19 @@ _No unreleased changes._
   0.40's build dependency used a library feature unavailable on Rust 1.89; the
   all-features manifest suite now runs in the permanent MSRV lane.
 
+### Security
+
+- The release CI gate now waits, with a 30-minute fail-closed deadline, for
+  the latest exact-HEAD push runs instead of treating normal Actions
+  visibility/in-progress delay as an immediate failure. It rejects terminal
+  non-successes and a moving `main`, and every draft-release or artifact-build
+  job is directly blocked behind the gate.
+- The advisory policy now roots `cargo-deny` at every workspace member and
+  enables every feature, closing the blind spot that omitted dev-only
+  benchmark dependencies. `anyhow` is updated from 1.0.102 to 1.0.103 to
+  clear RUSTSEC-2026-0190; the documented dev-only `bincode` 1.x
+  unmaintained advisory remains explicitly triaged.
+
 ## 0.5.0 - 2026-06-19
 
 ### Security

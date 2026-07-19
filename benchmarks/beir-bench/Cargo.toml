@@ -13,7 +13,7 @@ name = "beir-bench"
 path = "src/main.rs"
 
 [dependencies]
-ordvec = { path = "../.." }
+ordvec = { version = "0.6.0", path = "../.." }
 # Pure-Rust HNSW (Malkov–Yashunin); no system/C++ deps. The faithful portable
 # stand-in for the C++ hnswlib (no maintained Rust binding to that exists).
 hnsw_rs = "0.3"
