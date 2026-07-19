@@ -1,6 +1,6 @@
 # Threat Model — `ordvec`
 
-> **Status:** v0.6.0 (pre-1.0), 2026-06-15. This is the maintained threat model
+> **Status:** v0.6.0 (pre-1.0), 2026-07-19. This is the maintained threat model
 > for the `ordvec` Rust crate, C ABI, Go wrapper, PyO3/maturin Python bindings,
 > and the `ordvec-manifest` sidecar verifier. It is reviewed when the
 > attack surface changes (new persistence formats, new `unsafe` kernels, new
@@ -55,10 +55,10 @@ merged, (2) enforceable by tests or CI, (3) local to the library boundary, and
 (4) unlikely to add operational burden downstream. Heavyweight controls
 (mandatory index signing, long-running fuzz farms, service-level admission
 control) are documented as **deployment guidance** unless the project has
-maintainer capacity to own them. Release publication requires a non-triggering
-approver through protected GitHub Environments; the residual release
-supply-chain risk is approver account compromise / collusion, not a
-single-owner project structure (see THREAT-SUPPLY-001).
+maintainer capacity to own them. Release policy requires a non-triggering
+approver through protected GitHub Environments, but that policy is only in
+force when the pre-tag environment-settings audit passes. The live settings
+currently fail that audit and block v0.6.0 (see THREAT-SUPPLY-001).
 
 ---
 
@@ -306,7 +306,7 @@ applications must validate paths before calling").
 
 ## 5. Supply-chain threats (THREAT-SUPPLY)
 
-### 5.1 Existing controls (verified)
+### 5.1 Workflow controls (verified) and environment audit status
 
 **Workflow code (all workflows):** third-party actions pinned by commit SHA
 (the one mandated exception is the SLSA reusable workflow, which the SLSA
@@ -327,6 +327,11 @@ attestation fails the release closed. Each Rust publish job proves pre- and
 post-publish crates.io byte identity against the attested `.crate`; PyPI
 additionally gets **PEP 740** attestations via Trusted Publishing.
 
+The environment protections are mutable GitHub configuration outside the
+workflow. `tests/release_environment_settings.sh` audits them before a tag is
+created. As of 2026-07-19 that audit fails; the exact drift and release gate are
+recorded in THREAT-SUPPLY-001 below.
+
 **Static / supply-chain analysis:** **CodeQL** scans Rust, Python, and Actions
 (no-build databases); **OpenSSF Scorecard** publishes SARIF to code scanning
 and the score badge; **zizmor** audits workflow hardening (pinned); a
@@ -337,23 +342,25 @@ scoped to the wheel.
 
 ### 5.2 Risks
 
-**THREAT-SUPPLY-001 (mitigated; residual = release-approver account
-compromise / collusion): Release configuration and ownership.** The release
-**environments** (`pypi`, `crates-io`) list `Fieldnote-Echo` and `toadkicker` as
-required reviewers, enable **prevent self-review**, enforce a **30-minute wait
-timer**, and restrict deployment to the **release-tag pattern
-`v[0-9]*.[0-9]*.[0-9]*`** (the tag-triggered workflow runs on
-`refs/tags/...`, not `refs/heads/main`, so a branch-only allowlist would
-deadlock publishing — see RELEASING.md). The `require-ci-green` gate
-independently verifies the tag SHA has a successful push-event CI run on `main`,
-and `main` itself is branch-protected (PR review, no force-push) — so a release
-cannot be cut from an unmerged or attacker branch, and no publish runs without
-an explicit human approval by a listed release approver who did not trigger the
-deployment. The remaining residual is compromise or misuse of an eligible
-approver account, or collusion between release participants. *Mitigations:*
-strong 2FA / passkeys on both approver accounts, a small reviewed approver list,
-and the 30-minute deployment window for the non-triggering approver to inspect
-or cancel a bad release. See [`RELEASING.md`](RELEASING.md).
+**THREAT-SUPPLY-001 (open release blocker as of 2026-07-19): Release
+configuration and ownership.** The intended release-environment policy for
+both `pypi` and `crates-io` is: `Fieldnote-Echo` and `toadkicker` are eligible
+reviewers, self-review is prevented, a 30-minute wait timer is enforced, and
+deployment is restricted to the release-tag pattern
+`v[0-9]*.[0-9]*.[0-9]*`. The live environments currently retain the correct
+tag pattern but list only `Fieldnote-Echo`, permit self-review, and have no wait
+timer. Consequently `tests/release_environment_settings.sh` fails and **no
+v0.6.0 tag or publish should proceed**. Restore `toadkicker`, prevent
+self-review, and the 30-minute wait on both environments, then rerun the audit
+before tagging. The `require-ci-green` gate independently verifies the tag SHA
+has a successful push-event CI run on `main`, and `main` itself is
+branch-protected (PR review, no force-push), but those controls do not replace
+the independent publication approval gate. Once the environment audit passes,
+the remaining residual is compromise or misuse of an eligible approver account,
+or collusion between release participants. *Mitigations:* strong 2FA / passkeys
+on both approver accounts, a small reviewed approver list, and the 30-minute
+deployment window for the non-triggering approver to inspect or cancel a bad
+release. See [`RELEASING.md`](RELEASING.md).
 
 **THREAT-SUPPLY-002 (mitigated): Release immutability and tag integrity.**
 Published artifacts are **immutable by registry design** — crates.io is
@@ -507,7 +514,7 @@ blast radius of a compromised dependency separately.
 | THREAT-FFI-003 | FFI | Binding | Accidental telemetry through ABI stats | Low | Low | **Mitigated** — caller-owned stats, no logging |
 | THREAT-FFI-004 | FFI | Binding | Concurrent input mutation during released-GIL call | Medium | Medium | **P2** — documented contract |
 | THREAT-FFI-005 | FFI | Binding | Unsanitized path forwarding | Medium | Medium | **P2** — documented contract |
-| THREAT-SUPPLY-001 | Supply chain | Config | Release config / dual-approver gate | Low | Critical | **Mitigated** (two approvers, self-review blocked, 30-minute wait timer, `require-ci-green` main-SHA gate); residual = approver compromise / collusion |
+| THREAT-SUPPLY-001 | Supply chain | Config | Release config / dual-approver gate | Medium | Critical | **Release blocked** until both environment settings pass the pre-tag audit; tag policy and `require-ci-green` remain in place |
 | THREAT-SUPPLY-002 | Supply chain | Config | Release immutability / tag integrity | Low | High | **Mitigated** — registries immutable; GitHub immutable releases on + `main` protected |
 | THREAT-SUPPLY-003 | Supply chain | Config | Typosquatting adjacent names | Medium | Medium | P3 |
 | THREAT-QUERY-001 | Resource | Deployment | Batch / `k` exhaustion in serving | Medium | Medium | **P2** — deployment docs |

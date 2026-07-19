@@ -13,6 +13,25 @@
 //! verified snapshot of the canonical artifact path and related load metadata.
 //! The `ordvec-manifest` binary exposes the same bounded verification surfaces
 //! for command-line use.
+//!
+//! ```no_run
+//! use ordvec_manifest::{verify_for_load, VerifyOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = verify_for_load("quickstart.manifest.json", VerifyOptions::default())?;
+//! println!(
+//!     "verified {} rows at {}",
+//!     plan.metadata().vector_count,
+//!     plan.artifact_path().display()
+//! );
+//! // Load the index from plan.artifact_path() immediately, while the verified
+//! // bytes remain under the caller's control.
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See the crate README for a copy-and-run index creation and CLI verification
+//! path.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ordvec::{

@@ -487,17 +487,98 @@ def check_release_version_sync() -> None:
             )
 
     changelog = read_text("CHANGELOG.md")
-    if not re.search(rf"^## \[?{re.escape(core_version)}\]? - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+    release_heading = re.search(
+        rf"^## \[?{re.escape(core_version)}\]? - (\d{{4}}-\d{{2}}-\d{{2}})$",
+        changelog,
+        re.MULTILINE,
+    )
+    if release_heading is None:
         fail(f"CHANGELOG.md must contain a dated section for {core_version}")
     check_unreleased_section_empty_for_dated_version(changelog, core_version)
 
     threat_model = read_text("THREAT_MODEL.md")
-    if not re.search(
-        rf"^\>\s+\*\*Status:\*\*\s+v{re.escape(core_version)}\s+\(pre-1\.0\),",
-        threat_model,
+    release_date = release_heading.group(1)
+    expected_threat_status = (
+        f"> **Status:** v{core_version} (pre-1.0), {release_date}."
+    )
+    if expected_threat_status not in threat_model:
+        fail(
+            "THREAT_MODEL.md status must match the current changelog release "
+            f"and date: {expected_threat_status!r}"
+        )
+
+    semver_capture = r"v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+    release_contract_patterns = {
+        "README.md": (
+            rf"\bIn {semver_capture} it is\s+Rust-only",
+            rf"cross-language persisted retrieval widths in {semver_capture}",
+            rf"`RankQuantFastscan::\{{write,load\}}` calls\. In {semver_capture}",
+            rf"loads `\.ovfs` directly, but in {semver_capture}",
+        ),
+        "ordvec-python/README.md": (
+            rf"through the {semver_capture} Python `RankQuant` constructor",
+            rf"/blob/{semver_capture}/docs/bindings-safety\.md",
+        ),
+        "docs/INDEX_PROVENANCE.md": (
+            rf"^{semver_capture} `\.ovfs` is not covered",
+            rf"crosses a trust boundary in\s+{semver_capture}, bind the bytes",
+        ),
+        "docs/PERSISTED_FORMAT.md": (
+            rf"In {semver_capture}, `probe_index_metadata\(path\)` rejects",
+            rf"probe-versus-load contract in {semver_capture}\.",
+        ),
+        "docs/compatibility-policy.md": (
+            rf"supported, but in {semver_capture} `\.ovfs`",
+            rf"^{semver_capture}\. Promoting `\.ovfs`",
+        ),
+    }
+    for path, patterns in release_contract_patterns.items():
+        text = read_text(path)
+        for pattern in patterns:
+            match = re.search(pattern, text, re.MULTILINE)
+            if match is None:
+                fail(f"{path}: current-release contract marker is missing: {pattern!r}")
+            if match.group(1) != core_version:
+                fail(
+                    f"{path}: current-release contract says v{match.group(1)}, "
+                    f"expected v{core_version}"
+                )
+
+    schema_source = read_text("ordvec-manifest/src/lib.rs")
+    schema_match = re.search(
+        r'^pub const SCHEMA_VERSION: &str = "ordvec\.index_manifest\.v([1-9][0-9]*)";$',
+        schema_source,
         re.MULTILINE,
-    ):
-        fail(f"THREAT_MODEL.md status must mention v{core_version}")
+    )
+    if schema_match is None:
+        fail("ordvec-manifest/src/lib.rs: could not read the manifest schema major")
+    schema_major = schema_match.group(1)
+    schema_contract_patterns = {
+        "README.md": (
+            r"`probe_index_metadata\(\)` / `ordvec-manifest` v([1-9][0-9]*) contract",
+            r"`probe_index_metadata\(\)` or `ordvec-manifest` v([1-9][0-9]*)\.",
+        ),
+        "docs/INDEX_PROVENANCE.md": (
+            r"`ordvec-manifest` v([1-9][0-9]*)\. This note",
+            r"The v([1-9][0-9]*) verifier intentionally does not create or verify `\.ovfs`",
+            r"manifest v([1-9][0-9]*) simply\s+does not bind or probe those bytes",
+        ),
+        "docs/compatibility-policy.md": (
+            r"`ordvec-manifest` v([1-9][0-9]*) contract\. Feature-gated",
+            r"and v([1-9][0-9]*) JSON schema are treated as\s+stable release surfaces",
+        ),
+    }
+    for path, patterns in schema_contract_patterns.items():
+        text = read_text(path)
+        for pattern in patterns:
+            match = re.search(pattern, text, re.MULTILINE)
+            if match is None:
+                fail(f"{path}: current-schema contract marker is missing: {pattern!r}")
+            if match.group(1) != schema_major:
+                fail(
+                    f"{path}: current-schema contract says v{match.group(1)}, "
+                    f"expected v{schema_major}"
+                )
 
     fuzz_lock = read_text("fuzz/Cargo.lock")
     if not re.search(
@@ -670,6 +751,29 @@ def check_manifest_cli_defaults() -> None:
     if "cargo install ordvec-manifest" not in readme:
         fail("ordvec-manifest/README.md: must document default cargo install")
 
+    matrix = read_text("docs/artifact-platform-matrix.md")
+    matrix_row = re.search(
+        r"^\| `ordvec-manifest` Rust crate \|.*$", matrix, re.MULTILINE
+    )
+    if matrix_row is None:
+        fail("docs/artifact-platform-matrix.md: ordvec-manifest Rust crate row is missing")
+    row_text = matrix_row.group(0)
+    if re.search(r"default features? (?:are )?empty", row_text, re.IGNORECASE):
+        fail(
+            "docs/artifact-platform-matrix.md: ordvec-manifest defaults must not be "
+            "documented as empty"
+        )
+    for required_fragment in (
+        "default feature `cli`",
+        "optional `sqlite` and `sqlite-bundled`",
+        "disable defaults",
+    ):
+        if required_fragment not in row_text:
+            fail(
+                "docs/artifact-platform-matrix.md: ordvec-manifest row must mention "
+                f"{required_fragment!r}"
+            )
+
 
 def check_publication_model() -> None:
     expected_publish = {
@@ -689,6 +793,7 @@ def check_publication_model() -> None:
 
 
 def check_python_package_metadata() -> None:
+    release_tag = f"v{package_version('Cargo.toml')}"
     pyproject = load_toml("ordvec-python/pyproject.toml")
     project = mapping(pyproject.get("project"), "ordvec-python/pyproject.toml: project")
     if project.get("name") != "ordvec":
@@ -728,6 +833,11 @@ def check_python_package_metadata() -> None:
         "Homepage": "https://github.com/Project-Navi/ordvec",
         "Repository": "https://github.com/Project-Navi/ordvec",
         "Issues": "https://github.com/Project-Navi/ordvec/issues",
+        "Documentation": (
+            f"https://github.com/Project-Navi/ordvec/blob/{release_tag}/"
+            "ordvec-python/README.md"
+        ),
+        "Changelog": "https://github.com/Project-Navi/ordvec/blob/main/CHANGELOG.md",
         "Formalization": "https://github.com/Project-Navi/ordvec-formalization",
     }.items():
         if urls.get(key) != expected:
@@ -789,6 +899,11 @@ def check_python_package_metadata() -> None:
         "Homepage": "https://github.com/Project-Navi/ordvec",
         "Repository": "https://github.com/Project-Navi/ordvec",
         "Issues": "https://github.com/Project-Navi/ordvec/issues",
+        "Documentation": (
+            f"https://github.com/Project-Navi/ordvec/blob/{release_tag}/"
+            "ordvec-manifest-python/README.md"
+        ),
+        "Changelog": "https://github.com/Project-Navi/ordvec/blob/main/CHANGELOG.md",
     }.items():
         if manifest_urls.get(key) != expected:
             fail(
@@ -835,6 +950,66 @@ def check_python_package_metadata() -> None:
     dependabot = read_text(".github/dependabot.yml")
     if "floor >=2.2" not in dependabot:
         fail(".github/dependabot.yml must keep the Python NumPy floor comment at >=2.2")
+
+
+def check_first_run_docs() -> None:
+    readme = read_text("README.md")
+    quickstart_pos = readme.find("## Quickstart: see a result in 30 seconds")
+    benchmark_pos = readme.find("## Benchmark at a glance")
+    if quickstart_pos < 0 or benchmark_pos < 0 or quickstart_pos > benchmark_pos:
+        fail("README.md: the runnable quickstart must appear before benchmark detail")
+    for required in (
+        "## Choose your surface",
+        "top document: 0 (score 0.396)",
+        'index.write("quickstart.ovrq")',
+        'RankQuant.load("quickstart.ovrq")',
+        "examples/quickstart.rs",
+    ):
+        if required not in readme:
+            fail(f"README.md: first-run path must include {required!r}")
+    if "link TBD" in readme:
+        fail("README.md: public release links must not contain a TBD placeholder")
+
+    crate_docs = read_text("src/lib.rs")
+    for path, text in (("README.md", readme), ("src/lib.rs", crate_docs)):
+        if "10_000" in text[text.find("RankQuant::new") : text.find("RankQuant::new") + 800]:
+            fail(f"{path}: first example must not allocate a 10,000-row placeholder corpus")
+
+    python_readme = read_text("ordvec-python/README.md")
+    install_pos = python_readme.find("python -m pip install --upgrade ordvec")
+    import_pos = python_readme.find("from ordvec import RankQuant")
+    if install_pos < 0 or import_pos < 0 or install_pos > import_pos:
+        fail("ordvec-python/README.md: installation must precede the first import")
+    for required in (
+        "top document: 0 (score 0.396)",
+        'index.write("quickstart.ovrq")',
+        "Continuing from the quickstart",
+    ):
+        if required not in python_readme:
+            fail(f"ordvec-python/README.md: first-run path must include {required!r}")
+    if "np.random" in python_readme:
+        fail("ordvec-python/README.md: first-run examples must be deterministic")
+
+    manifest_readme = read_text("ordvec-manifest/README.md")
+    for required in (
+        "## First verified index",
+        'index.write("quickstart.ovrq")',
+        "quickstart.manifest.json\nverified",
+    ):
+        if required not in manifest_readme:
+            fail(f"ordvec-manifest/README.md: first-run path must include {required!r}")
+
+    manifest_python_readme = read_text("ordvec-manifest-python/README.md")
+    for required in (
+        "python -m pip install --upgrade ordvec ordvec-manifest",
+        'index.write("quickstart.ovrq")',
+        "verified: True",
+    ):
+        if required not in manifest_python_readme:
+            fail(
+                "ordvec-manifest-python/README.md: first-run path must include "
+                f"{required!r}"
+            )
 
 
 def check_release_docs_include_manifest_pypi_lane() -> None:
@@ -960,6 +1135,7 @@ def check_package_contents() -> None:
             "docs/compatibility-policy.md",
             "docs/determinism.md",
             "examples/bench_rank.rs",
+            "examples/quickstart.rs",
             "src/lib.rs",
             "tests/index/main.rs",
             "tests/persistence_compat.rs",
@@ -2150,6 +2326,7 @@ def main() -> None:
     check_manifest_cli_defaults()
     check_publication_model()
     check_python_package_metadata()
+    check_first_run_docs()
     check_release_docs_include_manifest_pypi_lane()
     check_strict_release_tag_patterns(workflow, WORKFLOW_PATH)
     check_package_contents()

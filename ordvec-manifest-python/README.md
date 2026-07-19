@@ -2,24 +2,41 @@
 
 Python bindings for the `ordvec-manifest` verifier.
 
-Install from PyPI:
+## First verified index
 
 ```bash
-python -m pip install ordvec-manifest
+python -m pip install --upgrade ordvec ordvec-manifest
 ```
-
-Import as `ordvec_manifest`. The package exposes the Rust manifest verifier as
-dict-returning Python functions:
 
 ```python
+import numpy as np
+from ordvec import RankQuant
 import ordvec_manifest
 
-report = ordvec_manifest.verify_manifest("index.manifest.json")
-if not report["ok"]:
-    raise RuntimeError(report["errors"])
+documents = np.array([
+    [8, 7, 6, 5, 4, 3, 2, 1],
+    [1, 2, 3, 4, 5, 6, 7, 8],
+], dtype=np.float32)
+index = RankQuant(dim=8, bits=1)
+index.add(documents)
+index.write("quickstart.ovrq")
+
+ordvec_manifest.create_manifest(
+    "quickstart.ovrq",
+    "quickstart.manifest.json",
+    "quickstart-embedding-v1",
+    row_id_is_identity=True,
+)
+report = ordvec_manifest.verify_manifest("quickstart.manifest.json")
+print(f"verified: {report['ok']}")
 ```
 
-Create manifests with caller-owned sidecars by passing dictionaries with
+```text
+verified: True
+```
+
+The package exposes the Rust manifest verifier as dict-returning Python
+functions. To bind existing caller-owned sidecars, pass dictionaries with
 `name`, `path`, and optional `required`:
 
 ```python

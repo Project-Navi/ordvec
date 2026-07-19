@@ -89,6 +89,14 @@ _No unreleased changes._
 
 ### Changed
 
+- **First-run and release surfaces are aligned for v0.6.0.** The root and PyPI
+  READMEs now lead with a tiny deterministic retrieval that prints a checked
+  result, show persistence/reopen, and route users to the Rust, Python, CLI,
+  and manifest packages. Both manifest packages include an end-to-end
+  create-and-verify path, and every `ordvec-manifest` command and option now
+  has CLI help text. Release invariants pin the current package version,
+  manifest schema, feature defaults, public metadata links, and first-run
+  examples so the next release cannot silently drift across surfaces.
 - **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
   manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
   and `created_at` are removed from `IndexManifest`, creation omits the

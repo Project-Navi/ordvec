@@ -16,6 +16,84 @@ Training-free ordinal & sign quantization for vector retrieval.
 that quantizes the **ordinal (rank) and sign structure** of an embedding —
 no codebook, no learned rotation, no graph to build.
 
+## Choose your surface
+
+| You want to... | Use | Install |
+|---|---|---|
+| Build retrieval in Rust | [`ordvec`](https://crates.io/crates/ordvec) | `cargo add ordvec@0.6` |
+| Build retrieval in Python | [`ordvec`](https://pypi.org/project/ordvec/) | `python -m pip install ordvec` |
+| Create or verify index manifests from Rust or a CLI | [`ordvec-manifest`](https://crates.io/crates/ordvec-manifest) | `cargo install ordvec-manifest` |
+| Verify manifests from Python | [`ordvec-manifest`](https://pypi.org/project/ordvec-manifest/) | `python -m pip install ordvec-manifest` |
+
+## Quickstart: see a result in 30 seconds
+
+Python:
+
+```bash
+python -m pip install --upgrade ordvec
+```
+
+```python
+import numpy as np
+from ordvec import RankQuant
+
+documents = np.array([
+    [8, 7, 6, 5, 4, 3, 2, 1],
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    [8, 1, 7, 2, 6, 3, 5, 4],
+], dtype=np.float32)
+query = np.array([[8, 7, 6, 5, 4, 3, 2, 1]], dtype=np.float32)
+
+index = RankQuant(dim=8, bits=1)
+index.add(documents)
+scores, ids = index.search_asymmetric(query, k=1)
+print(f"top document: {ids[0, 0]} (score {scores[0, 0]:.3f})")
+```
+
+```text
+top document: 0 (score 0.396)
+```
+
+Rust:
+
+```bash
+cargo add ordvec@0.6
+```
+
+Or add the dependency directly:
+
+```toml
+[dependencies]
+ordvec = "0.6"
+```
+
+```rust
+use ordvec::RankQuant;
+
+let documents = [
+    8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0,
+    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+    8.0, 1.0, 7.0, 2.0, 6.0, 3.0, 5.0, 4.0,
+];
+let query = [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+
+let mut index = RankQuant::new(8, 1);
+index.add(&documents);
+let results = index.search_asymmetric(&query, 1);
+assert_eq!(results.indices_for_query(0)[0], 0);
+```
+
+The runnable Rust version is [`examples/quickstart.rs`](examples/quickstart.rs).
+
+Persist and reopen the same index without keeping the original float corpus:
+
+```python
+index.write("quickstart.ovrq")
+reopened = RankQuant.load("quickstart.ovrq")
+_, reopened_ids = reopened.search_asymmetric(query, k=1)
+assert reopened_ids[0, 0] == 0
+```
+
 ## What is ordinal retrieval?
 
 Ordinal retrieval is a retrieval family where the index operates on order/sign
@@ -78,7 +156,7 @@ and the gap widens over the committed subsampling sweep:
   layers are the right comparison target; this README does not claim public
   million-scale HNSW crossover or GPU bandwidth numbers until the underlying run
   artifacts are committed.
-- **Reproducible on your machine, one command:**
+- **Reproducible on your machine:**
 
   ```sh
   make bench-beir-setup     # Python deps + CUDA llama-cpp-python (GGUF Q8 encoder)
@@ -124,7 +202,7 @@ structure of each vector on its own:
   known before you see any data (256 B at dim = 1024, 2-bit), with
   `bits ∈ {1, 2, 4}` the size/recall knob. (`b = 8` is an opt-in
   evidence/refinement width — asymmetric scoring at any dim, symmetric only
-  when `dim % 256 == 0` — not a broad retrieval mode. In v0.5.0 it is
+  when `dim % 256 == 0` — not a broad retrieval mode. In v0.6.0 it is
   Rust-only, in-memory, not accepted by the Python `RankQuant` constructor, and
   not persistable to `.ovrq`; each prepared asymmetric query owns a
   `dim * 256` `f32` LUT, about 64 MiB at the maximum dimension.)
@@ -148,7 +226,7 @@ large-scale serving rather than competing with one.
 - **`RankQuant`** — ranks bucketed into `1 << bits` equal-width
   bins, `bits` bits per coordinate (`dim * bits / 8` bytes/doc). Both a
   symmetric (Spearman) and asymmetric (float-query LUT) scorer. `bits ∈
-  {1, 2, 4}` are the cross-language persisted retrieval widths in v0.5.0;
+  {1, 2, 4}` are the cross-language persisted retrieval widths in v0.6.0;
   `b = 8` is Rust-only and in-memory for evidence/refinement.
 - **`Bitmap`** — a top-bucket bitmap per document (one bit per
   coordinate); scoring is `popcount(Q AND D)`, a coarsened rank overlap.
@@ -162,8 +240,8 @@ Two further paths, for callers who need them:
   scalar dispatch) for absolute-minimum stage-1 scan latency, at 2× the
   RankQuant b=2 footprint (`dim/2` bytes/doc) and 8-bit LUT scoring noise. It
   persists to `.ovfs` (magic `OVFS`) through direct
-  `RankQuantFastscan::{write,load}` calls. In v0.5.0, `.ovfs` is not yet part
-  of the `probe_index_metadata()` / `ordvec-manifest` v1 contract; bind it with
+  `RankQuantFastscan::{write,load}` calls. In v0.6.0, `.ovfs` is not yet part
+  of the `probe_index_metadata()` / `ordvec-manifest` v2 contract; bind it with
   an application-owned digest or attestation if it crosses a trust boundary.
   Reach for it only when scan latency at b=2 is the binding constraint; the
   headline retrieval surface is still `RankQuant` / `Bitmap` / two-stage.
@@ -207,36 +285,6 @@ representation-complete. Whether true neighbours clear a cutoff remains an
 empirical contract to measure.
 
 Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
-
-## Quickstart
-
-```toml
-[dependencies]
-ordvec = "0.6"
-
-# Or, to track unreleased `main`, use a git dependency instead:
-# ordvec = { git = "https://github.com/Project-Navi/ordvec" }
-```
-
-```rust
-use ordvec::RankQuant;
-
-let dim = 1024;
-let n_docs = 10_000;
-let mut index = RankQuant::new(dim, 2);   // 2 bits/coord → 256 bytes/doc
-
-// `add` takes a flat, row-major buffer of `dim * n_docs` f32s.
-// Replace this with your real embeddings.
-let doc_embeddings: Vec<f32> = vec![0.0; dim * n_docs];
-index.add(&doc_embeddings);
-
-// Asymmetric scan: full-precision queries vs bucketed docs (recommended).
-let query_embeddings: Vec<f32> = vec![0.0; dim * 4]; // 4 queries, row-major
-let results = index.search_asymmetric(&query_embeddings, 10);
-
-let top_ids = results.indices_for_query(0);     // top-10 doc ids for query 0
-let top_scores = results.scores_for_query(0);
-```
 
 For the two-stage compressed-scan path (`Bitmap` / `SignBitmap` candidate
 generation → `RankQuant` rerank) and the full mode comparison, see
@@ -342,9 +390,6 @@ candidate slices passed to `Search` until the call returns.
   [`theorem-map`](https://github.com/Project-Navi/ordvec-formalization/blob/main/docs/theorem-map.md),
   and [`reviewer brief`](https://github.com/Project-Navi/ordvec-formalization/blob/main/docs/reviewer-brief.md).
 - **API docs:** <https://docs.rs/ordvec>, <https://docs.rs/ordvec-manifest>
-- **Paper (OrdVec / RankQuant):** _link TBD — see
-  [Research collaboration](#research-collaboration)._
-
 ## Benchmarks
 
 ### BEIR retrieval (public datasets, reproducible)
@@ -517,8 +562,8 @@ The probe/manifest-covered on-disk formats (`.ovr` / `.ovrq` / `.ovbm` /
 **no built-in checksum, MAC, or signature — by design.** The loaders validate
 *structure* (magic, version, bounds, exact-length payload) but not *origin*: a
 structurally valid file can still be untrusted. `RankQuantFastscan` also writes
-and loads `.ovfs` directly, but in v0.5.0 that format is not yet covered by
-`probe_index_metadata()` or `ordvec-manifest` v1. If an index file crosses a
+and loads `.ovfs` directly, but in v0.6.0 that format is not yet covered by
+`probe_index_metadata()` or `ordvec-manifest` v2. If an index file crosses a
 trust boundary (network transfer, shared storage), verify it before loading.
 `ordvec-manifest` binds supported index files to a JSON manifest by SHA-256,
 header metadata, row identity, named auxiliary sidecars, and attestation shape
