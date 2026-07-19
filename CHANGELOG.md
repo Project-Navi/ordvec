@@ -33,32 +33,6 @@ _No unreleased changes._
   read core; the sqlite registry's private duplicate hasher is deduped
   onto the public helper.
 
-### Breaking changes
-
-- **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
-  manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
-  and `created_at` are removed from `IndexManifest`, creation omits the
-  optional `build` field (serialized as absent, not `null`), and auxiliary
-  artifact entries are sorted by
-  `(name, path)`, so identical bundle content serializes to byte-identical
-  manifests and `sha256(manifest.json)` is the bundle's content address.
-  Existing v1 manifests no longer parse; loading one fails with an error
-  naming both schema versions (zero back-compat, pre-release). Embedded
-  paths must now be canonical — bundle-relative, forward slashes, no `.`,
-  `..`, or empty segments — enforced both at creation (non-embeddable
-  inputs fail `create` instead of minting a manifest that fails its own
-  verification) and at verification (`*_path_not_canonical` codes, now
-  also covering calibration and encoder-distortion profile refs). Absolute
-  paths and escaping `..` paths remain available behind the existing
-  `allow_absolute_paths` / `allow_path_escape` opt-ins. The
-  `write_manifest_file` serialization form is documented as the single
-  canonical byte form: hashing and signing operate on stored bytes, and any
-  serializer change is a schema-version event. The sqlite report registry
-  drops its `manifest_id` column: the cached `verification_reports` table is
-  migrated in place on open (rows preserved, under one atomic transaction),
-  while the rebuildable `active_manifest` pointer is reset and must be
-  re-activated.
-
 ### Performance
 
 - **Batched sign candidate generation now streams the corpus once per call.**
@@ -115,6 +89,29 @@ _No unreleased changes._
 
 ### Changed
 
+- **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
+  manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
+  and `created_at` are removed from `IndexManifest`, creation omits the
+  optional `build` field (serialized as absent, not `null`), and auxiliary
+  artifact entries are sorted by
+  `(name, path)`, so identical bundle content serializes to byte-identical
+  manifests and `sha256(manifest.json)` is the bundle's content address.
+  This is an intentional pre-1.0 minor-version break: v1 manifests from
+  `0.5.x` do not parse, and loading one fails with an error naming both schema
+  versions. Embedded paths must now be canonical — bundle-relative, forward
+  slashes, no `.`, `..`, or empty segments — enforced both at creation
+  (non-embeddable inputs fail `create` instead of minting a manifest that
+  fails its own verification) and at verification (`*_path_not_canonical`
+  codes, now also covering calibration and encoder-distortion profile refs).
+  Absolute paths and escaping `..` paths remain available behind the existing
+  `allow_absolute_paths` / `allow_path_escape` opt-ins. The
+  `write_manifest_file` serialization form is documented as the single
+  canonical byte form: hashing and signing operate on stored bytes, and any
+  serializer change is a schema-version event. The sqlite report registry
+  drops its `manifest_id` column: the cached `verification_reports` table is
+  migrated in place on open (rows preserved, under one atomic transaction),
+  while the rebuildable `active_manifest` pointer is reset and must be
+  re-activated.
 - **ordvec-manifest: derived artifact size bounds.** Verification now bounds
   every artifact read by its manifest-declared `file_size_bytes` (the manifest
   itself remains hard-capped at 1 MiB and SHA-256 pins content); manifest
