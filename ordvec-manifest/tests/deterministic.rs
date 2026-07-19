@@ -4,7 +4,7 @@ use ordvec_manifest::{
     sha256_file, verify_manifest_with_base, write_manifest_file, CreateAuxiliaryArtifact,
     CreateManifestOptions, CreateRowIdentity, VerifyOptions, SCHEMA_VERSION,
 };
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -130,6 +130,161 @@ fn auxiliary_declaration_order_does_not_change_manifest_bytes() {
     let bytes_a = build_manifest_bytes(temp_a.path(), &["aux-a.bin", "aux-b.bin"]);
     let bytes_b = build_manifest_bytes(temp_b.path(), &["aux-b.bin", "aux-a.bin"]);
     assert_eq!(bytes_a, bytes_b);
+}
+
+#[test]
+fn nested_json_order_and_number_spelling_do_not_change_manifest_bytes() {
+    let temp_a = tempfile::tempdir().unwrap();
+    let temp_b = tempfile::tempdir().unwrap();
+    let index_a = write_index(temp_a.path());
+    let index_b = write_index(temp_b.path());
+    let path_a = temp_a.path().join("manifest.json");
+    let path_b = temp_b.path().join("manifest.json");
+    let mut manifest_a = create_manifest_for_index(
+        &index_a,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_a,
+    )
+    .unwrap();
+    let mut manifest_b = create_manifest_for_index(
+        &index_b,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_b,
+    )
+    .unwrap();
+
+    let mut descending = Map::new();
+    descending.insert("z".to_string(), serde_json::from_str("1e0").unwrap());
+    descending.insert("a".to_string(), json!({"y": true, "b": false}));
+    let mut ascending = Map::new();
+    ascending.insert("a".to_string(), json!({"b": false, "y": true}));
+    ascending.insert("z".to_string(), serde_json::from_str("1.0").unwrap());
+    manifest_a
+        .extensions
+        .insert("nested".to_string(), Value::Object(descending));
+    manifest_b
+        .extensions
+        .insert("nested".to_string(), Value::Object(ascending));
+
+    write_manifest_file(&manifest_a, &path_a).unwrap();
+    write_manifest_file(&manifest_b, &path_b).unwrap();
+    assert_eq!(fs::read(path_a).unwrap(), fs::read(path_b).unwrap());
+}
+
+#[test]
+fn arbitrary_precision_numbers_that_would_alias_are_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    for (case, number) in [
+        ("first", "18446744073709551616"),
+        ("second", "18446744073709551617"),
+        ("decimal", "0.100000000000000005"),
+    ] {
+        let manifest_path = temp.path().join(format!("{case}.json"));
+        let mut manifest = create_manifest_for_index(
+            &index,
+            CreateRowIdentity::RowIdIdentity,
+            "test-embedding",
+            &manifest_path,
+        )
+        .unwrap();
+        manifest
+            .extensions
+            .insert("precise".to_string(), serde_json::from_str(number).unwrap());
+        let err = write_manifest_file(&manifest, &manifest_path).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the exact canonical"),
+            "{number}: {err}"
+        );
+        assert!(!manifest_path.exists());
+    }
+}
+
+#[test]
+fn manifest_write_atomically_replaces_the_destination_inode() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let old_inode_link = temp.path().join("old-manifest-inode");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    fs::write(&manifest_path, b"old manifest bytes").unwrap();
+    fs::hard_link(&manifest_path, &old_inode_link).unwrap();
+    write_manifest_file(&manifest, &manifest_path).unwrap();
+
+    assert_eq!(fs::read(old_inode_link).unwrap(), b"old manifest bytes");
+    assert_eq!(
+        load_manifest_file(manifest_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        SCHEMA_VERSION
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_write_matches_create_mode_and_preserves_existing_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let control_path = temp.path().join("create-mode-control");
+    fs::File::create(&control_path).unwrap();
+    let create_mode = fs::metadata(&control_path).unwrap().permissions().mode() & 0o777;
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    write_manifest_file(&manifest, &manifest_path).unwrap();
+    assert_eq!(
+        fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777,
+        create_mode
+    );
+
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o640)).unwrap();
+    write_manifest_file(&manifest, &manifest_path).unwrap();
+    assert_eq!(
+        fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_write_does_not_replace_a_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    symlink("missing-manifest-target", &manifest_path).unwrap();
+
+    assert!(write_manifest_file(&manifest, &manifest_path).is_err());
+    assert!(fs::symlink_metadata(manifest_path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -348,4 +503,35 @@ fn create_rejects_paths_it_cannot_embed_canonically() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("cannot be embedded"), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn create_rejects_non_utf8_paths_instead_of_embedding_them_lossily() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let non_utf8 = temp
+        .path()
+        .join(OsString::from_vec(b"aux-\xff.bin".to_vec()));
+    fs::write(&non_utf8, b"aux").unwrap();
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: "aux".to_string(),
+                path: non_utf8,
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not valid UTF-8"), "{err}");
 }

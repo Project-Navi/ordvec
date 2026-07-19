@@ -222,6 +222,8 @@ jobs:
         run: cargo build
       - name: cargo test
         run: cargo test
+      - name: cargo test -p ordvec-manifest --all-features
+        run: cargo test -p ordvec-manifest --all-features
 
   # ----------------------------------------------------------------------
   # No-system-deps guarantee + packaging check. Fails if any forbidden

@@ -136,6 +136,24 @@ _No unreleased changes._
   `sha256_file_bounded` no longer materialises the file in memory before
   hashing.
 
+### Fixed
+
+- **`ordvec-manifest`: canonical content addresses are independent of
+  `serde_json` feature unification.** Nested extension and attestation maps are
+  recursively key-sorted and JSON numbers are normalized before serialization,
+  so downstream `preserve_order` / `arbitrary_precision` features cannot change
+  the same logical manifest's bytes. Manifest creation now rejects non-UTF-8
+  artifact paths instead of embedding the lossy replacement character.
+- **`ordvec-manifest`: manifest writes are atomic and fail before replacement.**
+  `write_manifest_file` writes and syncs a same-directory temporary file before
+  atomically replacing the destination, and rejects non-finite distortion
+  values before touching an existing manifest. New-file mode/umask behavior and
+  existing portable permission bits are preserved.
+- **`ordvec-manifest`: restore the declared Rust 1.89 floor for SQLite builds.**
+  The optional `rusqlite` dependency returns to the compatible 0.39 line after
+  0.40's build dependency used a library feature unavailable on Rust 1.89; the
+  all-features manifest suite now runs in the permanent MSRV lane.
+
 ## 0.5.0 - 2026-06-19
 
 ### Security

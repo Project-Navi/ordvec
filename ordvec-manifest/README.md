@@ -38,6 +38,13 @@ by `(name, path)`, and embedded paths must be canonical (bundle-relative,
 forward slashes, no `.`, `..`, or empty segments). Relative paths resolve from
 the manifest file's directory, absolute paths are rejected by default, and
 relative paths may not escape the manifest directory unless explicitly allowed.
+Nested extension and attestation JSON is recursively canonicalized, independent
+of downstream `serde_json` ordering/precision features; non-UTF-8 paths and
+non-finite distortion values fail before serialization. Manifest writes use a
+synced same-directory temporary file and atomically replace the destination;
+new Unix files retain `File::create`'s mode/umask behavior and replacements
+preserve portable permission bits (not platform-specific ACLs or ownership).
+Symlink and other non-regular destinations are rejected rather than replaced.
 `create` follows the same policy: by default it emits only paths that should
 verify with default settings. If an artifact or JSONL row map lives outside the
 manifest directory, pass `--allow-path-escape` at create time and again at
