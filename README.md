@@ -212,7 +212,7 @@ Details in [`docs/RANK_MODES.md`](docs/RANK_MODES.md).
 
 ```toml
 [dependencies]
-ordvec = "0.7"
+ordvec = "0.6"
 
 # Or, to track unreleased `main`, use a git dependency instead:
 # ordvec = { git = "https://github.com/Project-Navi/ordvec" }

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
-## 0.7.0 - 2026-07-13
+## 0.6.0 - 2026-07-19
 
 ### Added
 
@@ -33,7 +33,7 @@ _No unreleased changes._
   read core; the sqlite registry's private duplicate hasher is deduped
   onto the public helper.
 
-### Changed
+### Breaking changes
 
 - **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
   manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
@@ -58,8 +58,6 @@ _No unreleased changes._
   migrated in place on open (rows preserved, under one atomic transaction),
   while the rebuildable `active_manifest` pointer is reset and must be
   re-activated.
-
-## 0.6.0 - 2026-07-04
 
 ### Performance
 

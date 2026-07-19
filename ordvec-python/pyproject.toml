@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ordvec"
-version = "0.7.0"
+version = "0.6.0"
 description = "Training-free ordinal & sign quantization for compressed vector retrieval"
 readme = "README.md"
 requires-python = ">=3.10"
