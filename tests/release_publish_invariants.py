@@ -972,7 +972,10 @@ def check_first_run_docs() -> None:
 
     crate_docs = read_text("src/lib.rs")
     for path, text in (("README.md", readme), ("src/lib.rs", crate_docs)):
-        if "10_000" in text[text.find("RankQuant::new") : text.find("RankQuant::new") + 800]:
+        example_pos = text.find("RankQuant::new")
+        if example_pos < 0:
+            fail(f"{path}: expected RankQuant::new in the first-run example")
+        if "10_000" in text[example_pos : example_pos + 800]:
             fail(f"{path}: first example must not allocate a 10,000-row placeholder corpus")
 
     python_readme = read_text("ordvec-python/README.md")
@@ -1544,6 +1547,13 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         'conclusion\" = \"success',
         "SECONDS >= deadline",
         'sleep \"$POLL_INTERVAL_SECONDS\"',
+        'api_status=\"$(sed -nE',
+        "api_exit_status=$?",
+        "408|429|5??)",
+        "connection (reset|refused|closed)",
+        "rate.?limit|secondary rate|abuse detection",
+        "retryable_api_error=true",
+        "API query failed permanently",
     )
     for fragment in required_poll_fragments:
         if fragment not in found_gate_run:
@@ -1619,23 +1629,53 @@ def check_cargo_deny_workspace_scope(
         if action_name(mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]"))
         == "embarkstudios/cargo-deny-action"
     ]
-    if len(deny_steps) != 1:
-        fail(f"{path}: jobs.{job_name} must use exactly one cargo-deny action")
-    inputs = mapping(deny_steps[0].get("with"), f"{path}: jobs.{job_name}.cargo-deny.with")
-    if inputs.get("command") != "check":
-        fail(f"{path}: jobs.{job_name} cargo-deny command must be check")
-    argument_words = shlex.split(str(inputs.get("arguments", "")))
-    if "--workspace" not in argument_words:
-        fail(f"{path}: jobs.{job_name} cargo-deny must root the full workspace graph")
-    if "--all-features" not in argument_words:
-        fail(f"{path}: jobs.{job_name} cargo-deny must activate all workspace features")
-    if "--locked" not in argument_words:
-        fail(f"{path}: jobs.{job_name} cargo-deny must audit the committed lockfile")
-    command_arguments = str(inputs.get("command-arguments", "")).strip()
-    if advisories_only and command_arguments != "advisories":
-        fail(f"{path}: jobs.{job_name} scheduled scan must be scoped to advisories")
-    if not advisories_only and command_arguments:
-        fail(f"{path}: jobs.{job_name} PR gate must run every cargo-deny check")
+    if len(deny_steps) != 2:
+        fail(
+            f"{path}: jobs.{job_name} must use exactly two cargo-deny actions "
+            "(root workspace plus standalone fuzz lockfile)"
+        )
+
+    scoped_command_arguments: dict[str, str] = {}
+    for index, deny_step in enumerate(deny_steps):
+        inputs = mapping(
+            deny_step.get("with"), f"{path}: jobs.{job_name}.cargo-deny[{index}].with"
+        )
+        if inputs.get("command") != "check":
+            fail(f"{path}: jobs.{job_name} cargo-deny command must be check")
+        argument_words = shlex.split(str(inputs.get("arguments", "")))
+        if "--all-features" not in argument_words:
+            fail(f"{path}: jobs.{job_name} cargo-deny must activate all features")
+        if "--locked" not in argument_words:
+            fail(f"{path}: jobs.{job_name} cargo-deny must audit a committed lockfile")
+
+        has_fuzz_manifest = any(
+            argument_words[offset : offset + 2]
+            == ["--manifest-path", "fuzz/Cargo.toml"]
+            for offset in range(len(argument_words) - 1)
+        )
+        if "--workspace" in argument_words and not has_fuzz_manifest:
+            scope = "workspace"
+        elif has_fuzz_manifest and "--workspace" not in argument_words:
+            scope = "fuzz"
+        else:
+            fail(
+                f"{path}: jobs.{job_name} cargo-deny action must target either "
+                "--workspace or --manifest-path fuzz/Cargo.toml"
+            )
+        if scope in scoped_command_arguments:
+            fail(f"{path}: jobs.{job_name} has duplicate cargo-deny scope {scope!r}")
+        scoped_command_arguments[scope] = str(inputs.get("command-arguments", "")).strip()
+
+    if set(scoped_command_arguments) != {"workspace", "fuzz"}:
+        fail(f"{path}: jobs.{job_name} must audit both workspace and fuzz lockfile scopes")
+    expected_workspace_command = "advisories" if advisories_only else ""
+    if scoped_command_arguments["workspace"] != expected_workspace_command:
+        fail(
+            f"{path}: jobs.{job_name} workspace cargo-deny command arguments must be "
+            f"{expected_workspace_command!r}"
+        )
+    if scoped_command_arguments["fuzz"] != "advisories":
+        fail(f"{path}: jobs.{job_name} fuzz cargo-deny must be scoped to advisories")
 
 
 def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:

@@ -194,13 +194,40 @@ jobs:
               # A success-only filter cannot distinguish normal run-visibility
               # delay from terminal failure and was the source of issue #272.
               api_error="$(mktemp)"
-              if ! runs_json="$(gh api \
+              if runs_json="$(gh api \
                 "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&event=push&per_page=100" \
                 2>"$api_error")"; then
-                echo "waiting for ${wf}: API query failed: $(<"$api_error")"
+                :
+              else
+                api_exit_status=$?
+                api_message="$(<"$api_error")"
+                api_status="$(sed -nE 's/.*HTTP ([0-9]{3}).*/\1/p' "$api_error" | tail -n 1)"
+                retryable_api_error=false
+                case "$api_status" in
+                  408|429|5??)
+                    retryable_api_error=true
+                    ;;
+                  "")
+                    if [ "$api_exit_status" -ne 4 ] && grep -Eiq \
+                      'timeout|timed out|connection (reset|refused|closed)|could not resolve|temporary failure in name resolution|network is unreachable|TLS handshake|unexpected EOF|error connecting to' \
+                      "$api_error"; then
+                      retryable_api_error=true
+                    fi
+                    ;;
+                  403)
+                    if grep -Eiq 'rate.?limit|secondary rate|abuse detection' "$api_error"; then
+                      retryable_api_error=true
+                    fi
+                    ;;
+                esac
                 rm -f "$api_error"
-                all_green=false
-                continue
+                if "$retryable_api_error"; then
+                  echo "waiting for ${wf}: transient API query failure${api_status:+ (HTTP ${api_status})}: ${api_message}"
+                  all_green=false
+                  continue
+                fi
+                echo "::error::${wf}: API query failed permanently${api_status:+ (HTTP ${api_status})}: ${api_message}"
+                exit 1
               fi
               rm -f "$api_error"
 
