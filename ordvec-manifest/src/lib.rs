@@ -4602,10 +4602,13 @@ fn canonicalize_json_value(
         }
         serde_json::Value::Number(number) => {
             let original = number.to_string();
-            let normalized = if let Some(value) = number.as_i64() {
-                serde_json::Number::from(value)
-            } else if let Some(value) = number.as_u64() {
-                serde_json::Number::from(value)
+            let identity = decimal_identity(&original).ok_or_else(|| {
+                ManifestError::invalid(format!(
+                    "{context} contains a JSON number that cannot be represented canonically"
+                ))
+            })?;
+            let normalized = if let Some(integer) = canonical_integer_from_identity(&identity) {
+                integer
             } else {
                 let value = number.as_f64().ok_or_else(|| {
                     ManifestError::invalid(format!(
@@ -4622,7 +4625,7 @@ fn canonicalize_json_value(
                         "{context} contains a JSON number that cannot be represented canonically"
                     ))
                 })?;
-                if decimal_identity(&original) != decimal_identity(&normalized.to_string()) {
+                if decimal_identity(&normalized.to_string()).as_ref() != Some(&identity) {
                     return Err(ManifestError::invalid(format!(
                         "{context} contains a JSON number outside the exact canonical i64/u64/f64 domain"
                     )));
@@ -4634,6 +4637,40 @@ fn canonicalize_json_value(
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {}
     }
     Ok(())
+}
+
+fn canonical_integer_from_identity(identity: &(bool, String, i64)) -> Option<serde_json::Number> {
+    let (negative, digits, exponent) = identity;
+    if *exponent < 0 {
+        return None;
+    }
+
+    // Accumulate rather than materializing exponent zeroes. Any value outside
+    // u64 overflows after at most twenty decimal digits, even for a hostile
+    // arbitrary-precision exponent.
+    let mut magnitude = 0_u64;
+    for digit in digits.bytes() {
+        magnitude = magnitude
+            .checked_mul(10)?
+            .checked_add(u64::from(digit - b'0'))?;
+    }
+    let mut remaining_exponent = *exponent;
+    while remaining_exponent > 0 {
+        magnitude = magnitude.checked_mul(10)?;
+        remaining_exponent -= 1;
+    }
+
+    if *negative {
+        let i64_min_magnitude = (i64::MAX as u64) + 1;
+        if magnitude == i64_min_magnitude {
+            Some(serde_json::Number::from(i64::MIN))
+        } else {
+            let signed = i64::try_from(magnitude).ok()?;
+            Some(serde_json::Number::from(-signed))
+        }
+    } else {
+        Some(serde_json::Number::from(magnitude))
+    }
 }
 
 fn decimal_identity(value: &str) -> Option<(bool, String, i64)> {
