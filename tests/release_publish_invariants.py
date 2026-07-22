@@ -1648,11 +1648,18 @@ def check_cargo_deny_workspace_scope(
         if "--locked" not in argument_words:
             fail(f"{path}: jobs.{job_name} cargo-deny must audit a committed lockfile")
 
-        has_fuzz_manifest = any(
-            argument_words[offset : offset + 2]
-            == ["--manifest-path", "fuzz/Cargo.toml"]
-            for offset in range(len(argument_words) - 1)
-        )
+        if "--manifest-path" in argument_words:
+            fail(
+                f"{path}: jobs.{job_name} cargo-deny must use the action's "
+                "manifest-path input instead of duplicating the CLI option"
+            )
+        manifest_path = norm_path(inputs.get("manifest-path"))
+        has_fuzz_manifest = manifest_path == "fuzz/Cargo.toml"
+        if manifest_path and not has_fuzz_manifest:
+            fail(
+                f"{path}: jobs.{job_name} cargo-deny has unexpected manifest-path "
+                f"{manifest_path!r}"
+            )
         if "--workspace" in argument_words and not has_fuzz_manifest:
             scope = "workspace"
         elif has_fuzz_manifest and "--workspace" not in argument_words:
