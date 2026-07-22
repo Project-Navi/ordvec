@@ -4465,7 +4465,11 @@ fn create_auxiliary_artifacts(
 /// files use the same `0o666 & !umask` Unix mode as [`File::create`]; replacing
 /// an existing file preserves its [`fs::Permissions`]. Platform-specific ACLs,
 /// ownership, and extended attributes are outside this portable API contract.
-/// Existing symlinks and other non-regular destinations are rejected. A failed
+/// Existing symlinks and other non-regular destinations observed before the
+/// replacement are rejected. The destination is checked again immediately
+/// before replacement and, on Unix, an existing file's device/inode identity
+/// must still match. Callers must still serialize concurrent writers: portable
+/// rename is atomic replacement, not a compare-and-swap primitive. A failed
 /// validation or serialization never truncates an existing manifest.
 pub fn write_manifest_file(
     manifest: &IndexManifest,
@@ -4477,17 +4481,14 @@ pub fn write_manifest_file(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let inherited_permissions = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
-        Ok(_) => {
-            return Err(ManifestError::invalid(format!(
-                "manifest destination {} exists and is not a regular file",
-                path.display()
-            )))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(ManifestError::Io(error)),
-    };
+    let destination = snapshot_manifest_destination(path)?;
+    let inherited_permissions = destination.permissions.clone();
+
+    // Open the directory before writing or replacing anything. On Unix this
+    // makes a predictable directory-handle permission failure happen before
+    // the destination changes; the same handle is synced after the rename.
+    #[cfg(unix)]
+    let parent_directory = File::open(parent)?;
 
     let mut builder = tempfile::Builder::new();
     builder.prefix(".ordvec-manifest-").suffix(".tmp");
@@ -4512,10 +4513,81 @@ pub fn write_manifest_file(
         temporary.as_file().set_permissions(permissions)?;
     }
     temporary.as_file().sync_all()?;
+    persist_manifest_temporary(temporary, path, &destination)?;
+    #[cfg(unix)]
+    parent_directory.sync_all()?;
+    Ok(())
+}
+
+struct ManifestDestinationSnapshot {
+    permissions: Option<fs::Permissions>,
+    #[cfg(unix)]
+    identity: Option<(u64, u64)>,
+}
+
+fn snapshot_manifest_destination(
+    path: &Path,
+) -> Result<ManifestDestinationSnapshot, ManifestError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            #[cfg(unix)]
+            let identity = {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            };
+            Ok(ManifestDestinationSnapshot {
+                permissions: Some(metadata.permissions()),
+                #[cfg(unix)]
+                identity,
+            })
+        }
+        Ok(_) => Err(ManifestError::invalid(format!(
+            "manifest destination {} exists and is not a regular file",
+            path.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ManifestDestinationSnapshot {
+            permissions: None,
+            #[cfg(unix)]
+            identity: None,
+        }),
+        Err(error) => Err(ManifestError::Io(error)),
+    }
+}
+
+fn persist_manifest_temporary(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+    initial: &ManifestDestinationSnapshot,
+) -> Result<(), ManifestError> {
+    let current = snapshot_manifest_destination(path)?;
+    match (
+        initial.permissions.is_some(),
+        current.permissions.is_some(),
+    ) {
+        (false, true) => {
+            return Err(ManifestError::invalid(format!(
+                "manifest destination {} appeared during the write; coordinate concurrent writers and retry",
+                path.display()
+            )))
+        }
+        (true, false) => {
+            return Err(ManifestError::invalid(format!(
+                "manifest destination {} disappeared during the write; coordinate concurrent writers and retry",
+                path.display()
+            )))
+        }
+        _ => {}
+    }
+    #[cfg(unix)]
+    if initial.identity != current.identity {
+        return Err(ManifestError::invalid(format!(
+            "manifest destination {} was replaced during the write; coordinate concurrent writers and retry",
+            path.display()
+        )));
+    }
     temporary
         .persist(path)
         .map_err(|error| ManifestError::Io(error.error))?;
-    sync_parent_directory(parent)?;
     Ok(())
 }
 
@@ -4665,18 +4737,6 @@ fn validate_manifest_numbers_for_write(manifest: &IndexManifest) -> Result<(), M
         }
     }
     Ok(())
-}
-
-fn sync_parent_directory(parent: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(parent)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = parent;
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -5183,6 +5243,56 @@ mod tests {
         // skipping it and then resolving relative on Unix.
         assert!(!is_manifest_path_absolute("\\evil"));
         assert!(!is_manifest_path_absolute("\\"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_persist_validation_rejects_a_destination_swapped_to_a_symlink() {
+        use std::io::Write as _;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("manifest.json");
+        let target = directory.path().join("target.json");
+        fs::write(&destination, b"original").unwrap();
+        fs::write(&target, b"target").unwrap();
+        let initial = snapshot_manifest_destination(&destination).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        temporary.write_all(b"replacement").unwrap();
+
+        fs::remove_file(&destination).unwrap();
+        symlink(&target, &destination).unwrap();
+        let error = persist_manifest_temporary(temporary, &destination, &initial).unwrap_err();
+
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(target).unwrap(), b"target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_persist_validation_rejects_a_replaced_regular_inode() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("manifest.json");
+        fs::write(&destination, b"original").unwrap();
+        let initial = snapshot_manifest_destination(&destination).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        temporary.write_all(b"replacement").unwrap();
+
+        fs::remove_file(&destination).unwrap();
+        fs::write(&destination, b"concurrent writer").unwrap();
+        let error = persist_manifest_temporary(temporary, &destination, &initial).unwrap_err();
+
+        assert!(
+            error.to_string().contains("was replaced during the write"),
+            "{error}"
+        );
+        assert_eq!(fs::read(destination).unwrap(), b"concurrent writer");
     }
 
     #[test]

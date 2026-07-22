@@ -2,7 +2,7 @@ use ordvec::RankQuant;
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
     sha256_file, verify_manifest_with_base, write_manifest_file, CreateAuxiliaryArtifact,
-    CreateManifestOptions, CreateRowIdentity, VerifyOptions, SCHEMA_VERSION,
+    CreateManifestOptions, CreateRowIdentity, ManifestError, VerifyOptions, SCHEMA_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -261,6 +261,35 @@ fn manifest_write_matches_create_mode_and_preserves_existing_mode() {
         fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777,
         0o640
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_write_opens_parent_before_replacing_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(&manifest_path, b"original manifest").unwrap();
+
+    let original_permissions = fs::metadata(temp.path()).unwrap().permissions();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o300)).unwrap();
+    let result = write_manifest_file(&manifest, &manifest_path);
+    fs::set_permissions(temp.path(), original_permissions).unwrap();
+
+    match result.unwrap_err() {
+        ManifestError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        error => panic!("expected parent-directory permission error, got {error}"),
+    }
+    assert_eq!(fs::read(manifest_path).unwrap(), b"original manifest");
 }
 
 #[cfg(unix)]
