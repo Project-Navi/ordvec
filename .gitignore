@@ -49,3 +49,6 @@ venv/
 /.cache/ordvec-beir/
 /results/beir/*
 !/results/beir/.gitkeep
+
+# CortexTrace local runtime artifacts
+.cortextrace/

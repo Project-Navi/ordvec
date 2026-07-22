@@ -1,0 +1,82 @@
+{
+  "schema": "ordvec.index_authority.v0.1",
+  "subject": {
+    "project": "ordvec",
+    "mode": "sign_to_rq2",
+    "version": "0.5.0"
+  },
+  "baseline": {
+    "mode": "flat_exact",
+    "bytes_per_vector": 4096
+  },
+  "ifc": {
+    "enabled": true,
+    "compute_path": [
+      "sign_bitmap_candidate_generation",
+      "rankquant_b2_rerank"
+    ],
+    "training_required": false,
+    "fit_required": false,
+    "graph_required": false,
+    "float_corpus_required_for_reported_path": false
+  },
+  "evidence": {
+    "dataset": "trec-covid",
+    "dataset_family": "BEIR",
+    "encoder": "Harrier-Q8 1024-d",
+    "corpus_size": 171332,
+    "metric": "nDCG@10",
+    "baseline_score": 0.7574,
+    "candidate_score": 0.7638,
+    "delta_vs_baseline": 0.0064,
+    "within_bootstrap_noise": true,
+    "evidence_source": "repository README benchmark table"
+  },
+  "economics": {
+    "candidate_bytes_per_vector": 384,
+    "storage_reduction_x": 10.6667,
+    "single_query_latency_ms": {
+      "baseline": 56.0,
+      "candidate": 0.53
+    },
+    "single_query_speedup_x": 105.6604
+  },
+  "decision": {
+    "recommended": "ALLOW_INDEX_FIRST",
+    "policy": {
+      "min_storage_reduction_x": 8.0,
+      "min_single_query_speedup_x": 10.0,
+      "require_quality_within_bootstrap_noise": true,
+      "require_scope": true,
+      "require_limitations": true
+    },
+    "fallback": [
+      "Use dense flat or ANN comparison when dataset, encoder, scale, or serving regime falls outside the stated evidence scope.",
+      "Require HNSW comparison for highly parallel threaded serving claims.",
+      "Require checked-in artifacts before extending the claim to larger corpora or alternate encoders."
+    ]
+  },
+  "scope": {
+    "claim_status": "public_repository_evidence",
+    "applies_to": [
+      "BEIR trec-covid",
+      "Harrier-Q8 1024-d embeddings",
+      "171332 document public benchmark run",
+      "single-query latency comparison against exact flat"
+    ],
+    "does_not_claim": [
+      "million-scale HNSW crossover",
+      "GPU bandwidth claims",
+      "alternate-encoder generalization",
+      "all serving regimes",
+      "dominance over HNSW in highly parallel threaded throughput"
+    ]
+  },
+  "limitations": [
+    "The compressed scan remains O(n), with a lower constant than dense flat.",
+    "HNSW wins the committed highly parallel threaded view.",
+    "The claim is scoped to the stated dataset, encoder, corpus size, and benchmark artifact.",
+    "Larger-corpus and alternate-encoder claims require checked-in run artifacts.",
+    "This receipt does not sign artifacts or manage deployment trust policy."
+  ]
+}
