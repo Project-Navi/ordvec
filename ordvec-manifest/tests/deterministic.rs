@@ -51,6 +51,26 @@ fn build_manifest_bytes(dir: &Path, aux_names: &[&str]) -> Vec<u8> {
     fs::read(&manifest_path).unwrap()
 }
 
+fn manifest_bytes_with_extension_number(
+    dir: &Path,
+    number: &str,
+) -> Result<Vec<u8>, ManifestError> {
+    let index = write_index(dir);
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )?;
+    manifest.extensions.insert(
+        "canonical_number".to_string(),
+        serde_json::from_str(number).map_err(ManifestError::Json)?,
+    );
+    write_manifest_file(&manifest, &manifest_path)?;
+    fs::read(manifest_path).map_err(ManifestError::Io)
+}
+
 #[test]
 fn identical_inputs_produce_byte_identical_manifests() {
     let temp_a = tempfile::tempdir().unwrap();
@@ -174,13 +194,124 @@ fn nested_json_order_and_number_spelling_do_not_change_manifest_bytes() {
 }
 
 #[test]
+fn equivalent_json_number_spellings_have_one_canonical_manifest_representation() {
+    let cases: &[(&str, &[&str], &str)] = &[
+        ("zero", &["0", "-0", "0.0", "-0.0", "0e9"], "0"),
+        ("one", &["1", "1.0", "1e0", "10e-1"], "1"),
+        ("negative one", &["-1", "-1.0", "-1e0"], "-1"),
+        ("thousand", &["1000", "1000.0", "1e3"], "1000"),
+        ("fraction", &["0.5", "0.50", "5e-1"], "0.5"),
+        (
+            "two to 53 minus one",
+            &["9007199254740991", "9007199254740991.0"],
+            "9007199254740991",
+        ),
+        (
+            "two to 53",
+            &["9007199254740992", "9007199254740992.0"],
+            "9007199254740992",
+        ),
+        (
+            "two to 53 plus one",
+            &[
+                "9007199254740993",
+                "9007199254740993.0",
+                "9007199254740993e0",
+            ],
+            "9007199254740993",
+        ),
+        (
+            "i64 min",
+            &[
+                "-9223372036854775808",
+                "-9223372036854775808.0",
+                "-9.223372036854775808e18",
+            ],
+            "-9223372036854775808",
+        ),
+        (
+            "u64 max",
+            &[
+                "18446744073709551615",
+                "18446744073709551615.0",
+                "1.8446744073709551615e19",
+            ],
+            "18446744073709551615",
+        ),
+        (
+            "out of integer range canonical f64",
+            &["100000000000000000000", "100000000000000000000.0", "1e20"],
+            "1e+20",
+        ),
+    ];
+
+    for (case, spellings, expected_number) in cases {
+        let mut canonical_bytes: Option<Vec<u8>> = None;
+        for spelling in *spellings {
+            let temp = tempfile::tempdir().unwrap();
+            let bytes = manifest_bytes_with_extension_number(temp.path(), spelling).unwrap();
+            let stored: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                stored["extensions"]["canonical_number"].to_string(),
+                *expected_number,
+                "{case}: {spelling}"
+            );
+            if let Some(expected_bytes) = &canonical_bytes {
+                assert_eq!(expected_bytes, &bytes, "{case}: {spelling}");
+            } else {
+                canonical_bytes = Some(bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn adjacent_large_json_integers_keep_distinct_manifest_addresses() {
+    for spellings in [
+        ["9007199254740991.0", "9007199254740992.0"],
+        ["9007199254740992.0", "9007199254740993.0"],
+        ["18446744073709551614.0", "18446744073709551615.0"],
+    ] {
+        let temp_a = tempfile::tempdir().unwrap();
+        let temp_b = tempfile::tempdir().unwrap();
+        let bytes_a = manifest_bytes_with_extension_number(temp_a.path(), spellings[0]).unwrap();
+        let bytes_b = manifest_bytes_with_extension_number(temp_b.path(), spellings[1]).unwrap();
+        assert_ne!(bytes_a, bytes_b, "{spellings:?}");
+    }
+}
+
+#[test]
 fn arbitrary_precision_numbers_that_would_alias_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let index = write_index(temp.path());
-    for (case, number) in [
-        ("first", "18446744073709551616"),
-        ("second", "18446744073709551617"),
-        ("decimal", "0.100000000000000005"),
+    for (case, number, expected_error) in [
+        (
+            "two_to_64_integer",
+            "18446744073709551616",
+            "outside the exact canonical",
+        ),
+        (
+            "two_to_64_decimal",
+            "18446744073709551616.0",
+            "outside the exact canonical",
+        ),
+        (
+            "two_to_64_exponent",
+            "1.8446744073709551616e19",
+            "outside the exact canonical",
+        ),
+        (
+            "two_to_64_plus_one",
+            "18446744073709551617",
+            "outside the exact canonical",
+        ),
+        (
+            "lossy_decimal",
+            "0.100000000000000005",
+            "outside the exact canonical",
+        ),
+        ("f64_overflow", "1e400", "cannot be represented canonically"),
+        ("f64_underflow", "1e-400", "outside the exact canonical"),
     ] {
         let manifest_path = temp.path().join(format!("{case}.json"));
         let mut manifest = create_manifest_for_index(
@@ -194,10 +325,7 @@ fn arbitrary_precision_numbers_that_would_alias_are_rejected() {
             .extensions
             .insert("precise".to_string(), serde_json::from_str(number).unwrap());
         let err = write_manifest_file(&manifest, &manifest_path).unwrap_err();
-        assert!(
-            err.to_string().contains("outside the exact canonical"),
-            "{number}: {err}"
-        );
+        assert!(err.to_string().contains(expected_error), "{number}: {err}");
         assert!(!manifest_path.exists());
     }
 }
