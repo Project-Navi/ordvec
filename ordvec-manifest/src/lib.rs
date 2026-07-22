@@ -4575,6 +4575,7 @@ fn persist_manifest_temporary(
 fn canonical_manifest_for_write(manifest: &IndexManifest) -> Result<IndexManifest, ManifestError> {
     validate_manifest_numbers_for_write(manifest)?;
     let mut canonical = manifest.clone();
+    normalize_typed_manifest_signed_zero(&mut canonical);
     for (index, attestation) in canonical.attestations.iter_mut().enumerate() {
         canonicalize_json_value(attestation, &format!("attestations[{index}]"))?;
     }
@@ -4582,6 +4583,30 @@ fn canonical_manifest_for_write(manifest: &IndexManifest) -> Result<IndexManifes
         canonicalize_json_value(extension, &format!("extensions[{name:?}]"))?;
     }
     Ok(canonical)
+}
+
+fn normalize_typed_manifest_signed_zero(manifest: &mut IndexManifest) {
+    let Some(profile) = manifest.encoder_distortion.as_mut() else {
+        return;
+    };
+
+    // Keep this list aligned with every typed f64 field reachable from
+    // IndexManifest. Validation runs on the caller-owned manifest first; only
+    // this cloned canonical representation is changed.
+    normalize_optional_signed_zero(&mut profile.bounds.declared_lower_bound);
+    normalize_optional_signed_zero(&mut profile.bounds.declared_upper_bound);
+    normalize_optional_signed_zero(&mut profile.bounds.estimated_distortion);
+    normalize_optional_signed_zero(&mut profile.bounds.violation_rate);
+    normalize_optional_signed_zero(&mut profile.bounds.max_observed_violation);
+    normalize_optional_signed_zero(&mut profile.bounds.quantile_observed_violation);
+    normalize_optional_signed_zero(&mut profile.scope.confidence);
+    normalize_optional_signed_zero(&mut profile.scope.coverage);
+}
+
+fn normalize_optional_signed_zero(value: &mut Option<f64>) {
+    if value.is_some_and(|value| value == 0.0) {
+        *value = Some(0.0);
+    }
 }
 
 fn canonicalize_json_value(

@@ -2,7 +2,10 @@ use ordvec::RankQuant;
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
     sha256_file, verify_manifest_with_base, write_manifest_file, CreateAuxiliaryArtifact,
-    CreateManifestOptions, CreateRowIdentity, ManifestError, VerifyOptions, SCHEMA_VERSION,
+    CreateManifestOptions, CreateRowIdentity, DistortionBounds, DistortionEvidence,
+    DistortionEvidenceKind, DistortionScope, EncoderDistortionProfileRef, EncoderSpec,
+    IndexManifest, ManifestError, MetricSpec, VerifyOptions, ENCODER_DISTORTION_SCHEMA_VERSION,
+    SCHEMA_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -69,6 +72,60 @@ fn manifest_bytes_with_extension_number(
     );
     write_manifest_file(&manifest, &manifest_path)?;
     fs::read(manifest_path).map_err(ManifestError::Io)
+}
+
+fn distortion_profile_with_zero(
+    manifest: &IndexManifest,
+    zero: f64,
+) -> EncoderDistortionProfileRef {
+    EncoderDistortionProfileRef {
+        schema_version: ENCODER_DISTORTION_SCHEMA_VERSION.to_string(),
+        profile_id: "urn:uuid:a8c39375-ae65-4924-92f5-8088adfab9b5".to_string(),
+        created_at: None,
+        encoder: EncoderSpec {
+            model: manifest.embedding.model.clone(),
+            dim: manifest.embedding.dim,
+            model_revision: manifest.embedding.model_revision.clone(),
+            normalization: manifest.embedding.normalization.clone(),
+        },
+        tokenizer_revision: manifest.embedding.tokenizer_revision.clone(),
+        pooling: manifest.embedding.pooling.clone(),
+        source_metric: MetricSpec {
+            name: "qrel_distance".to_string(),
+            version: Some("v1".to_string()),
+            digest: None,
+        },
+        embedding_metric: MetricSpec {
+            name: "cosine".to_string(),
+            version: None,
+            digest: None,
+        },
+        bounds: DistortionBounds {
+            declared_lower_bound: Some(0.5),
+            declared_upper_bound: Some(2.0),
+            estimated_distortion: Some(4.0),
+            violation_rate: Some(zero),
+            max_observed_violation: Some(zero),
+            quantile_observed_violation: Some(zero),
+        },
+        scope: DistortionScope {
+            corpus_digest: None,
+            query_set_digest: None,
+            pair_sample_digest: None,
+            domain: Some("test-corpus".to_string()),
+            sample_size: Some(1),
+            confidence: Some(zero),
+            coverage: Some(zero),
+            estimator_version: Some("test-estimator/1".to_string()),
+        },
+        evidence: DistortionEvidence {
+            kind: DistortionEvidenceKind::CallerAsserted,
+            estimator_id: None,
+            estimator_hash: None,
+        },
+        profile: None,
+        calibration_profile_id: None,
+    }
 }
 
 #[test]
@@ -262,6 +319,65 @@ fn equivalent_json_number_spellings_have_one_canonical_manifest_representation()
                 canonical_bytes = Some(bytes);
             }
         }
+    }
+}
+
+#[test]
+fn typed_signed_zero_fields_have_one_canonical_manifest_representation() {
+    let temp_a = tempfile::tempdir().unwrap();
+    let temp_b = tempfile::tempdir().unwrap();
+    let index_a = write_index(temp_a.path());
+    let index_b = write_index(temp_b.path());
+    let path_a = temp_a.path().join("manifest.json");
+    let path_b = temp_b.path().join("manifest.json");
+    let mut manifest_a = create_manifest_for_index(
+        &index_a,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_a,
+    )
+    .unwrap();
+    let mut manifest_b = create_manifest_for_index(
+        &index_b,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_b,
+    )
+    .unwrap();
+    manifest_a.encoder_distortion = Some(distortion_profile_with_zero(&manifest_a, -0.0));
+    manifest_b.encoder_distortion = Some(distortion_profile_with_zero(&manifest_b, 0.0));
+
+    write_manifest_file(&manifest_a, &path_a).unwrap();
+    write_manifest_file(&manifest_b, &path_b).unwrap();
+    let bytes_a = fs::read(path_a).unwrap();
+    let bytes_b = fs::read(path_b).unwrap();
+    assert_eq!(bytes_a, bytes_b);
+
+    let caller_profile = manifest_a.encoder_distortion.as_ref().unwrap();
+    for value in [
+        caller_profile.bounds.violation_rate.unwrap(),
+        caller_profile.bounds.max_observed_violation.unwrap(),
+        caller_profile.bounds.quantile_observed_violation.unwrap(),
+        caller_profile.scope.confidence.unwrap(),
+        caller_profile.scope.coverage.unwrap(),
+    ] {
+        assert!(
+            value.is_sign_negative(),
+            "writer mutated its caller-owned manifest"
+        );
+    }
+
+    let stored: Value = serde_json::from_slice(&bytes_a).unwrap();
+    for pointer in [
+        "/encoder_distortion/bounds/violation_rate",
+        "/encoder_distortion/bounds/max_observed_violation",
+        "/encoder_distortion/bounds/quantile_observed_violation",
+        "/encoder_distortion/scope/confidence",
+        "/encoder_distortion/scope/coverage",
+    ] {
+        let value = stored.pointer(pointer).unwrap().as_f64().unwrap();
+        assert_eq!(value, 0.0, "{pointer}");
+        assert!(value.is_sign_positive(), "{pointer}");
     }
 }
 
