@@ -5316,7 +5316,11 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("manifest.json");
+        let held_original = directory.path().join("original-manifest-inode");
         fs::write(&destination, b"original").unwrap();
+        // Keep the original inode live so the filesystem cannot recycle its
+        // identity for the concurrent writer after `destination` is unlinked.
+        fs::hard_link(&destination, &held_original).unwrap();
         let initial = snapshot_manifest_destination(&destination).unwrap();
         let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
         temporary.write_all(b"replacement").unwrap();
