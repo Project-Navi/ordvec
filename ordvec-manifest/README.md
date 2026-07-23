@@ -16,6 +16,44 @@ From a workspace checkout, use the CLI with `cargo run -p ordvec-manifest --`.
 Library-only consumers that do not need the CLI can depend on the crate with
 `default-features = false`.
 
+## First verified index
+
+The shortest end-to-end check uses the Python core package to write a tiny real
+ordvec index, then creates and verifies its manifest with the CLI:
+
+```sh
+python -m pip install --upgrade ordvec
+cargo install ordvec-manifest
+
+python - <<'PY'
+import numpy as np
+from ordvec import RankQuant
+
+documents = np.array([
+    [8, 7, 6, 5, 4, 3, 2, 1],
+    [1, 2, 3, 4, 5, 6, 7, 8],
+], dtype=np.float32)
+index = RankQuant(dim=8, bits=1)
+index.add(documents)
+index.write("quickstart.ovrq")
+PY
+
+ordvec-manifest create \
+  --index quickstart.ovrq \
+  --row-id-is-identity \
+  --embedding-model quickstart-embedding-v1 \
+  --out quickstart.manifest.json
+ordvec-manifest verify --manifest quickstart.manifest.json
+```
+
+```text
+quickstart.manifest.json
+verified
+```
+
+For an existing bundle with a caller-owned ID sidecar, bind both files before
+loading either one:
+
 ```sh
 ordvec-manifest create \
   --index path/to/index.ovrq \
@@ -38,6 +76,13 @@ by `(name, path)`, and embedded paths must be canonical (bundle-relative,
 forward slashes, no `.`, `..`, or empty segments). Relative paths resolve from
 the manifest file's directory, absolute paths are rejected by default, and
 relative paths may not escape the manifest directory unless explicitly allowed.
+Nested extension and attestation JSON is recursively canonicalized, independent
+of downstream `serde_json` ordering/precision features; non-UTF-8 paths and
+non-finite distortion values fail before serialization. Manifest writes use a
+synced same-directory temporary file and atomically replace the destination;
+new Unix files retain `File::create`'s mode/umask behavior and replacements
+preserve portable permission bits (not platform-specific ACLs or ownership).
+Symlink and other non-regular destinations are rejected rather than replaced.
 `create` follows the same policy: by default it emits only paths that should
 verify with default settings. If an artifact or JSONL row map lives outside the
 manifest directory, pass `--allow-path-escape` at create time and again at

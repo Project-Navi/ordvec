@@ -112,6 +112,15 @@ job_downloads_artifact_to_path() {
   '
 }
 
+# No draft Release, build artifact, wheel, or sdist may be created until the
+# exact-head main CI gate has settled green. Keeping these dependencies direct
+# makes the fail-closed front door visible and prevents a future DAG refactor
+# from accidentally starting release work before the gate.
+for job in notes build-crate build-wheels build-sdist build-manifest-wheels build-manifest-sdist; do
+  job_needs "$job" require-ci-green \
+    || fail "$job must \`needs: require-ci-green\` before creating release artifacts"
+done
+
 # ----------------------------------------------------------------------
 # (1) release-assets-draft needs attest + provenance + require-ci-green + notes
 #     + fail-closed release AVX-512 proof + exact linux/aarch64 wheel smoke

@@ -53,16 +53,20 @@
 //! in-model theorem, not a claim that real encoders automatically satisfy the
 //! quotient, symmetry, or null assumptions.
 //!
-//! ```no_run
-//! use ordvec::{Rank, RankQuant};
+//! ```
+//! use ordvec::RankQuant;
 //!
-//! let mut idx = RankQuant::new(1024, 2);
-//! let docs: Vec<f32> = vec![0.0; 1024 * 10_000];
-//! idx.add(&docs);
+//! let documents = [
+//!     8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0,
+//!     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+//!     8.0, 1.0, 7.0, 2.0, 6.0, 3.0, 5.0, 4.0,
+//! ];
+//! let query = [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
 //!
-//! let queries: Vec<f32> = vec![0.0; 1024 * 4];
-//! let res = idx.search_asymmetric(&queries, 10);
-//! assert_eq!(res.k, 10);
+//! let mut index = RankQuant::new(8, 1);
+//! index.add(&documents);
+//! let results = index.search_asymmetric(&query, 1);
+//! assert_eq!(results.indices_for_query(0)[0], 0);
 //! ```
 
 // Every unsafe operation in the crate must sit inside an explicit `unsafe {}`

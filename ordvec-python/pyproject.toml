@@ -49,6 +49,8 @@ dependencies = [
 Homepage = "https://github.com/Project-Navi/ordvec"
 Repository = "https://github.com/Project-Navi/ordvec"
 Issues = "https://github.com/Project-Navi/ordvec/issues"
+Documentation = "https://github.com/Project-Navi/ordvec/blob/v0.6.0/ordvec-python/README.md"
+Changelog = "https://github.com/Project-Navi/ordvec/blob/main/CHANGELOG.md"
 Formalization = "https://github.com/Project-Navi/ordvec-formalization"
 
 [tool.maturin]

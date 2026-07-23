@@ -65,7 +65,7 @@ cache in their own manifests:
   `n_top`;
 - `file_size_bytes`: total observed file size.
 
-In v0.5.0, `probe_index_metadata(path)` rejects `OVFS` with an unsupported
+In v0.6.0, `probe_index_metadata(path)` rejects `OVFS` with an unsupported
 metadata-probe error rather than returning a partial descriptor. Load `.ovfs`
 only through `RankQuantFastscan::load` unless and until the FastScan metadata
 contract is promoted in a later minor release; the direct loader rejects
@@ -227,7 +227,7 @@ payload invariants:
 - `SignBitmap::load`: no additional row invariant exists.
 
 `RankQuantFastscan::load` has its own direct loader path for `.ovfs`; it is not
-covered by this probe-versus-load contract in v0.5.0.
+covered by this probe-versus-load contract in v0.6.0.
 
 Loader success is the primitive binary-safety boundary. It is not a provenance
 or deployment-policy decision.

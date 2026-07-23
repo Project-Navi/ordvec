@@ -11,4 +11,4 @@ name = "ordvec_ffi"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-ordvec = { path = ".." }
+ordvec = { version = "0.6.0", path = ".." }

@@ -24,8 +24,12 @@ The unified `release.yml`:
   workflow but skip every job below the gate;
 - runs a **`require-ci-green`** gate confirming the tag points at current `main`
   HEAD and that per-commit CI is green on `main` for that SHA — `ci.yml`,
-  `python.yml`, `fuzz.yml`, `codeql.yml`, `actionlint.yml`, `zizmor.yml` (a
-  *successful* run for that exact SHA on `main`);
+  `python.yml`, `fuzz.yml`, `codeql.yml`, `actionlint.yml`, `zizmor.yml`. The
+  gate polls the latest exact-SHA push run every 30 seconds for at most 30
+  minutes: missing, queued, and in-progress runs wait; a terminal non-success
+  fails immediately; and a moved `main` HEAD fails immediately. Every draft-
+  release and build-artifact job depends directly on this gate, so an unsettled
+  or failed gate creates no release artifacts and no draft GitHub Release;
 - publishes via **OIDC trusted publishing** (no long-lived crates.io / PyPI
   tokens in the repo) for both Rust crates and both Python distributions;
 - canonicalizes each Python dist before attestation and release upload: for a
@@ -167,8 +171,11 @@ the OIDC exchange (no risk of a bad publish; just a failed run).
    `ordvec-manifest-python/Cargo.toml`,
    `ordvec-manifest-python/pyproject.toml`,
    `ordvec-manifest-python/python/ordvec_manifest/__init__.py`, and
-   `ordvec-ffi/Cargo.toml`) and update `CHANGELOG.md` with migration notes for
-   every intentional compatibility break. Commit on `main`.
+   `ordvec-ffi/Cargo.toml`). Also bump every internal path-dependency version:
+   `ordvec-manifest` → `ordvec`, both Python binding aliases, `ordvec-ffi` →
+   `ordvec`, and `benchmarks/beir-bench` → `ordvec`. Update `CHANGELOG.md`
+   with migration notes for every intentional compatibility break. Commit on
+   `main`.
    - Run `python tests/release_publish_invariants.py` after the bump; it checks
      lockstep versions, MSRV/docs drift, registry metadata parity, Python
      classifier/URL parity, docs.rs feature policy, package contents, and
@@ -181,8 +188,11 @@ the OIDC exchange (no risk of a bad publish; just a failed run).
      crates.io releases instead of a pre-release git revision.
 4. Confirm CI is **green for current `main` HEAD**. `require-ci-green` checks
    `main` HEAD's SHA — which needs a **completed, successful** (not
-   `cancelled`, not in-progress) run of `ci.yml`, `python.yml`, `fuzz.yml`,
-   `codeql.yml`, `actionlint.yml`, and `zizmor.yml`.
+   `cancelled`) latest run of `ci.yml`, `python.yml`, `fuzz.yml`, `codeql.yml`,
+   `actionlint.yml`, and `zizmor.yml`. A just-pushed tag may reach the release
+   workflow before Actions exposes or completes those runs, so the gate waits
+   up to 30 minutes and polls every 30 seconds. It fails immediately on a
+   terminal non-success or if `main` advances, and fails closed on timeout.
    - Routine `ci.yml` / `coverage.yml` runs may warn and skip SDE-dependent
      steps when Intel's downloadmirror challenges GitHub-hosted runners. That
      keeps external mirror outages from holding `main` red, but it does **not**

@@ -16,7 +16,7 @@
       if this touches public Rust, Python, C ABI, Go, Manifest,
       persisted-format, examples/docs, feature, or MSRV surfaces
 - [ ] `CHANGELOG.md` updated under `Unreleased` if user-facing
-- [ ] `cargo deny check` passes (licenses / advisories / bans / sources)
+- [ ] `cargo deny --workspace --all-features --locked check` passes (licenses / advisories / bans / sources)
 - [ ] If `ordvec-python/` changed: `cargo clippy -p ordvec-python --all-targets -- -D warnings`, then `maturin develop` + `pytest ordvec-python/tests` pass
 
 ## Notes

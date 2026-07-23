@@ -13,6 +13,25 @@
 //! verified snapshot of the canonical artifact path and related load metadata.
 //! The `ordvec-manifest` binary exposes the same bounded verification surfaces
 //! for command-line use.
+//!
+//! ```no_run
+//! use ordvec_manifest::{verify_for_load, VerifyOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = verify_for_load("quickstart.manifest.json", VerifyOptions::default())?;
+//! println!(
+//!     "verified {} rows at {}",
+//!     plan.metadata().vector_count,
+//!     plan.artifact_path().display()
+//! );
+//! // Load the index from plan.artifact_path() immediately, while the verified
+//! // bytes remain under the caller's control.
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See the crate README for a copy-and-run index creation and CLI verification
+//! path.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ordvec::{
@@ -24,7 +43,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
@@ -199,7 +218,7 @@ fn read_bounded_file(
         )
     })?;
     let mut bytes = Vec::new();
-    let mut limited = file.by_ref().take(read_limit);
+    let mut limited = Read::by_ref(&mut file).take(read_limit);
     limited.read_to_end(&mut bytes)?;
     if bytes.len() > max_len {
         return Err(ManifestError::limit_exceeded(
@@ -4435,20 +4454,350 @@ fn create_auxiliary_artifacts(
 /// serializer or its settings changes every manifest's identity and is a
 /// schema-version event, not a cosmetic change.
 ///
-/// The canonical bytes depend on `serde_json`'s default feature set. Nested
-/// [`serde_json::Value`] maps carried in `extensions` / `attestations` are
-/// key-sorted only while `serde_json` is built without `preserve_order`; a
-/// consumer whose dependency graph enables `serde_json/preserve_order` (or
-/// `arbitrary_precision`) via feature unification would serialize those maps
-/// in insertion order, changing the content address. Do not enable those
-/// features in a build that produces content-addressed manifests. See
-/// <https://github.com/Project-Navi/ordvec/issues/295>.
+/// Nested [`serde_json::Value`] maps carried in `extensions` / `attestations`
+/// are recursively key-sorted and their numbers are normalized before
+/// serialization. The stored bytes therefore do not depend on downstream
+/// feature unification of `serde_json/preserve_order` or
+/// `serde_json/arbitrary_precision`.
+///
+/// The destination is replaced atomically from a temporary file in the same
+/// directory after the bytes and portable permission bits are synced. New
+/// files use the same `0o666 & !umask` Unix mode as [`File::create`]; replacing
+/// an existing file preserves its [`fs::Permissions`]. Platform-specific ACLs,
+/// ownership, and extended attributes are outside this portable API contract.
+/// Existing symlinks and other non-regular destinations observed before the
+/// replacement are rejected. The destination is checked again immediately
+/// before replacement and, on Unix, an existing file's device/inode identity
+/// must still match. Callers must still serialize concurrent writers: portable
+/// rename is atomic replacement, not a compare-and-swap primitive. A failed
+/// validation or serialization never truncates an existing manifest.
 pub fn write_manifest_file(
     manifest: &IndexManifest,
     path: impl AsRef<Path>,
 ) -> Result<(), ManifestError> {
-    let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, manifest)?;
+    let canonical = canonical_manifest_for_write(manifest)?;
+    let path = path.as_ref();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let destination = snapshot_manifest_destination(path)?;
+    let inherited_permissions = destination.permissions.clone();
+
+    // Open the directory before writing or replacing anything. On Unix this
+    // makes a predictable directory-handle permission failure happen before
+    // the destination changes; the same handle is synced after the rename.
+    #[cfg(unix)]
+    let parent_directory = File::open(parent)?;
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".ordvec-manifest-").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        builder.permissions(
+            inherited_permissions
+                .clone()
+                .unwrap_or_else(|| fs::Permissions::from_mode(0o666)),
+        );
+    }
+    #[cfg(not(unix))]
+    if let Some(permissions) = inherited_permissions.as_ref() {
+        builder.permissions(permissions.clone());
+    }
+    let mut temporary = builder.tempfile_in(parent)?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), &canonical)?;
+    temporary.as_file_mut().flush()?;
+    if let Some(permissions) = inherited_permissions {
+        temporary.as_file().set_permissions(permissions)?;
+    }
+    temporary.as_file().sync_all()?;
+    persist_manifest_temporary(temporary, path, &destination)?;
+    #[cfg(unix)]
+    parent_directory.sync_all()?;
+    Ok(())
+}
+
+struct ManifestDestinationSnapshot {
+    permissions: Option<fs::Permissions>,
+    #[cfg(unix)]
+    identity: Option<(u64, u64)>,
+}
+
+fn snapshot_manifest_destination(
+    path: &Path,
+) -> Result<ManifestDestinationSnapshot, ManifestError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            #[cfg(unix)]
+            let identity = {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            };
+            Ok(ManifestDestinationSnapshot {
+                permissions: Some(metadata.permissions()),
+                #[cfg(unix)]
+                identity,
+            })
+        }
+        Ok(_) => Err(ManifestError::invalid(format!(
+            "manifest destination {} exists and is not a regular file",
+            path.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ManifestDestinationSnapshot {
+            permissions: None,
+            #[cfg(unix)]
+            identity: None,
+        }),
+        Err(error) => Err(ManifestError::Io(error)),
+    }
+}
+
+fn persist_manifest_temporary(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+    initial: &ManifestDestinationSnapshot,
+) -> Result<(), ManifestError> {
+    let current = snapshot_manifest_destination(path)?;
+    match (
+        initial.permissions.is_some(),
+        current.permissions.is_some(),
+    ) {
+        (false, true) => {
+            return Err(ManifestError::invalid(format!(
+                "manifest destination {} appeared during the write; coordinate concurrent writers and retry",
+                path.display()
+            )))
+        }
+        (true, false) => {
+            return Err(ManifestError::invalid(format!(
+                "manifest destination {} disappeared during the write; coordinate concurrent writers and retry",
+                path.display()
+            )))
+        }
+        _ => {}
+    }
+    #[cfg(unix)]
+    if initial.identity != current.identity {
+        return Err(ManifestError::invalid(format!(
+            "manifest destination {} was replaced during the write; coordinate concurrent writers and retry",
+            path.display()
+        )));
+    }
+    temporary
+        .persist(path)
+        .map_err(|error| ManifestError::Io(error.error))?;
+    Ok(())
+}
+
+fn canonical_manifest_for_write(manifest: &IndexManifest) -> Result<IndexManifest, ManifestError> {
+    validate_manifest_numbers_for_write(manifest)?;
+    let mut canonical = manifest.clone();
+    normalize_typed_manifest_signed_zero(&mut canonical);
+    for (index, attestation) in canonical.attestations.iter_mut().enumerate() {
+        canonicalize_json_value(attestation, &format!("attestations[{index}]"))?;
+    }
+    for (name, extension) in &mut canonical.extensions {
+        canonicalize_json_value(extension, &format!("extensions[{name:?}]"))?;
+    }
+    Ok(canonical)
+}
+
+fn normalize_typed_manifest_signed_zero(manifest: &mut IndexManifest) {
+    let Some(profile) = manifest.encoder_distortion.as_mut() else {
+        return;
+    };
+
+    // Keep this list aligned with every typed f64 field reachable from
+    // IndexManifest. Validation runs on the caller-owned manifest first; only
+    // this cloned canonical representation is changed.
+    normalize_optional_signed_zero(&mut profile.bounds.declared_lower_bound);
+    normalize_optional_signed_zero(&mut profile.bounds.declared_upper_bound);
+    normalize_optional_signed_zero(&mut profile.bounds.estimated_distortion);
+    normalize_optional_signed_zero(&mut profile.bounds.violation_rate);
+    normalize_optional_signed_zero(&mut profile.bounds.max_observed_violation);
+    normalize_optional_signed_zero(&mut profile.bounds.quantile_observed_violation);
+    normalize_optional_signed_zero(&mut profile.scope.confidence);
+    normalize_optional_signed_zero(&mut profile.scope.coverage);
+}
+
+fn normalize_optional_signed_zero(value: &mut Option<f64>) {
+    if value.is_some_and(|value| value == 0.0) {
+        *value = Some(0.0);
+    }
+}
+
+fn canonicalize_json_value(
+    value: &mut serde_json::Value,
+    context: &str,
+) -> Result<(), ManifestError> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for (index, nested) in values.iter_mut().enumerate() {
+                canonicalize_json_value(nested, &format!("{context}[{index}]"))?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, nested) in values.iter_mut() {
+                canonicalize_json_value(nested, &format!("{context}.{key}"))?;
+            }
+            values.sort_keys();
+        }
+        serde_json::Value::Number(number) => {
+            let original = number.to_string();
+            let identity = decimal_identity(&original).ok_or_else(|| {
+                ManifestError::invalid(format!(
+                    "{context} contains a JSON number that cannot be represented canonically"
+                ))
+            })?;
+            let normalized = if let Some(integer) = canonical_integer_from_identity(&identity) {
+                integer
+            } else {
+                let value = number.as_f64().ok_or_else(|| {
+                    ManifestError::invalid(format!(
+                        "{context} contains a JSON number that cannot be represented canonically"
+                    ))
+                })?;
+                if !value.is_finite() {
+                    return Err(ManifestError::invalid(format!(
+                        "{context} contains a non-finite JSON number"
+                    )));
+                }
+                let normalized = serde_json::Number::from_f64(value).ok_or_else(|| {
+                    ManifestError::invalid(format!(
+                        "{context} contains a JSON number that cannot be represented canonically"
+                    ))
+                })?;
+                if decimal_identity(&normalized.to_string()).as_ref() != Some(&identity) {
+                    return Err(ManifestError::invalid(format!(
+                        "{context} contains a JSON number outside the exact canonical i64/u64/f64 domain"
+                    )));
+                }
+                normalized
+            };
+            *number = normalized;
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn canonical_integer_from_identity(identity: &(bool, String, i64)) -> Option<serde_json::Number> {
+    let (negative, digits, exponent) = identity;
+    if *exponent < 0 {
+        return None;
+    }
+
+    // Accumulate rather than materializing exponent zeroes. Any value outside
+    // u64 overflows after at most twenty decimal digits, even for a hostile
+    // arbitrary-precision exponent.
+    let mut magnitude = 0_u64;
+    for digit in digits.bytes() {
+        magnitude = magnitude
+            .checked_mul(10)?
+            .checked_add(u64::from(digit - b'0'))?;
+    }
+    let mut remaining_exponent = *exponent;
+    while remaining_exponent > 0 {
+        magnitude = magnitude.checked_mul(10)?;
+        remaining_exponent -= 1;
+    }
+
+    if *negative {
+        let i64_min_magnitude = (i64::MAX as u64) + 1;
+        if magnitude == i64_min_magnitude {
+            Some(serde_json::Number::from(i64::MIN))
+        } else {
+            let signed = i64::try_from(magnitude).ok()?;
+            Some(serde_json::Number::from(-signed))
+        }
+    } else {
+        Some(serde_json::Number::from(magnitude))
+    }
+}
+
+fn decimal_identity(value: &str) -> Option<(bool, String, i64)> {
+    let (negative, unsigned) = if let Some(unsigned) = value.strip_prefix('-') {
+        (true, unsigned)
+    } else {
+        (false, value)
+    };
+    let mut exponent_split = unsigned.split(['e', 'E']);
+    let mantissa = exponent_split.next()?;
+    let explicit_exponent = exponent_split
+        .next()
+        .map(str::parse::<i64>)
+        .transpose()
+        .ok()?
+        .unwrap_or(0);
+    if exponent_split.next().is_some() {
+        return None;
+    }
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let fraction_len = i64::try_from(fraction.len()).ok()?;
+    let mut exponent = explicit_exponent.checked_sub(fraction_len)?;
+    let mut digits = format!("{integer}{fraction}");
+    let first_nonzero = digits.bytes().position(|byte| byte != b'0');
+    let Some(first_nonzero) = first_nonzero else {
+        return Some((false, "0".to_string(), 0));
+    };
+    digits.drain(..first_nonzero);
+    while digits.ends_with('0') {
+        digits.pop();
+        exponent = exponent.checked_add(1)?;
+    }
+    Some((negative, digits, exponent))
+}
+
+fn validate_manifest_numbers_for_write(manifest: &IndexManifest) -> Result<(), ManifestError> {
+    let Some(profile) = manifest.encoder_distortion.as_ref() else {
+        return Ok(());
+    };
+    let values = [
+        (
+            "encoder_distortion.bounds.declared_lower_bound",
+            profile.bounds.declared_lower_bound,
+        ),
+        (
+            "encoder_distortion.bounds.declared_upper_bound",
+            profile.bounds.declared_upper_bound,
+        ),
+        (
+            "encoder_distortion.bounds.estimated_distortion",
+            profile.bounds.estimated_distortion,
+        ),
+        (
+            "encoder_distortion.bounds.violation_rate",
+            profile.bounds.violation_rate,
+        ),
+        (
+            "encoder_distortion.bounds.max_observed_violation",
+            profile.bounds.max_observed_violation,
+        ),
+        (
+            "encoder_distortion.bounds.quantile_observed_violation",
+            profile.bounds.quantile_observed_violation,
+        ),
+        (
+            "encoder_distortion.scope.confidence",
+            profile.scope.confidence,
+        ),
+        ("encoder_distortion.scope.coverage", profile.scope.coverage),
+    ];
+    for (name, value) in values {
+        if value.is_some_and(|value| !value.is_finite()) {
+            return Err(ManifestError::invalid(format!(
+                "{name} must be finite before the manifest can be written"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -4734,7 +5083,7 @@ fn manifest_path_for_create(
         if relative.as_os_str().is_empty() {
             ".".to_string()
         } else {
-            path_to_manifest_string(relative)
+            path_to_manifest_string(relative)?
         }
     } else if !options.allow_path_escape {
         return Err(ManifestError::invalid(format!(
@@ -4743,9 +5092,9 @@ fn manifest_path_for_create(
             canonical_base.display()
         )));
     } else if let Some(relative) = relative_path_between(&canonical_base, &canonical_path) {
-        path_to_manifest_string(&relative)
+        path_to_manifest_string(&relative)?
     } else if options.allow_absolute_paths {
-        path_to_manifest_string(&canonical_path)
+        path_to_manifest_string(&canonical_path)?
     } else {
         return Err(ManifestError::invalid(format!(
             "{context} path {} cannot be expressed relative to manifest directory {}; use --allow-absolute-paths with --allow-path-escape",
@@ -4832,9 +5181,14 @@ fn is_manifest_path_absolute(path: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
-fn path_to_manifest_string(path: &Path) -> String {
+fn path_to_manifest_string(path: &Path) -> Result<String, ManifestError> {
     if path.is_absolute() {
-        let display = path.display().to_string();
+        let display = path.to_str().ok_or_else(|| {
+            ManifestError::invalid(format!(
+                "path {:?} is not valid UTF-8 and cannot be embedded in a manifest",
+                path.as_os_str()
+            ))
+        })?;
         // fs::canonicalize returns verbatim paths on Windows; strip the
         // verbatim prefix so the embedded string round-trips through
         // PathBuf::from at verification time.
@@ -4843,23 +5197,32 @@ fn path_to_manifest_string(path: &Path) -> String {
         } else if let Some(rest) = display.strip_prefix(r"\\?\") {
             rest.to_string()
         } else {
-            display
+            display.to_string()
         };
-        return display.replace('\\', "/");
+        return Ok(display.replace('\\', "/"));
     }
-    let parts = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            Component::CurDir => Some(".".to_string()),
-            Component::ParentDir => Some("..".to_string()),
-            Component::Prefix(_) | Component::RootDir => None,
-        })
-        .collect::<Vec<_>>();
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| {
+                        ManifestError::invalid(format!(
+                            "path {:?} is not valid UTF-8 and cannot be embedded in a manifest",
+                            path.as_os_str()
+                        ))
+                    })?
+                    .to_string(),
+            ),
+            Component::CurDir => parts.push(".".to_string()),
+            Component::ParentDir => parts.push("..".to_string()),
+            Component::Prefix(_) | Component::RootDir => {}
+        }
+    }
     if parts.is_empty() {
-        ".".to_string()
+        Ok(".".to_string())
     } else {
-        parts.join("/")
+        Ok(parts.join("/"))
     }
 }
 
@@ -4942,6 +5305,60 @@ mod tests {
         // skipping it and then resolving relative on Unix.
         assert!(!is_manifest_path_absolute("\\evil"));
         assert!(!is_manifest_path_absolute("\\"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_persist_validation_rejects_a_destination_swapped_to_a_symlink() {
+        use std::io::Write as _;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("manifest.json");
+        let target = directory.path().join("target.json");
+        fs::write(&destination, b"original").unwrap();
+        fs::write(&target, b"target").unwrap();
+        let initial = snapshot_manifest_destination(&destination).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        temporary.write_all(b"replacement").unwrap();
+
+        fs::remove_file(&destination).unwrap();
+        symlink(&target, &destination).unwrap();
+        let error = persist_manifest_temporary(temporary, &destination, &initial).unwrap_err();
+
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(target).unwrap(), b"target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_persist_validation_rejects_a_replaced_regular_inode() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("manifest.json");
+        let held_original = directory.path().join("original-manifest-inode");
+        fs::write(&destination, b"original").unwrap();
+        // Keep the original inode live so the filesystem cannot recycle its
+        // identity for the concurrent writer after `destination` is unlinked.
+        fs::hard_link(&destination, &held_original).unwrap();
+        let initial = snapshot_manifest_destination(&destination).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        temporary.write_all(b"replacement").unwrap();
+
+        fs::remove_file(&destination).unwrap();
+        fs::write(&destination, b"concurrent writer").unwrap();
+        let error = persist_manifest_temporary(temporary, &destination, &initial).unwrap_err();
+
+        assert!(
+            error.to_string().contains("was replaced during the write"),
+            "{error}"
+        );
+        assert_eq!(fs::read(destination).unwrap(), b"concurrent writer");
     }
 
     #[test]

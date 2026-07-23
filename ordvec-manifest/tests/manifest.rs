@@ -2,10 +2,10 @@ use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
     load_manifest_file_with_options, sha256_file, verify_document_for_load, verify_for_load,
-    verify_index_manifest, verify_manifest_with_base, AuxiliaryArtifact, AuxiliaryArtifactState,
-    CalibrationOrdinalization, CalibrationProfileRef, CreateAuxiliaryArtifact,
-    CreateManifestOptions, CreateRowIdentity, DistortionBounds, DistortionEvidence,
-    DistortionEvidenceKind, DistortionProfileArtifactRef, DistortionScope,
+    verify_index_manifest, verify_manifest_with_base, write_manifest_file, AuxiliaryArtifact,
+    AuxiliaryArtifactState, CalibrationOrdinalization, CalibrationProfileRef,
+    CreateAuxiliaryArtifact, CreateManifestOptions, CreateRowIdentity, DistortionBounds,
+    DistortionEvidence, DistortionEvidenceKind, DistortionProfileArtifactRef, DistortionScope,
     EncoderDistortionProfileRef, EncoderSpec, ManifestIndexKind, ManifestIndexParams, MetricSpec,
     NullModelSpec, ProfileArtifactRef, ProfileParameterization, RequireAuxiliaryError,
     ResourceLimits, RowIdentity, VerificationCode, VerifiedLoadPlanError, VerifyOptions,
@@ -25,6 +25,32 @@ fn write_index(dir: &Path) -> PathBuf {
     index.add(&docs);
     index.write(&path).unwrap();
     path
+}
+
+#[test]
+fn write_rejects_non_finite_numbers_without_replacing_the_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    let mut profile = distortion_profile(&manifest, None, None, DistortionEvidenceKind::Certified);
+    profile.bounds.estimated_distortion = Some(f64::NAN);
+    manifest.encoder_distortion = Some(profile);
+    fs::write(&manifest_path, b"existing manifest bytes").unwrap();
+
+    let err = write_manifest_file(&manifest, &manifest_path).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("encoder_distortion.bounds.estimated_distortion must be finite"),
+        "{err}"
+    );
+    assert_eq!(fs::read(manifest_path).unwrap(), b"existing manifest bytes");
 }
 
 fn write_rankquant_index(dir: &Path, rows: usize) -> PathBuf {

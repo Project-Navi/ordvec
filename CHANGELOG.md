@@ -89,6 +89,14 @@ _No unreleased changes._
 
 ### Changed
 
+- **First-run and release surfaces are aligned for v0.6.0.** The root and PyPI
+  READMEs now lead with a tiny deterministic retrieval that prints a checked
+  result, show persistence/reopen, and route users to the Rust, Python, CLI,
+  and manifest packages. Both manifest packages include an end-to-end
+  create-and-verify path, and every `ordvec-manifest` command and option now
+  has CLI help text. Release invariants pin the current package version,
+  manifest schema, feature defaults, public metadata links, and first-run
+  examples so the next release cannot silently drift across surfaces.
 - **BREAKING (`ordvec-manifest`): deterministic manifest schema v2.** The
   manifest schema version is now `ordvec.index_manifest.v2`. `manifest_id`
   and `created_at` are removed from `IndexManifest`, creation omits the
@@ -135,6 +143,37 @@ _No unreleased changes._
 - **ordvec-manifest: bounded hashing streams with constant memory.**
   `sha256_file_bounded` no longer materialises the file in memory before
   hashing.
+
+### Fixed
+
+- **`ordvec-manifest`: canonical content addresses are independent of
+  `serde_json` feature unification.** Nested extension and attestation maps are
+  recursively key-sorted and JSON numbers are normalized before serialization,
+  so downstream `preserve_order` / `arbitrary_precision` features cannot change
+  the same logical manifest's bytes. Manifest creation now rejects non-UTF-8
+  artifact paths instead of embedding the lossy replacement character.
+- **`ordvec-manifest`: manifest writes are atomic and fail before replacement.**
+  `write_manifest_file` writes and syncs a same-directory temporary file before
+  atomically replacing the destination, and rejects non-finite distortion
+  values before touching an existing manifest. New-file mode/umask behavior and
+  existing portable permission bits are preserved.
+- **`ordvec-manifest`: restore the declared Rust 1.89 floor for SQLite builds.**
+  The optional `rusqlite` dependency returns to the compatible 0.39 line after
+  0.40's build dependency used a library feature unavailable on Rust 1.89; the
+  all-features manifest suite now runs in the permanent MSRV lane.
+
+### Security
+
+- The release CI gate now waits, with a 30-minute fail-closed deadline, for
+  the latest exact-HEAD push runs instead of treating normal Actions
+  visibility/in-progress delay as an immediate failure. It rejects terminal
+  non-successes and a moving `main`, and every draft-release or artifact-build
+  job is directly blocked behind the gate.
+- The advisory policy now roots `cargo-deny` at every workspace member and
+  enables every feature, closing the blind spot that omitted dev-only
+  benchmark dependencies. `anyhow` is updated from 1.0.102 to 1.0.103 to
+  clear RUSTSEC-2026-0190; the documented dev-only `bincode` 1.x
+  unmaintained advisory remains explicitly triaged.
 
 ## 0.5.0 - 2026-06-19
 

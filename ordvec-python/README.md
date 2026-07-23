@@ -5,14 +5,40 @@ training-free **ordinal & sign** vector-quantization library for compressed
 nearest-neighbour retrieval over high-dimensional embeddings. Pure-Rust core,
 zero system dependencies; SIMD-accelerated at runtime (AVX-512 / AVX2 / scalar).
 
+## Quickstart
+
+```bash
+python -m pip install --upgrade ordvec
+```
+
 ```python
 import numpy as np
-import ordvec
+from ordvec import RankQuant
 
-q = ordvec.RankQuant(1024, 2)          # 1024-dim, 2 bits/coord
-q.add(np.random.randn(10_000, 1024).astype(np.float32))
-# asymmetric: full-precision float queries vs bucketed docs (recommended)
-scores, ids = q.search_asymmetric(np.random.randn(8, 1024).astype(np.float32), k=10)
+documents = np.array([
+    [8, 7, 6, 5, 4, 3, 2, 1],
+    [1, 2, 3, 4, 5, 6, 7, 8],
+    [8, 1, 7, 2, 6, 3, 5, 4],
+], dtype=np.float32)
+query = np.array([[8, 7, 6, 5, 4, 3, 2, 1]], dtype=np.float32)
+
+index = RankQuant(dim=8, bits=1)
+index.add(documents)
+scores, ids = index.search_asymmetric(query, k=1)
+print(f"top document: {ids[0, 0]} (score {scores[0, 0]:.3f})")
+```
+
+```text
+top document: 0 (score 0.396)
+```
+
+Persist and reopen without the original float corpus:
+
+```python
+index.write("quickstart.ovrq")
+reopened = RankQuant.load("quickstart.ovrq")
+_, reopened_ids = reopened.search_asymmetric(query, k=1)
+assert reopened_ids[0, 0] == 0
 ```
 
 ## Classes
@@ -25,17 +51,28 @@ scores, ids = q.search_asymmetric(np.random.randn(8, 1024).astype(np.float32), k
 | `SignBitmap` | Sign bitmap for sign-cosine candidate generation; separate from the constant-weight bitmap theorem. |
 
 The Rust crate's `b = 8` RankQuant evidence/refinement width is not exposed
-through the v0.5 Python `RankQuant` constructor and cannot be persisted to
+through the v0.6.0 Python `RankQuant` constructor and cannot be persisted to
 `.ovrq`; use `bits` 1, 2, or 4 from Python.
 
 ## Two-stage retrieval (subset rerank)
 
 A `Bitmap` / `SignBitmap` probe yields a candidate shortlist that
-`RankQuant.search_asymmetric_subset(query, candidates, k)` reranks exactly:
+`RankQuant.search_asymmetric_subset(query, candidates, k)` reranks exactly.
+Continuing from the quickstart's `documents` and `query`, tile the tiny rows to
+the bitmap kernel's 64-coordinate minimum:
 
 ```python
-cands = bm.top_m_candidates(query, m=256)          # uint32 shortlist
-scores, ids = rq.search_asymmetric_subset(query, cands, k=10)
+from ordvec import Bitmap
+
+documents64 = np.tile(documents, (1, 8))
+query64 = np.tile(query, (1, 8))
+reranker = RankQuant(dim=64, bits=1)
+reranker.add(documents64)
+probe = Bitmap(dim=64, n_top=16)
+probe.add(documents64)
+candidates = probe.top_m_candidates(query64[0], m=2)
+scores, ids = reranker.search_asymmetric_subset(query64[0], candidates, k=1)
+assert ids[0] == 0
 ```
 
 Both returned arrays have length **`min(k, len(candidates))`**, not `k`. When
@@ -56,11 +93,7 @@ calibrates that threshold by the hypergeometric upper tail.
 This is not a deployment guarantee for every encoder or corpus. Real-corpus
 recall, monotonicity, and null fit remain empirical diagnostics.
 
-## Installation
-
-```bash
-pip install ordvec
-```
+## Installation details
 
 Wheels target CPython 3.10+ (abi3) and require `numpy>=2.2`. Building from
 source needs a Rust toolchain (MSRV 1.89) and
@@ -74,7 +107,7 @@ buffers first, so ordinary Python in-place NumPy mutation from another thread
 cannot race the detached Rust scan. Large calls may temporarily require an
 additional input-sized buffer.
 The cross-language ownership and lifetime contract is maintained in
-[`docs/bindings-safety.md`](https://github.com/Project-Navi/ordvec/blob/v0.5.0/docs/bindings-safety.md)
+[`docs/bindings-safety.md`](https://github.com/Project-Navi/ordvec/blob/v0.6.0/docs/bindings-safety.md)
 for this release line.
 
 ## Type stubs
