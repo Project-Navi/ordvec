@@ -95,9 +95,12 @@ recall, monotonicity, and null fit remain empirical diagnostics.
 
 ## Installation details
 
-Wheels target CPython 3.10+ (abi3) and require `numpy>=2.2`. Building from
-source needs a Rust toolchain (MSRV 1.89) and
-[maturin](https://www.maturin.rs/).
+The v0.6.0 wheel matrix covers CPython 3.10+ (abi3) on manylinux/glibc
+x86_64 and aarch64, macOS Apple Silicon, and Windows x64, and requires
+`numpy>=2.2`. Intel Mac and musl/Alpine installations fall back to a source
+build and require Rust 1.89 plus [maturin](https://www.maturin.rs/). See the
+[artifact platform matrix](https://github.com/Project-Navi/ordvec/blob/v0.6.0/docs/artifact-platform-matrix.md)
+for the complete release surface.
 
 ## Safety contract
 

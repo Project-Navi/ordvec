@@ -340,7 +340,10 @@ Python — the bindings ship to PyPI as `ordvec`:
 pip install ordvec
 ```
 
-Wheels target CPython 3.10+ (abi3); to build from source instead, see
+The v0.6.0 wheel matrix covers CPython 3.10+ (abi3) on manylinux/glibc
+x86_64 and aarch64, macOS Apple Silicon, and Windows x64. Intel Mac and
+musl/Alpine installations fall back to a source build and require Rust 1.89;
+see the [artifact platform matrix](docs/artifact-platform-matrix.md) and
 [`ordvec-python/`](https://github.com/Project-Navi/ordvec/tree/main/ordvec-python).
 The runtime dependency floor is `numpy>=2.2`.
 
