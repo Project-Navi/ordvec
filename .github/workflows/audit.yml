@@ -10,8 +10,10 @@ name: audit
 # Read-only token, no `run:` steps (no injection surface). Because this runs
 # UNATTENDED on a cron schedule, the third-party actions are SHA-pinned (not the
 # mutable @v4/@v2 tags ci.yml uses on human-triggered push/PR) so a compromised
-# tag update cannot auto-execute on a scheduled runner. Scoped to
-# `check advisories`.
+# tag update cannot auto-execute on a scheduled runner. Scoped to `check
+# advisories`, with separate locked roots for the main workspace and the
+# standalone fuzz crate so neither committed lockfile can fall outside the
+# advisory graph.
 
 on:
   schedule:
@@ -36,6 +38,16 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+      - name: Audit root workspace advisories
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
-          command: check advisories
+          command: check
+          arguments: --workspace --all-features --locked
+          command-arguments: advisories
+      - name: Audit standalone fuzz lockfile advisories
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check
+          manifest-path: fuzz/Cargo.toml
+          arguments: --all-features --locked
+          command-arguments: advisories

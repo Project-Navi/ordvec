@@ -44,7 +44,7 @@ cargo test --no-default-features
 cargo +1.89.0 build                   # MSRV
 cargo build --locked
 RUSTFLAGS="-D warnings" cargo build
-cargo deny check                      # licenses / advisories / bans / sources
+cargo deny --workspace --all-features --locked check  # full locked workspace graph
 ```
 
 SIMD dispatches at runtime — AVX-512 / AVX2 on x86_64, NEON on aarch64,

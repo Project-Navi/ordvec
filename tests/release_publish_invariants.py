@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 
 WORKFLOW_PATH = os.environ.get("RELEASE_WORKFLOW_PATH", ".github/workflows/release.yml")
 CI_WORKFLOW_PATH = os.environ.get("CI_WORKFLOW_PATH", ".github/workflows/ci.yml")
+AUDIT_WORKFLOW_PATH = os.environ.get("AUDIT_WORKFLOW_PATH", ".github/workflows/audit.yml")
 PYTHON_WORKFLOW_PATH = os.environ.get("PYTHON_WORKFLOW_PATH", ".github/workflows/python.yml")
 STRICT_STABLE_TAG_PATTERN = r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 CHANGELOG_RELEASE_HEADING_RE = re.compile(
@@ -464,30 +465,120 @@ def check_release_version_sync() -> None:
         if version != core_version:
             fail(f"{label} is {version}, expected lockstep version {core_version}")
 
-    manifest = load_toml("ordvec-manifest/Cargo.toml")
-    dependencies = mapping(manifest.get("dependencies"), "ordvec-manifest/Cargo.toml: dependencies")
-    ordvec_dep = mapping(
-        dependencies.get("ordvec"), "ordvec-manifest/Cargo.toml: dependencies.ordvec"
+    internal_requirements = (
+        ("ordvec-manifest/Cargo.toml", "ordvec"),
+        ("ordvec-python/Cargo.toml", "ordvec_core"),
+        ("ordvec-manifest-python/Cargo.toml", "ordvec_manifest_core"),
+        ("ordvec-ffi/Cargo.toml", "ordvec"),
+        ("benchmarks/beir-bench/Cargo.toml", "ordvec"),
     )
-    dep_version = ordvec_dep.get("version")
-    if dep_version != core_version:
-        fail(
-            "ordvec-manifest/Cargo.toml: dependencies.ordvec.version "
-            f"is {dep_version!r}, expected {core_version!r}"
+    for path, dependency_name in internal_requirements:
+        manifest = load_toml(path)
+        dependencies = mapping(manifest.get("dependencies"), f"{path}: dependencies")
+        dependency = mapping(
+            dependencies.get(dependency_name),
+            f"{path}: dependencies.{dependency_name}",
         )
+        dep_version = dependency.get("version")
+        if dep_version != core_version:
+            fail(
+                f"{path}: dependencies.{dependency_name}.version is {dep_version!r}, "
+                f"expected lockstep version {core_version!r}"
+            )
 
     changelog = read_text("CHANGELOG.md")
-    if not re.search(rf"^## \[?{re.escape(core_version)}\]? - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE):
+    release_heading = re.search(
+        rf"^## \[?{re.escape(core_version)}\]? - (\d{{4}}-\d{{2}}-\d{{2}})$",
+        changelog,
+        re.MULTILINE,
+    )
+    if release_heading is None:
         fail(f"CHANGELOG.md must contain a dated section for {core_version}")
     check_unreleased_section_empty_for_dated_version(changelog, core_version)
 
     threat_model = read_text("THREAT_MODEL.md")
-    if not re.search(
-        rf"^\>\s+\*\*Status:\*\*\s+v{re.escape(core_version)}\s+\(pre-1\.0\),",
-        threat_model,
+    release_date = release_heading.group(1)
+    expected_threat_status = (
+        f"> **Status:** v{core_version} (pre-1.0), {release_date}."
+    )
+    if expected_threat_status not in threat_model:
+        fail(
+            "THREAT_MODEL.md status must match the current changelog release "
+            f"and date: {expected_threat_status!r}"
+        )
+
+    semver_capture = r"v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+    release_contract_patterns = {
+        "README.md": (
+            rf"\bIn {semver_capture} it is\s+Rust-only",
+            rf"cross-language persisted retrieval widths in {semver_capture}",
+            rf"`RankQuantFastscan::\{{write,load\}}` calls\. In {semver_capture}",
+            rf"loads `\.ovfs` directly, but in {semver_capture}",
+        ),
+        "ordvec-python/README.md": (
+            rf"through the {semver_capture} Python `RankQuant` constructor",
+            rf"/blob/{semver_capture}/docs/bindings-safety\.md",
+        ),
+        "docs/INDEX_PROVENANCE.md": (
+            rf"^{semver_capture} `\.ovfs` is not covered",
+            rf"crosses a trust boundary in\s+{semver_capture}, bind the bytes",
+        ),
+        "docs/PERSISTED_FORMAT.md": (
+            rf"In {semver_capture}, `probe_index_metadata\(path\)` rejects",
+            rf"probe-versus-load contract in {semver_capture}\.",
+        ),
+        "docs/compatibility-policy.md": (
+            rf"supported, but in {semver_capture} `\.ovfs`",
+            rf"^{semver_capture}\. Promoting `\.ovfs`",
+        ),
+    }
+    for path, patterns in release_contract_patterns.items():
+        text = read_text(path)
+        for pattern in patterns:
+            match = re.search(pattern, text, re.MULTILINE)
+            if match is None:
+                fail(f"{path}: current-release contract marker is missing: {pattern!r}")
+            if match.group(1) != core_version:
+                fail(
+                    f"{path}: current-release contract says v{match.group(1)}, "
+                    f"expected v{core_version}"
+                )
+
+    schema_source = read_text("ordvec-manifest/src/lib.rs")
+    schema_match = re.search(
+        r'^pub const SCHEMA_VERSION: &str = "ordvec\.index_manifest\.v([1-9][0-9]*)";$',
+        schema_source,
         re.MULTILINE,
-    ):
-        fail(f"THREAT_MODEL.md status must mention v{core_version}")
+    )
+    if schema_match is None:
+        fail("ordvec-manifest/src/lib.rs: could not read the manifest schema major")
+    schema_major = schema_match.group(1)
+    schema_contract_patterns = {
+        "README.md": (
+            r"`probe_index_metadata\(\)` / `ordvec-manifest` v([1-9][0-9]*) contract",
+            r"`probe_index_metadata\(\)` or `ordvec-manifest` v([1-9][0-9]*)\.",
+        ),
+        "docs/INDEX_PROVENANCE.md": (
+            r"`ordvec-manifest` v([1-9][0-9]*)\. This note",
+            r"The v([1-9][0-9]*) verifier intentionally does not create or verify `\.ovfs`",
+            r"manifest v([1-9][0-9]*) simply\s+does not bind or probe those bytes",
+        ),
+        "docs/compatibility-policy.md": (
+            r"`ordvec-manifest` v([1-9][0-9]*) contract\. Feature-gated",
+            r"and v([1-9][0-9]*) JSON schema are treated as\s+stable release surfaces",
+        ),
+    }
+    for path, patterns in schema_contract_patterns.items():
+        text = read_text(path)
+        for pattern in patterns:
+            match = re.search(pattern, text, re.MULTILINE)
+            if match is None:
+                fail(f"{path}: current-schema contract marker is missing: {pattern!r}")
+            if match.group(1) != schema_major:
+                fail(
+                    f"{path}: current-schema contract says v{match.group(1)}, "
+                    f"expected v{schema_major}"
+                )
 
     fuzz_lock = read_text("fuzz/Cargo.lock")
     if not re.search(
@@ -660,6 +751,29 @@ def check_manifest_cli_defaults() -> None:
     if "cargo install ordvec-manifest" not in readme:
         fail("ordvec-manifest/README.md: must document default cargo install")
 
+    matrix = read_text("docs/artifact-platform-matrix.md")
+    matrix_row = re.search(
+        r"^\| `ordvec-manifest` Rust crate \|.*$", matrix, re.MULTILINE
+    )
+    if matrix_row is None:
+        fail("docs/artifact-platform-matrix.md: ordvec-manifest Rust crate row is missing")
+    row_text = matrix_row.group(0)
+    if re.search(r"default features? (?:are )?empty", row_text, re.IGNORECASE):
+        fail(
+            "docs/artifact-platform-matrix.md: ordvec-manifest defaults must not be "
+            "documented as empty"
+        )
+    for required_fragment in (
+        "default feature `cli`",
+        "optional `sqlite` and `sqlite-bundled`",
+        "disable defaults",
+    ):
+        if required_fragment not in row_text:
+            fail(
+                "docs/artifact-platform-matrix.md: ordvec-manifest row must mention "
+                f"{required_fragment!r}"
+            )
+
 
 def check_publication_model() -> None:
     expected_publish = {
@@ -679,6 +793,7 @@ def check_publication_model() -> None:
 
 
 def check_python_package_metadata() -> None:
+    release_tag = f"v{package_version('Cargo.toml')}"
     pyproject = load_toml("ordvec-python/pyproject.toml")
     project = mapping(pyproject.get("project"), "ordvec-python/pyproject.toml: project")
     if project.get("name") != "ordvec":
@@ -718,6 +833,11 @@ def check_python_package_metadata() -> None:
         "Homepage": "https://github.com/Project-Navi/ordvec",
         "Repository": "https://github.com/Project-Navi/ordvec",
         "Issues": "https://github.com/Project-Navi/ordvec/issues",
+        "Documentation": (
+            f"https://github.com/Project-Navi/ordvec/blob/{release_tag}/"
+            "ordvec-python/README.md"
+        ),
+        "Changelog": "https://github.com/Project-Navi/ordvec/blob/main/CHANGELOG.md",
         "Formalization": "https://github.com/Project-Navi/ordvec-formalization",
     }.items():
         if urls.get(key) != expected:
@@ -779,6 +899,11 @@ def check_python_package_metadata() -> None:
         "Homepage": "https://github.com/Project-Navi/ordvec",
         "Repository": "https://github.com/Project-Navi/ordvec",
         "Issues": "https://github.com/Project-Navi/ordvec/issues",
+        "Documentation": (
+            f"https://github.com/Project-Navi/ordvec/blob/{release_tag}/"
+            "ordvec-manifest-python/README.md"
+        ),
+        "Changelog": "https://github.com/Project-Navi/ordvec/blob/main/CHANGELOG.md",
     }.items():
         if manifest_urls.get(key) != expected:
             fail(
@@ -825,6 +950,69 @@ def check_python_package_metadata() -> None:
     dependabot = read_text(".github/dependabot.yml")
     if "floor >=2.2" not in dependabot:
         fail(".github/dependabot.yml must keep the Python NumPy floor comment at >=2.2")
+
+
+def check_first_run_docs() -> None:
+    readme = read_text("README.md")
+    quickstart_pos = readme.find("## Quickstart: see a result in 30 seconds")
+    benchmark_pos = readme.find("## Benchmark at a glance")
+    if quickstart_pos < 0 or benchmark_pos < 0 or quickstart_pos > benchmark_pos:
+        fail("README.md: the runnable quickstart must appear before benchmark detail")
+    for required in (
+        "## Choose your surface",
+        "top document: 0 (score 0.396)",
+        'index.write("quickstart.ovrq")',
+        'RankQuant.load("quickstart.ovrq")',
+        "examples/quickstart.rs",
+    ):
+        if required not in readme:
+            fail(f"README.md: first-run path must include {required!r}")
+    if "link TBD" in readme:
+        fail("README.md: public release links must not contain a TBD placeholder")
+
+    crate_docs = read_text("src/lib.rs")
+    for path, text in (("README.md", readme), ("src/lib.rs", crate_docs)):
+        example_pos = text.find("RankQuant::new")
+        if example_pos < 0:
+            fail(f"{path}: expected RankQuant::new in the first-run example")
+        if "10_000" in text[example_pos : example_pos + 800]:
+            fail(f"{path}: first example must not allocate a 10,000-row placeholder corpus")
+
+    python_readme = read_text("ordvec-python/README.md")
+    install_pos = python_readme.find("python -m pip install --upgrade ordvec")
+    import_pos = python_readme.find("from ordvec import RankQuant")
+    if install_pos < 0 or import_pos < 0 or install_pos > import_pos:
+        fail("ordvec-python/README.md: installation must precede the first import")
+    for required in (
+        "top document: 0 (score 0.396)",
+        'index.write("quickstart.ovrq")',
+        "Continuing from the quickstart",
+    ):
+        if required not in python_readme:
+            fail(f"ordvec-python/README.md: first-run path must include {required!r}")
+    if "np.random" in python_readme:
+        fail("ordvec-python/README.md: first-run examples must be deterministic")
+
+    manifest_readme = read_text("ordvec-manifest/README.md")
+    for required in (
+        "## First verified index",
+        'index.write("quickstart.ovrq")',
+        "quickstart.manifest.json\nverified",
+    ):
+        if required not in manifest_readme:
+            fail(f"ordvec-manifest/README.md: first-run path must include {required!r}")
+
+    manifest_python_readme = read_text("ordvec-manifest-python/README.md")
+    for required in (
+        "python -m pip install --upgrade ordvec ordvec-manifest",
+        'index.write("quickstart.ovrq")',
+        "verified: True",
+    ):
+        if required not in manifest_python_readme:
+            fail(
+                "ordvec-manifest-python/README.md: first-run path must include "
+                f"{required!r}"
+            )
 
 
 def check_release_docs_include_manifest_pypi_lane() -> None:
@@ -950,6 +1138,7 @@ def check_package_contents() -> None:
             "docs/compatibility-policy.md",
             "docs/determinism.md",
             "examples/bench_rank.rs",
+            "examples/quickstart.rs",
             "src/lib.rs",
             "tests/index/main.rs",
             "tests/persistence_compat.rs",
@@ -1306,10 +1495,14 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
 
     jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
     require_job = mapping(jobs.get("require-ci-green"), f"{path}: jobs.require-ci-green")
+    timeout_minutes = require_job.get("timeout-minutes")
+    if not isinstance(timeout_minutes, int) or not 30 < timeout_minutes <= 60:
+        fail(f"{path}: require-ci-green must have a bounded 31-60 minute job timeout")
     steps = sequence(require_job.get("steps"), f"{path}: jobs.require-ci-green.steps")
     gated_workflows = ("ci.yml", "python.yml", "fuzz.yml", "codeql.yml", "actionlint.yml", "zizmor.yml")
     found_loop: tuple[str, ...] | None = None
     found_gate_run: str | None = None
+    found_gate_env: dict[str, Any] | None = None
     for index, raw_step in enumerate(steps):
         step = mapping(raw_step, f"{path}: jobs.require-ci-green.steps[{index}]")
         run = step.get("run")
@@ -1319,6 +1512,9 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         if match:
             found_loop = tuple(shlex.split(match.group(1)))
             found_gate_run = run
+            found_gate_env = mapping(
+                step.get("env"), f"{path}: jobs.require-ci-green.steps[{index}].env"
+            )
             break
     if found_loop is None:
         fail(f"{path}: require-ci-green must loop over the release-gated workflow filenames")
@@ -1328,12 +1524,56 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
         )
     if found_gate_run is None or "event=push" not in found_gate_run or '.event == "push"' not in found_gate_run:
         fail(f"{path}: require-ci-green must require successful push workflow runs")
+    if "status=success" in found_gate_run:
+        fail(f"{path}: require-ci-green must query all run states before classifying them")
     if (
         found_gate_run is None
         or "repos/${REPO}/commits/main" not in found_gate_run
         or "MAIN_SHA" not in found_gate_run
     ):
         fail(f"{path}: require-ci-green must verify the release tag points at current main")
+    if found_gate_env is None:
+        fail(f"{path}: require-ci-green poll environment was not found")
+    if found_gate_env.get("POLL_INTERVAL_SECONDS") != 30:
+        fail(f"{path}: require-ci-green must poll at the reviewed 30-second interval")
+    if found_gate_env.get("POLL_TIMEOUT_SECONDS") != 1800:
+        fail(f"{path}: require-ci-green must fail closed after the reviewed 30-minute deadline")
+    required_poll_fragments = (
+        "while :; do",
+        ".head_sha == $sha",
+        'sort_by([.run_number, .run_attempt, .id])',
+        "| last",
+        'status\" != \"completed',
+        'conclusion\" = \"success',
+        "SECONDS >= deadline",
+        'sleep \"$POLL_INTERVAL_SECONDS\"',
+        'api_status=\"$(sed -nE',
+        "api_exit_status=$?",
+        "408|429|5??)",
+        "connection (reset|refused|closed)",
+        "rate.?limit|secondary rate|abuse detection",
+        "retryable_api_error=true",
+        "API query failed permanently",
+    )
+    for fragment in required_poll_fragments:
+        if fragment not in found_gate_run:
+            fail(f"{path}: require-ci-green is missing bounded-poll behavior {fragment!r}")
+    loop_index = found_gate_run.find("while :; do")
+    main_check_index = found_gate_run.find('MAIN_SHA="$(gh api', loop_index)
+    workflow_loop_index = found_gate_run.find("for wf in ", loop_index)
+    if main_check_index < loop_index or main_check_index > workflow_loop_index:
+        fail(f"{path}: require-ci-green must re-check current main before every workflow poll")
+    success_index = found_gate_run.find('if "$all_green"; then', workflow_loop_index)
+    final_main_index = found_gate_run.find('FINAL_MAIN_SHA="$(gh api', success_index)
+    success_break_index = found_gate_run.find("break", success_index)
+    if (
+        success_index < workflow_loop_index
+        or final_main_index < success_index
+        or success_break_index < final_main_index
+        or '$SHA" != "$FINAL_MAIN_SHA' not in found_gate_run[final_main_index:success_break_index]
+    ):
+        fail(f"{path}: require-ci-green must re-check current main immediately before success")
+
 
     allowed_id_token_jobs = {
         "attest",
@@ -1375,6 +1615,74 @@ def check_release_security_gates(workflow: dict[str, Any], path: str) -> None:
             actual = raw_environment
         if actual != environment:
             fail(f"{path}: jobs.{job_name} must use environment {environment!r}; got {actual!r}")
+
+
+def check_cargo_deny_workspace_scope(
+    workflow: dict[str, Any], path: str, job_name: str, *, advisories_only: bool
+) -> None:
+    jobs = mapping(workflow.get("jobs"), f"{path}: jobs")
+    job = mapping(jobs.get(job_name), f"{path}: jobs.{job_name}")
+    steps = sequence(job.get("steps"), f"{path}: jobs.{job_name}.steps")
+    deny_steps = [
+        mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]")
+        for index, raw_step in enumerate(steps)
+        if action_name(mapping(raw_step, f"{path}: jobs.{job_name}.steps[{index}]"))
+        == "embarkstudios/cargo-deny-action"
+    ]
+    if len(deny_steps) != 2:
+        fail(
+            f"{path}: jobs.{job_name} must use exactly two cargo-deny actions "
+            "(root workspace plus standalone fuzz lockfile)"
+        )
+
+    scoped_command_arguments: dict[str, str] = {}
+    for index, deny_step in enumerate(deny_steps):
+        inputs = mapping(
+            deny_step.get("with"), f"{path}: jobs.{job_name}.cargo-deny[{index}].with"
+        )
+        if inputs.get("command") != "check":
+            fail(f"{path}: jobs.{job_name} cargo-deny command must be check")
+        argument_words = shlex.split(str(inputs.get("arguments", "")))
+        if "--all-features" not in argument_words:
+            fail(f"{path}: jobs.{job_name} cargo-deny must activate all features")
+        if "--locked" not in argument_words:
+            fail(f"{path}: jobs.{job_name} cargo-deny must audit a committed lockfile")
+
+        if "--manifest-path" in argument_words:
+            fail(
+                f"{path}: jobs.{job_name} cargo-deny must use the action's "
+                "manifest-path input instead of duplicating the CLI option"
+            )
+        manifest_path = norm_path(inputs.get("manifest-path"))
+        has_fuzz_manifest = manifest_path == "fuzz/Cargo.toml"
+        if manifest_path and not has_fuzz_manifest:
+            fail(
+                f"{path}: jobs.{job_name} cargo-deny has unexpected manifest-path "
+                f"{manifest_path!r}"
+            )
+        if "--workspace" in argument_words and not has_fuzz_manifest:
+            scope = "workspace"
+        elif has_fuzz_manifest and "--workspace" not in argument_words:
+            scope = "fuzz"
+        else:
+            fail(
+                f"{path}: jobs.{job_name} cargo-deny action must target either "
+                "--workspace or --manifest-path fuzz/Cargo.toml"
+            )
+        if scope in scoped_command_arguments:
+            fail(f"{path}: jobs.{job_name} has duplicate cargo-deny scope {scope!r}")
+        scoped_command_arguments[scope] = str(inputs.get("command-arguments", "")).strip()
+
+    if set(scoped_command_arguments) != {"workspace", "fuzz"}:
+        fail(f"{path}: jobs.{job_name} must audit both workspace and fuzz lockfile scopes")
+    expected_workspace_command = "advisories" if advisories_only else ""
+    if scoped_command_arguments["workspace"] != expected_workspace_command:
+        fail(
+            f"{path}: jobs.{job_name} workspace cargo-deny command arguments must be "
+            f"{expected_workspace_command!r}"
+        )
+    if scoped_command_arguments["fuzz"] != "advisories":
+        fail(f"{path}: jobs.{job_name} fuzz cargo-deny must be scoped to advisories")
 
 
 def check_aarch64_smoke_selector(workflow: dict[str, Any], path: str) -> None:
@@ -2057,6 +2365,7 @@ def check_sde_cache_invariants() -> None:
 def main() -> None:
     workflow = load_workflow(WORKFLOW_PATH)
     ci_workflow = load_workflow(CI_WORKFLOW_PATH)
+    audit_workflow = load_workflow(AUDIT_WORKFLOW_PATH)
     check_release_version_sync()
     check_release_compatibility_sync()
     check_python_binding_safety_docs_sync()
@@ -2064,10 +2373,17 @@ def main() -> None:
     check_manifest_cli_defaults()
     check_publication_model()
     check_python_package_metadata()
+    check_first_run_docs()
     check_release_docs_include_manifest_pypi_lane()
     check_strict_release_tag_patterns(workflow, WORKFLOW_PATH)
     check_package_contents()
     check_ci_package_guards(ci_workflow, CI_WORKFLOW_PATH)
+    check_cargo_deny_workspace_scope(
+        ci_workflow, CI_WORKFLOW_PATH, "deny", advisories_only=False
+    )
+    check_cargo_deny_workspace_scope(
+        audit_workflow, AUDIT_WORKFLOW_PATH, "advisories", advisories_only=True
+    )
     check_hash_requirement_temp_paths(
         [WORKFLOW_PATH, PYTHON_WORKFLOW_PATH, CI_WORKFLOW_PATH, COVERAGE_WORKFLOW_PATH]
     )
