@@ -4153,13 +4153,32 @@ fn decode_plan_verified<T, E>(
     let decoded = decoder(&mut reader, expected_size);
     let decoder_consumed = reader.consumed;
 
-    let mut scratch = [0u8; VERIFIED_DECODE_DRAIN_BYTES];
-    while reader.remaining != 0 {
-        match reader.read(&mut scratch) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+    if reader.remaining != 0 {
+        // Keep the fixed verification scratch off small caller stacks, and
+        // preserve the public recoverable-error contract if it cannot be
+        // allocated. Fully consuming decoders do not need this allocation.
+        let mut scratch = Vec::new();
+        if scratch
+            .try_reserve_exact(VERIFIED_DECODE_DRAIN_BYTES)
+            .is_err()
+        {
+            return Err(VerifiedArtifactUseError::Access {
+                identity,
+                stage: VerifiedArtifactAccessStage::Read,
+                source: io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "verification read scratch allocation failed",
+                ),
+            });
+        }
+        scratch.resize(VERIFIED_DECODE_DRAIN_BYTES, 0);
+        while reader.remaining != 0 {
+            match reader.read(&mut scratch) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
         }
     }
     let (observed_digest, read_error) = reader.finish();
