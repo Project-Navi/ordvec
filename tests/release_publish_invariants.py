@@ -729,6 +729,23 @@ def check_registry_metadata_parity() -> None:
 
 def check_manifest_cli_defaults() -> None:
     manifest = load_toml("ordvec-manifest/Cargo.toml")
+    dependencies = mapping(
+        manifest.get("dependencies"), "ordvec-manifest/Cargo.toml: dependencies"
+    )
+    serde_json = mapping(
+        dependencies.get("serde_json"),
+        "ordvec-manifest/Cargo.toml: dependencies.serde_json",
+    )
+    serde_features = string_sequence(
+        serde_json.get("features"),
+        "ordvec-manifest/Cargo.toml: dependencies.serde_json.features",
+    )
+    if serde_features != ["float_roundtrip"]:
+        fail(
+            "ordvec-manifest/Cargo.toml: production serde_json features must be "
+            "exactly ['float_roundtrip']; arbitrary_precision, preserve_order, "
+            "raw_value, and unbounded_depth are forbidden"
+        )
     features = mapping(manifest.get("features"), "ordvec-manifest/Cargo.toml: features")
     default_features = string_sequence(
         features.get("default"), "ordvec-manifest/Cargo.toml: features.default"

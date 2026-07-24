@@ -15,7 +15,8 @@
 //! for command-line use.
 //!
 //! ```no_run
-//! use ordvec_manifest::{verify_for_load, VerifyOptions};
+//! use ordvec::RankQuant;
+//! use ordvec_manifest::{verify_for_load, ManifestIndexKind, VerifyOptions};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let plan = verify_for_load("quickstart.manifest.json", VerifyOptions::default())?;
@@ -24,8 +25,11 @@
 //!     plan.metadata().vector_count,
 //!     plan.artifact_path().display()
 //! );
-//! // Load the index from plan.artifact_path() immediately, while the verified
-//! // bytes remain under the caller's control.
+//! let index = plan.decode_primary_with(
+//!     ManifestIndexKind::RankQuant,
+//!     |reader, encoded_len| RankQuant::read_from_sized(reader, encoded_len),
+//! )?;
+//! assert_eq!(index.len(), plan.metadata().vector_count);
 //! # Ok(())
 //! # }
 //! ```
@@ -42,7 +46,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::fs::{self, File};
+#[cfg(any(unix, windows))]
+use std::fs::OpenOptions;
+use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
@@ -135,27 +141,8 @@ pub fn load_manifest_file_with_options(
     options: &VerifyOptions,
 ) -> Result<ManifestDocument, ManifestError> {
     let path = path.as_ref();
-    let manifest_bytes = read_bounded_file(
-        path,
-        options.limits.max_manifest_bytes,
-        codes::MANIFEST_FILE_TOO_LARGE,
-        "manifest file",
-    )?;
-    let manifest: IndexManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|err| manifest_parse_error(&manifest_bytes, err))?;
-    // A genuine v1 manifest fails the parse above (its required `manifest_id`
-    // / `created_at` fields trip `deny_unknown_fields`), but a document that is
-    // v2-shaped yet labels itself an unsupported `schema_version` would
-    // otherwise load and only be caught at verify. Enforce the version at load
-    // so loading any non-current schema fails here, as documented.
-    if manifest.schema_version != SCHEMA_VERSION {
-        return Err(ManifestError::invalid(format!(
-            "manifest declares schema_version {:?} but this build supports \
-             {SCHEMA_VERSION:?}; the manifest was written by an older or newer \
-             manifest schema",
-            manifest.schema_version
-        )));
-    }
+    let manifest_bytes = read_manifest_bytes_bounded(path, options.limits.max_manifest_bytes)?;
+    let manifest = parse_current_manifest_bytes(&manifest_bytes)?;
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -166,6 +153,130 @@ pub fn load_manifest_file_with_options(
         source_path: Some(path.to_path_buf()),
         base_dir,
     })
+}
+
+/// Read a manifest through a bounded, forward-only, final-component-safe file handle.
+///
+/// The caller-selected parent directory remains trusted. The final component is
+/// opened without following a Unix/WASI symlink or Windows reparse point and
+/// must be a regular file; Windows additionally requires a disk handle. At
+/// most `max_bytes + 1` bytes are read, permitting an exact limit check without
+/// an unbounded allocation.
+pub fn read_manifest_bytes_bounded(
+    path: impl AsRef<Path>,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ManifestError> {
+    read_bounded_file(
+        path.as_ref(),
+        max_bytes,
+        codes::MANIFEST_FILE_TOO_LARGE,
+        "manifest file",
+    )
+}
+
+/// Strictly parse bytes as the current manifest schema.
+///
+/// Older or newer schema generations are rejected with schema-version context;
+/// this function performs no filesystem access and no compatibility fallback.
+pub fn parse_current_manifest_bytes(bytes: &[u8]) -> Result<IndexManifest, ManifestError> {
+    validate_manifest_json_number_tokens(bytes)?;
+    let manifest: IndexManifest =
+        serde_json::from_slice(bytes).map_err(|err| manifest_parse_error(bytes, err))?;
+    if manifest.schema_version != SCHEMA_VERSION {
+        return Err(ManifestError::invalid(format!(
+            "manifest declares schema_version {:?} but this build supports \
+             {SCHEMA_VERSION:?}; the manifest was written by an older or newer \
+             manifest schema",
+            manifest.schema_version
+        )));
+    }
+    Ok(manifest)
+}
+
+/// Reject JSON number tokens that `serde_json` could only retain by changing
+/// their exact decimal value.
+///
+/// OrdinalDB-compatible dependency graphs deliberately use
+/// `serde_json/float_roundtrip` and reject representation-changing features
+/// such as `arbitrary_precision`. Under that profile, an oversized or overly
+/// precise token can otherwise be rounded before it reaches a nested
+/// [`serde_json::Value`]. Call this on the original bytes before deserializing
+/// a compatible legacy schema so schema dispatch cannot introduce aliases.
+pub fn validate_manifest_json_number_tokens(bytes: &[u8]) -> Result<(), ManifestError> {
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'"' => {
+                offset += 1;
+                while offset < bytes.len() {
+                    match bytes[offset] {
+                        b'\\' => {
+                            // Escapes consume the following byte. Full escape
+                            // syntax remains the JSON parser's responsibility;
+                            // this scan only keeps number-looking string bytes
+                            // out of the numeric-token path.
+                            offset = offset.saturating_add(2);
+                        }
+                        b'"' => {
+                            offset += 1;
+                            break;
+                        }
+                        _ => offset += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = offset;
+                offset += 1;
+                while offset < bytes.len()
+                    && !matches!(bytes[offset], b',' | b']' | b'}')
+                    && !bytes[offset].is_ascii_whitespace()
+                {
+                    offset += 1;
+                }
+                let token = std::str::from_utf8(&bytes[start..offset]).map_err(|_| {
+                    ManifestError::invalid("manifest contains a non-UTF-8 JSON number token")
+                })?;
+                validate_lossless_json_number_token(token)?;
+            }
+            _ => offset += 1,
+        }
+    }
+    Ok(())
+}
+
+fn validate_lossless_json_number_token(token: &str) -> Result<(), ManifestError> {
+    let identity = decimal_identity(token).ok_or_else(|| {
+        ManifestError::invalid(format!(
+            "manifest contains JSON number {token:?} that cannot be represented canonically"
+        ))
+    })?;
+
+    // Integer syntax within serde_json's native signed/unsigned domain is
+    // retained exactly without going through f64. Decimal/exponent syntax is
+    // always parsed as f64, so it must pass the round-trip check below even
+    // when its mathematical value happens to be integral.
+    let integer_syntax = !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'));
+    if integer_syntax && canonical_integer_from_identity(&identity).is_some() {
+        return Ok(());
+    }
+
+    let value = token.parse::<f64>().map_err(|_| {
+        ManifestError::invalid(format!(
+            "manifest contains JSON number {token:?} that cannot be represented canonically"
+        ))
+    })?;
+    let normalized = serde_json::Number::from_f64(value).ok_or_else(|| {
+        ManifestError::invalid(format!(
+            "manifest contains JSON number {token:?} that cannot be represented canonically"
+        ))
+    })?;
+    if decimal_identity(&normalized.to_string()).as_ref() != Some(&identity) {
+        return Err(ManifestError::invalid(format!(
+            "manifest contains JSON number {token:?} outside the exact canonical i64/u64/f64 domain"
+        )));
+    }
+    Ok(())
 }
 
 /// Wraps a manifest parse failure with schema-version context. Old or new
@@ -192,13 +303,230 @@ fn manifest_parse_error(manifest_bytes: &[u8], err: serde_json::Error) -> Manife
     ManifestError::Json(err)
 }
 
+/// Filesystem operation at which a plan-verified artifact became inaccessible.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerifiedArtifactAccessStage {
+    Open,
+    InitialMetadata,
+    Read,
+    FinalMetadata,
+}
+
+impl fmt::Display for VerifiedArtifactAccessStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => f.write_str("open"),
+            Self::InitialMetadata => f.write_str("initial metadata"),
+            Self::Read => f.write_str("read"),
+            Self::FinalMetadata => f.write_str("final metadata"),
+        }
+    }
+}
+
+/// Why an opened final path component is not an acceptable artifact file.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerifiedArtifactTypeRejection {
+    FinalSymlinkOrReparsePoint,
+    NonRegularFile,
+    NonDiskFile,
+    UnsupportedPlatform,
+}
+
+impl fmt::Display for VerifiedArtifactTypeRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FinalSymlinkOrReparsePoint => {
+                f.write_str("the final component is a symlink or reparse point")
+            }
+            Self::NonRegularFile => f.write_str("the opened component is not a regular file"),
+            Self::NonDiskFile => f.write_str("the opened handle is not a disk file"),
+            Self::UnsupportedPlatform => {
+                f.write_str("the target platform cannot provide a no-follow final-component open")
+            }
+        }
+    }
+}
+
+enum OpenRegularFileError {
+    Access {
+        stage: VerifiedArtifactAccessStage,
+        source: io::Error,
+    },
+    Type(VerifiedArtifactTypeRejection),
+}
+
+#[cfg(unix)]
+fn is_final_symlink_open_error(source: &io::Error) -> bool {
+    let Some(code) = source.raw_os_error() else {
+        return false;
+    };
+    if code == libc::ELOOP {
+        return true;
+    }
+    #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+    if code == libc::EMLINK {
+        return true;
+    }
+    #[cfg(target_os = "netbsd")]
+    if code == libc::EFTYPE {
+        return true;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_follow(path: &Path) -> Result<(File, Metadata), OpenRegularFileError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|source| {
+            if is_final_symlink_open_error(&source) {
+                OpenRegularFileError::Type(
+                    VerifiedArtifactTypeRejection::FinalSymlinkOrReparsePoint,
+                )
+            } else {
+                OpenRegularFileError::Access {
+                    stage: VerifiedArtifactAccessStage::Open,
+                    source,
+                }
+            }
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| OpenRegularFileError::Access {
+            stage: VerifiedArtifactAccessStage::InitialMetadata,
+            source,
+        })?;
+    if !metadata.file_type().is_file() {
+        return Err(OpenRegularFileError::Type(
+            VerifiedArtifactTypeRejection::NonRegularFile,
+        ));
+    }
+    Ok((file, metadata))
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_follow(path: &Path) -> Result<(File, Metadata), OpenRegularFileError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError, ERROR_SUCCESS};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileType, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK,
+    };
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|source| OpenRegularFileError::Access {
+            stage: VerifiedArtifactAccessStage::Open,
+            source,
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| OpenRegularFileError::Access {
+            stage: VerifiedArtifactAccessStage::InitialMetadata,
+            source,
+        })?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(OpenRegularFileError::Type(
+            VerifiedArtifactTypeRejection::FinalSymlinkOrReparsePoint,
+        ));
+    }
+    // `GetFileType` uses the last-error slot to disambiguate a legitimate
+    // FILE_TYPE_UNKNOWN result, but it need not clear a stale value on
+    // success. Clear it immediately before the query.
+    // SAFETY: these calls only access the current thread's last-error slot;
+    // `file` owns a live HANDLE for the duration of `GetFileType`.
+    unsafe { SetLastError(ERROR_SUCCESS) };
+    let file_type = unsafe { GetFileType(file.as_raw_handle().cast()) };
+    if file_type == windows_sys::Win32::Storage::FileSystem::FILE_TYPE_UNKNOWN {
+        // `FILE_TYPE_UNKNOWN` can be a legitimate handle classification or a
+        // failed query. Windows requires consulting the thread-local last
+        // error immediately to distinguish the two cases.
+        // SAFETY: `GetLastError` reads the current thread's last-error value.
+        let code = unsafe { GetLastError() };
+        if code != ERROR_SUCCESS {
+            return Err(OpenRegularFileError::Access {
+                stage: VerifiedArtifactAccessStage::InitialMetadata,
+                source: io::Error::from_raw_os_error(code as i32),
+            });
+        }
+    }
+    if file_type != FILE_TYPE_DISK {
+        return Err(OpenRegularFileError::Type(
+            VerifiedArtifactTypeRejection::NonDiskFile,
+        ));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(OpenRegularFileError::Type(
+            VerifiedArtifactTypeRejection::NonRegularFile,
+        ));
+    }
+    Ok((file, metadata))
+}
+
+#[cfg(target_os = "wasi")]
+fn open_regular_file_no_follow(path: &Path) -> Result<(File, Metadata), OpenRegularFileError> {
+    use rustix::fs::{openat, Mode, OFlags, CWD};
+
+    let descriptor = openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::LOOP {
+            OpenRegularFileError::Type(VerifiedArtifactTypeRejection::FinalSymlinkOrReparsePoint)
+        } else {
+            OpenRegularFileError::Access {
+                stage: VerifiedArtifactAccessStage::Open,
+                source: io::Error::from_raw_os_error(error.raw_os_error()),
+            }
+        }
+    })?;
+    let file = File::from(descriptor);
+    let metadata = file
+        .metadata()
+        .map_err(|source| OpenRegularFileError::Access {
+            stage: VerifiedArtifactAccessStage::InitialMetadata,
+            source,
+        })?;
+    if !metadata.file_type().is_file() {
+        return Err(OpenRegularFileError::Type(
+            VerifiedArtifactTypeRejection::NonRegularFile,
+        ));
+    }
+    Ok((file, metadata))
+}
+
+#[cfg(not(any(unix, windows, target_os = "wasi")))]
+fn open_regular_file_no_follow(_path: &Path) -> Result<(File, Metadata), OpenRegularFileError> {
+    Err(OpenRegularFileError::Type(
+        VerifiedArtifactTypeRejection::UnsupportedPlatform,
+    ))
+}
+
 fn read_bounded_file(
     path: &Path,
     max_bytes: u64,
     code: &'static str,
     context: &'static str,
 ) -> Result<Vec<u8>, ManifestError> {
-    let mut file = File::open(path)?;
+    let (mut file, _) = open_regular_file_no_follow(path).map_err(|err| match err {
+        OpenRegularFileError::Access { source, .. } => ManifestError::Io(source),
+        OpenRegularFileError::Type(rejection) => ManifestError::invalid(format!(
+            "{} is not an acceptable regular manifest file: {rejection}",
+            path.display()
+        )),
+    })?;
     let max_len = usize::try_from(max_bytes).map_err(|_| {
         ManifestError::limit_exceeded(
             code,
@@ -3137,6 +3465,132 @@ fn require_manifest_coverage(kind: CoreIndexKind) -> Result<(), UnsupportedCoreM
     }
 }
 
+/// Stable identity of one artifact covered by a verified load plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VerifiedArtifactIdentity {
+    pub name: String,
+    pub kind: VerifiedArtifactKind,
+    pub expected_size_bytes: u64,
+    pub expected_sha256: String,
+}
+
+/// Role and, for a primary artifact, persisted index kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerifiedArtifactKind {
+    Primary(ManifestIndexKind),
+    Auxiliary,
+}
+
+/// An observed departure from the bytes recorded in a verified load plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerifiedArtifactChange {
+    InitialSize { expected: u64, observed: u64 },
+    FinalSize { expected: u64, observed: u64 },
+    Digest { expected: String, observed: String },
+}
+
+/// Failure while consuming an artifact recorded in a verified load plan.
+///
+/// Stale-content errors take precedence over decoder and incomplete-consumption
+/// errors after all declared bytes have been drained. Filesystem access and type
+/// failures take precedence over content classification.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum VerifiedArtifactUseError<E> {
+    KindMismatch {
+        identity: VerifiedArtifactIdentity,
+        expected: ManifestIndexKind,
+        observed: ManifestIndexKind,
+    },
+    OptionalAbsent {
+        name: String,
+    },
+    Access {
+        identity: VerifiedArtifactIdentity,
+        stage: VerifiedArtifactAccessStage,
+        source: io::Error,
+    },
+    TypeRejected {
+        identity: VerifiedArtifactIdentity,
+        rejection: VerifiedArtifactTypeRejection,
+    },
+    Stale {
+        identity: VerifiedArtifactIdentity,
+        changes: Vec<VerifiedArtifactChange>,
+    },
+    Decoder {
+        identity: VerifiedArtifactIdentity,
+        source: E,
+    },
+    IncompleteConsumption {
+        identity: VerifiedArtifactIdentity,
+        consumed: u64,
+        expected: u64,
+    },
+}
+
+impl<E: fmt::Display> fmt::Display for VerifiedArtifactUseError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::KindMismatch {
+                identity,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "artifact {:?} has kind {observed:?}, expected {expected:?}",
+                identity.name
+            ),
+            Self::OptionalAbsent { name } => {
+                write!(f, "optional auxiliary artifact {name:?} is absent")
+            }
+            Self::Access {
+                identity,
+                stage,
+                source,
+            } => write!(
+                f,
+                "cannot use artifact {:?} during {stage}: {source}",
+                identity.name
+            ),
+            Self::TypeRejected {
+                identity,
+                rejection,
+            } => write!(f, "artifact {:?} was rejected: {rejection}", identity.name),
+            Self::Stale { identity, changes } => write!(
+                f,
+                "artifact {:?} is stale relative to the verified plan ({changes:?})",
+                identity.name
+            ),
+            Self::Decoder { identity, source } => {
+                write!(f, "artifact {:?} failed to decode: {source}", identity.name)
+            }
+            Self::IncompleteConsumption {
+                identity,
+                consumed,
+                expected,
+            } => write!(
+                f,
+                "artifact {:?} decoder consumed {consumed} of {expected} encoded bytes",
+                identity.name
+            ),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for VerifiedArtifactUseError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Access { source, .. } => Some(source),
+            Self::Decoder { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 /// Verified paths and metadata for a caller-managed load.
 ///
 /// A `VerifiedLoadPlan` means the manifest, primary artifact, row-identity
@@ -3150,6 +3604,7 @@ fn require_manifest_coverage(kind: CoreIndexKind) -> Result<(), UnsupportedCoreM
 pub struct VerifiedLoadPlan {
     manifest_path: Option<PathBuf>,
     artifact_path: PathBuf,
+    primary_identity: VerifiedArtifactIdentity,
     metadata: MetadataReport,
     row_identity: VerifiedRowIdentityPlan,
     auxiliary_artifacts: Vec<VerifiedAuxiliaryArtifactPlan>,
@@ -3180,6 +3635,22 @@ impl VerifiedLoadPlan {
                 message: "verified report is missing probed artifact metadata".to_string(),
             }
         })?;
+        let primary_identity = VerifiedArtifactIdentity {
+            name: "primary".to_string(),
+            kind: VerifiedArtifactKind::Primary(metadata.kind),
+            expected_size_bytes: report.artifact.size_bytes.ok_or_else(|| {
+                VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: "verified report is missing primary artifact size".to_string(),
+                }
+            })?,
+            expected_sha256: report.artifact.sha256.clone().ok_or_else(|| {
+                VerifiedLoadPlanError::IncompletePlan {
+                    report: Box::new(report.clone()),
+                    message: "verified report is missing primary artifact digest".to_string(),
+                }
+            })?,
+        };
         let row_identity =
             VerifiedRowIdentityPlan::from_report(paths.row_identity_path.as_ref(), &report)?;
         let auxiliary_artifacts = report
@@ -3201,6 +3672,7 @@ impl VerifiedLoadPlan {
         Ok(Self {
             manifest_path: document.source_path.clone(),
             artifact_path,
+            primary_identity,
             metadata,
             row_identity,
             auxiliary_artifacts,
@@ -3219,6 +3691,31 @@ impl VerifiedLoadPlan {
     /// must re-verify immediately before loading.
     pub fn artifact_path(&self) -> &Path {
         &self.artifact_path
+    }
+
+    pub fn primary_identity(&self) -> &VerifiedArtifactIdentity {
+        &self.primary_identity
+    }
+
+    /// Decode the primary artifact from one no-follow descriptor while checking
+    /// its plan-recorded kind, size, and digest.
+    ///
+    /// The `u64` passed to `decoder` is the exact encoded byte count remaining
+    /// at the reader's current position. The reader is forward-only and never
+    /// accesses bytes beyond that boundary.
+    pub fn decode_primary_with<T, E>(
+        &self,
+        expected_kind: ManifestIndexKind,
+        decoder: impl FnOnce(&mut dyn Read, u64) -> Result<T, E>,
+    ) -> Result<T, VerifiedArtifactUseError<E>> {
+        if self.metadata.kind != expected_kind {
+            return Err(VerifiedArtifactUseError::KindMismatch {
+                identity: self.primary_identity.clone(),
+                expected: expected_kind,
+                observed: self.metadata.kind,
+            });
+        }
+        decode_plan_verified(&self.artifact_path, self.primary_identity.clone(), decoder)
     }
 
     pub fn metadata(&self) -> &MetadataReport {
@@ -3415,6 +3912,33 @@ impl VerifiedAuxiliaryArtifactPlan {
                 });
             }
         };
+        let (sha256, size_bytes) =
+            match entry.state {
+                AuxiliaryArtifactState::Verified => (
+                    Some(entry.sha256.clone().ok_or_else(|| {
+                        VerifiedLoadPlanError::IncompletePlan {
+                            report: Box::new(report.clone()),
+                            message: format!(
+                                "verified auxiliary artifact {:?} is missing its digest",
+                                entry.name
+                            ),
+                        }
+                    })?),
+                    Some(entry.size_bytes.ok_or_else(|| {
+                        VerifiedLoadPlanError::IncompletePlan {
+                            report: Box::new(report.clone()),
+                            message: format!(
+                                "verified auxiliary artifact {:?} is missing its size",
+                                entry.name
+                            ),
+                        }
+                    })?),
+                ),
+                AuxiliaryArtifactState::OptionalAbsent => (None, None),
+                AuxiliaryArtifactState::MissingRequired | AuxiliaryArtifactState::Failed => {
+                    unreachable!("non-loadable auxiliary states returned above")
+                }
+            };
 
         Ok(Self {
             name: entry.name.clone(),
@@ -3422,8 +3946,8 @@ impl VerifiedAuxiliaryArtifactPlan {
             required: entry.required,
             state: entry.state,
             reason_code: entry.reason_code.clone(),
-            sha256: entry.sha256.clone(),
-            size_bytes: entry.size_bytes,
+            sha256,
+            size_bytes,
         })
     }
 
@@ -3453,6 +3977,40 @@ impl VerifiedAuxiliaryArtifactPlan {
 
     pub fn size_bytes(&self) -> Option<u64> {
         self.size_bytes
+    }
+
+    pub fn identity(&self) -> Option<VerifiedArtifactIdentity> {
+        Some(VerifiedArtifactIdentity {
+            name: self.name.clone(),
+            kind: VerifiedArtifactKind::Auxiliary,
+            expected_size_bytes: self.size_bytes?,
+            expected_sha256: self.sha256.clone()?,
+        })
+    }
+
+    /// Decode this auxiliary artifact from one no-follow descriptor while
+    /// checking its plan-recorded size and digest.
+    ///
+    /// Optional-absent artifacts return [`VerifiedArtifactUseError::OptionalAbsent`]
+    /// before any path is opened. The `u64` passed to `decoder` is the exact
+    /// encoded byte count remaining at the reader's current position.
+    pub fn decode_verified_with<T, E>(
+        &self,
+        decoder: impl FnOnce(&mut dyn Read, u64) -> Result<T, E>,
+    ) -> Result<T, VerifiedArtifactUseError<E>> {
+        if self.state == AuxiliaryArtifactState::OptionalAbsent {
+            return Err(VerifiedArtifactUseError::OptionalAbsent {
+                name: self.name.clone(),
+            });
+        }
+        let identity = self
+            .identity()
+            .expect("verified auxiliary plans always carry a size and digest");
+        let path = self
+            .path
+            .as_deref()
+            .expect("verified auxiliary plans always carry a captured path");
+        decode_plan_verified(path, identity, decoder)
     }
 }
 
@@ -3494,6 +4052,181 @@ impl std::error::Error for VerifiedLoadPlanError {
 impl From<ManifestError> for VerifiedLoadPlanError {
     fn from(value: ManifestError) -> Self {
         Self::Manifest(value)
+    }
+}
+
+const VERIFIED_DECODE_DRAIN_BYTES: usize = 64 * 1024;
+
+struct DigestingBoundedReader<'a, R: Read + ?Sized> {
+    reader: &'a mut R,
+    remaining: u64,
+    consumed: u64,
+    hasher: Sha256,
+    read_error: Option<io::Error>,
+}
+
+impl<'a, R: Read + ?Sized> DigestingBoundedReader<'a, R> {
+    fn new(reader: &'a mut R, encoded_len: u64) -> Self {
+        Self {
+            reader,
+            remaining: encoded_len,
+            consumed: 0,
+            hasher: Sha256::new(),
+            read_error: None,
+        }
+    }
+
+    fn finish(self) -> (String, Option<io::Error>) {
+        (hex::encode(self.hasher.finalize()), self.read_error)
+    }
+}
+
+impl<R: Read + ?Sized> Read for DigestingBoundedReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let limit = usize::try_from(self.remaining.min(buf.len() as u64))
+            .expect("bounded read length never exceeds the caller buffer");
+        loop {
+            match self.reader.read(&mut buf[..limit]) {
+                Ok(read) => {
+                    self.hasher.update(&buf[..read]);
+                    self.remaining -= read as u64;
+                    self.consumed += read as u64;
+                    return Ok(read);
+                }
+                Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+                Err(source) => {
+                    if self.read_error.is_none() {
+                        self.read_error = Some(clone_io_error(&source));
+                    }
+                    return Err(source);
+                }
+            }
+        }
+    }
+}
+
+fn clone_io_error(source: &io::Error) -> io::Error {
+    match source.raw_os_error() {
+        Some(code) => io::Error::from_raw_os_error(code),
+        None => io::Error::new(source.kind(), source.to_string()),
+    }
+}
+
+fn decode_plan_verified<T, E>(
+    path: &Path,
+    identity: VerifiedArtifactIdentity,
+    decoder: impl FnOnce(&mut dyn Read, u64) -> Result<T, E>,
+) -> Result<T, VerifiedArtifactUseError<E>> {
+    let (mut file, initial_metadata) = match open_regular_file_no_follow(path) {
+        Ok(opened) => opened,
+        Err(OpenRegularFileError::Access { stage, source }) => {
+            return Err(VerifiedArtifactUseError::Access {
+                identity,
+                stage,
+                source,
+            });
+        }
+        Err(OpenRegularFileError::Type(rejection)) => {
+            return Err(VerifiedArtifactUseError::TypeRejected {
+                identity,
+                rejection,
+            });
+        }
+    };
+
+    let expected_size = identity.expected_size_bytes;
+    let initial_size = initial_metadata.len();
+    if initial_size != expected_size {
+        return Err(VerifiedArtifactUseError::Stale {
+            identity,
+            changes: vec![VerifiedArtifactChange::InitialSize {
+                expected: expected_size,
+                observed: initial_size,
+            }],
+        });
+    }
+
+    let mut reader = DigestingBoundedReader::new(&mut file, expected_size);
+    let decoded = decoder(&mut reader, expected_size);
+    let decoder_consumed = reader.consumed;
+
+    if reader.remaining != 0 {
+        // Keep the fixed verification scratch off small caller stacks, and
+        // preserve the public recoverable-error contract if it cannot be
+        // allocated. Fully consuming decoders do not need this allocation.
+        let mut scratch = Vec::new();
+        if scratch
+            .try_reserve_exact(VERIFIED_DECODE_DRAIN_BYTES)
+            .is_err()
+        {
+            return Err(VerifiedArtifactUseError::Access {
+                identity,
+                stage: VerifiedArtifactAccessStage::Read,
+                source: io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "verification read scratch allocation failed",
+                ),
+            });
+        }
+        scratch.resize(VERIFIED_DECODE_DRAIN_BYTES, 0);
+        while reader.remaining != 0 {
+            match reader.read(&mut scratch) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(source) if source.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    let (observed_digest, read_error) = reader.finish();
+
+    if let Some(source) = read_error {
+        return Err(VerifiedArtifactUseError::Access {
+            identity,
+            stage: VerifiedArtifactAccessStage::Read,
+            source,
+        });
+    }
+
+    let final_size = file
+        .metadata()
+        .map_err(|source| VerifiedArtifactUseError::Access {
+            identity: identity.clone(),
+            stage: VerifiedArtifactAccessStage::FinalMetadata,
+            source,
+        })?
+        .len();
+
+    let mut changes = Vec::new();
+    if final_size != expected_size {
+        changes.push(VerifiedArtifactChange::FinalSize {
+            expected: expected_size,
+            observed: final_size,
+        });
+    }
+    if observed_digest != identity.expected_sha256 {
+        changes.push(VerifiedArtifactChange::Digest {
+            expected: identity.expected_sha256.clone(),
+            observed: observed_digest,
+        });
+    }
+    if !changes.is_empty() {
+        return Err(VerifiedArtifactUseError::Stale { identity, changes });
+    }
+
+    match decoded {
+        Err(source) => Err(VerifiedArtifactUseError::Decoder { identity, source }),
+        Ok(_) if decoder_consumed != expected_size => {
+            Err(VerifiedArtifactUseError::IncompleteConsumption {
+                identity,
+                consumed: decoder_consumed,
+                expected: expected_size,
+            })
+        }
+        Ok(value) => Ok(value),
     }
 }
 
@@ -4455,10 +5188,12 @@ fn create_auxiliary_artifacts(
 /// schema-version event, not a cosmetic change.
 ///
 /// Nested [`serde_json::Value`] maps carried in `extensions` / `attestations`
-/// are recursively key-sorted and their numbers are normalized before
-/// serialization. The stored bytes therefore do not depend on downstream
-/// feature unification of `serde_json/preserve_order` or
-/// `serde_json/arbitrary_precision`.
+/// are recursively key-sorted and their supplied numeric values are normalized
+/// before serialization. File-loading policy must validate original number
+/// tokens through [`parse_current_manifest_bytes`] (or
+/// [`validate_manifest_json_number_tokens`] for a compatibility schema) before
+/// deserialization. A writer cannot recover a source lexeme that some earlier,
+/// caller-owned parser already rounded into a `Value`.
 ///
 /// The destination is replaced atomically from a temporary file in the same
 /// directory after the bytes and portable permission bits are synced. New
@@ -5273,6 +6008,61 @@ fn hex_digest_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_nofollow_symlink_errnos_have_typed_classification() {
+        assert!(is_final_symlink_open_error(&io::Error::from_raw_os_error(
+            libc::ELOOP,
+        )));
+        assert!(!is_final_symlink_open_error(&io::Error::from_raw_os_error(
+            libc::EACCES
+        ),));
+
+        #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+        assert!(is_final_symlink_open_error(&io::Error::from_raw_os_error(
+            libc::EMLINK,
+        )));
+        #[cfg(target_os = "netbsd")]
+        assert!(is_final_symlink_open_error(&io::Error::from_raw_os_error(
+            libc::EFTYPE,
+        )));
+    }
+
+    #[test]
+    fn digesting_bounded_reader_retries_interrupted_reads() {
+        struct InterruptOnce<R> {
+            inner: R,
+            interrupted: bool,
+        }
+
+        impl<R: Read> Read for InterruptOnce<R> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.inner.read(buffer)
+            }
+        }
+
+        let bytes = b"plan-verified bytes survive an interrupted read";
+        let mut source = InterruptOnce {
+            inner: io::Cursor::new(bytes),
+            interrupted: false,
+        };
+        let mut reader = DigestingBoundedReader::new(&mut source, bytes.len() as u64);
+        let mut delivered = Vec::new();
+        reader.read_to_end(&mut delivered).unwrap();
+        assert_eq!(reader.remaining, 0);
+        assert_eq!(reader.consumed, bytes.len() as u64);
+        let (digest, read_error) = reader.finish();
+
+        assert!(source.interrupted);
+        assert_eq!(delivered, bytes);
+        assert!(read_error.is_none());
+        assert_eq!(digest, hex::encode(Sha256::digest(bytes)));
+    }
 
     #[test]
     fn canonical_manifest_path_form_is_policy_aware() {

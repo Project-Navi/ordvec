@@ -157,13 +157,14 @@ fn try_alloc_zeroed(n: usize) -> io::Result<Vec<u8>> {
 
 /// Read `n` little-endian `W`-byte elements directly into a fallibly
 /// pre-reserved Vec, so an oversized/under-memory load returns an
-/// io::Error instead of aborting (and avoids the 2x byte-buffer + typed-Vec peak).
+/// io::Error instead of aborting (and avoids the 2x artifact-buffer + typed-Vec peak).
 ///
 /// Building the typed `Vec` via `bytes.chunks_exact(W).map(..).collect()`
 /// uses an infallible allocation — an OOM there is a `SIGABRT`, not a
 /// recoverable error — and holds both the byte buffer and the typed `Vec`
-/// live at once (2x peak). Reserving fallibly and reading element-by-element
-/// removes both problems. The size guards ([`check_payload_bytes`],
+/// live at once (2x peak). Reserving fallibly and decoding through one fixed
+/// 64 KiB stack chunk removes both problems without degrading an unbuffered
+/// forward-only reader into one kernel read per element. The size guards ([`check_payload_bytes`],
 /// [`check_payload_matches_file`]) run *before* this call; `read_le_vec`
 /// reserves the same element count those guards validated.
 fn read_le_vec<R: Read, T, const W: usize>(
@@ -171,13 +172,35 @@ fn read_le_vec<R: Read, T, const W: usize>(
     n: usize,
     parse: impl Fn([u8; W]) -> T,
 ) -> io::Result<Vec<T>> {
+    const READ_CHUNK_BYTES: usize = 64 * 1024;
+    if W == 0 || W > READ_CHUNK_BYTES {
+        return Err(invalid("unsupported persisted element width"));
+    }
     let mut v: Vec<T> = Vec::new();
     v.try_reserve_exact(n)
         .map_err(|_| invalid("payload allocation too large"))?;
-    let mut buf = [0u8; W];
-    for _ in 0..n {
-        r.read_exact(&mut buf)?;
-        v.push(parse(buf));
+    let elements_per_chunk = READ_CHUNK_BYTES / W;
+    // Keep the batching buffer off the caller's stack. Loaders are valid on
+    // deliberately small-stack worker threads, and allocation failure must
+    // remain a recoverable I/O error rather than a stack-overflow abort.
+    let mut scratch = Vec::new();
+    scratch
+        .try_reserve_exact(READ_CHUNK_BYTES)
+        .map_err(|_| invalid("read scratch allocation too large"))?;
+    scratch.resize(READ_CHUNK_BYTES, 0);
+    let mut remaining = n;
+    while remaining != 0 {
+        let count = remaining.min(elements_per_chunk);
+        let byte_count = count
+            .checked_mul(W)
+            .ok_or_else(|| invalid("persisted read chunk size overflow"))?;
+        r.read_exact(&mut scratch[..byte_count])?;
+        for bytes in scratch[..byte_count].chunks_exact(W) {
+            let mut element = [0u8; W];
+            element.copy_from_slice(bytes);
+            v.push(parse(element));
+        }
+        remaining -= count;
     }
     Ok(v)
 }
@@ -228,6 +251,43 @@ fn stream_len_from_current<R: Seek>(reader: &mut R) -> io::Result<u64> {
     reader.seek(SeekFrom::Start(start))?;
     Ok(end)
 }
+
+fn stream_remaining_len<R: Seek>(reader: &mut R) -> io::Result<u64> {
+    let start = reader.stream_position()?;
+    let end = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(start))?;
+    end.checked_sub(start)
+        .ok_or_else(|| invalid("stream end precedes current position"))
+}
+
+fn check_payload_matches_sized_input(
+    label: &str,
+    encoded_len: u64,
+    header_bytes: u64,
+    payload_bytes: usize,
+) -> io::Result<()> {
+    let payload_bytes = u64::try_from(payload_bytes)
+        .map_err(|_| invalid(format!("{label} payload size does not fit u64")))?;
+    let expected = header_bytes
+        .checked_add(payload_bytes)
+        .ok_or_else(|| invalid(format!("{label} encoded size overflows u64")))?;
+    if expected > encoded_len {
+        return Err(invalid(format!(
+            "{label} payload truncated: header declares {payload_bytes} B but input has {} B remaining after the header",
+            encoded_len.saturating_sub(header_bytes)
+        )));
+    }
+    if expected < encoded_len {
+        return Err(invalid(format!(
+            "{label} payload has trailing bytes: header declares {payload_bytes} B but input has {} B remaining after the header",
+            encoded_len.saturating_sub(header_bytes)
+        )));
+    }
+    Ok(())
+}
+
+const RANK_QUANT_HEADER_BYTES: u64 = 4 + 1 + 1 + 4 + 4;
+const SIGN_BITMAP_HEADER_BYTES: u64 = 4 + 1 + 4 + 4;
 
 fn check_dim(dim: usize) -> io::Result<()> {
     if !(2..=MAX_DIM).contains(&dim) {
@@ -699,22 +759,31 @@ pub(crate) fn load_rankquant(path: impl AsRef<Path>) -> io::Result<(u8, usize, u
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    load_rankquant_from_stream(&mut f, file_len)
+    load_rankquant_from_sized(&mut f, file_len)
 }
 
 pub(crate) fn load_rankquant_from<R: Read + Seek>(
     reader: R,
 ) -> io::Result<(u8, usize, usize, Vec<u8>)> {
     let mut reader = reader;
-    let file_len = stream_len_from_current(&mut reader)?;
-    load_rankquant_from_stream(&mut reader, file_len)
+    let encoded_len = stream_remaining_len(&mut reader)?;
+    load_rankquant_from_sized(&mut reader, encoded_len)
 }
 
-fn load_rankquant_from_stream<R: Read + Seek>(
-    mut f: &mut R,
-    file_len: u64,
+pub(crate) fn load_rankquant_from_sized<R: Read>(
+    f: R,
+    encoded_len: u64,
 ) -> io::Result<(u8, usize, usize, Vec<u8>)> {
-    let magic = read_magic(f, "OVRQ")?;
+    if encoded_len < RANK_QUANT_HEADER_BYTES {
+        return Err(invalid(format!(
+            "OVRQ header truncated: input declares {encoded_len} B, header requires {RANK_QUANT_HEADER_BYTES} B"
+        )));
+    }
+    // Cap the reader from the first byte, not only for the payload. A caller
+    // may be decoding one record from a concatenated stream, so even a forged
+    // undersized length must never consume bytes belonging to the next record.
+    let mut f = f.take(encoded_len);
+    let magic = read_magic(&mut f, "OVRQ")?;
     if &magic != OVRQ_MAGIC && &magic != TVRQ_MAGIC {
         return Err(invalid("not an OVRQ/TVRQ (RankQuant) file: wrong magic"));
     }
@@ -751,7 +820,7 @@ fn load_rankquant_from_stream<R: Read + Seek>(
     check_n_vectors(n_vectors)?;
     let payload_bytes = rankquant_payload_bytes(dim, n_vectors, bits)?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(&mut f, "OVRQ", file_len, payload_bytes)?;
+    check_payload_matches_sized_input("OVRQ", encoded_len, RANK_QUANT_HEADER_BYTES, payload_bytes)?;
     let mut packed = try_alloc_zeroed(payload_bytes)?;
     f.read_exact(&mut packed)?;
     // Constant-composition invariant: every document must place exactly
@@ -1028,22 +1097,30 @@ pub(crate) fn load_sign_bitmap(path: impl AsRef<Path>) -> io::Result<(usize, usi
     // the trailing-byte check. Both are wrong on a metadata race (NFS/procfs).
     let file_len = file.metadata()?.len();
     let mut f = BufReader::new(file);
-    load_sign_bitmap_from_stream(&mut f, file_len)
+    load_sign_bitmap_from_sized(&mut f, file_len)
 }
 
 pub(crate) fn load_sign_bitmap_from<R: Read + Seek>(
     reader: R,
 ) -> io::Result<(usize, usize, Vec<u64>)> {
     let mut reader = reader;
-    let file_len = stream_len_from_current(&mut reader)?;
-    load_sign_bitmap_from_stream(&mut reader, file_len)
+    let encoded_len = stream_remaining_len(&mut reader)?;
+    load_sign_bitmap_from_sized(&mut reader, encoded_len)
 }
 
-fn load_sign_bitmap_from_stream<R: Read + Seek>(
-    mut f: &mut R,
-    file_len: u64,
+pub(crate) fn load_sign_bitmap_from_sized<R: Read>(
+    f: R,
+    encoded_len: u64,
 ) -> io::Result<(usize, usize, Vec<u64>)> {
-    let magic = read_magic(f, "OVSB")?;
+    if encoded_len < SIGN_BITMAP_HEADER_BYTES {
+        return Err(invalid(format!(
+            "OVSB header truncated: input declares {encoded_len} B, header requires {SIGN_BITMAP_HEADER_BYTES} B"
+        )));
+    }
+    // See the RankQuant counterpart: the declared boundary covers the fixed
+    // header as well as the payload.
+    let mut f = f.take(encoded_len);
+    let magic = read_magic(&mut f, "OVSB")?;
     if &magic != OVSB_MAGIC && &magic != TVSB_MAGIC {
         return Err(invalid("not an OVSB/TVSB (SignBitmap) file: wrong magic"));
     }
@@ -1054,7 +1131,12 @@ fn load_sign_bitmap_from_stream<R: Read + Seek>(
     check_n_vectors(n_vectors)?;
     let payload_bytes = bitmap_payload_bytes(dim, n_vectors, "OVSB")?;
     check_payload_bytes(payload_bytes)?;
-    check_payload_matches_file(&mut f, "OVSB", file_len, payload_bytes)?;
+    check_payload_matches_sized_input(
+        "OVSB",
+        encoded_len,
+        SIGN_BITMAP_HEADER_BYTES,
+        payload_bytes,
+    )?;
     // `payload_bytes == n_vectors * qpv * 8`, so the u64 element count is
     // `payload_bytes / 8`. Read directly into a fallibly reserved Vec<u64>
     // rather than allocating a byte buffer and `.collect()`-ing it.
@@ -1871,6 +1953,18 @@ mod tests {
         for p in [pr, prq, pbm, psb, keep] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn fallible_payload_reservations_report_capacity_overflow_without_oom() {
+        let byte_err = super::try_alloc_zeroed(usize::MAX).unwrap_err();
+        assert_eq!(byte_err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(byte_err.to_string().contains("allocation too large"));
+
+        let typed_err =
+            super::read_le_vec(&mut std::io::empty(), usize::MAX, u64::from_le_bytes).unwrap_err();
+        assert_eq!(typed_err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(typed_err.to_string().contains("allocation too large"));
     }
 
     // OVFS (FastScan) write path: valid round-trip, and fail-loud (io::Error, not

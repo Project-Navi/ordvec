@@ -9,7 +9,9 @@
 //! Each case pairs a positive control (a freshly-written valid index still
 //! round-trips) with a corrupted-but-well-shaped negative case.
 
-use std::io::{Cursor, Write};
+use std::cell::Cell;
+use std::io::{self, Cursor, Read, Write};
+use std::rc::Rc;
 
 use ordvec::{Bitmap, Rank, RankQuant, SignBitmap};
 
@@ -56,6 +58,61 @@ fn prefixed_cursor(bytes: &[u8]) -> Cursor<Vec<u8>> {
 fn append_trailer(mut bytes: Vec<u8>) -> Cursor<Vec<u8>> {
     bytes.extend_from_slice(b"next-record");
     Cursor::new(bytes)
+}
+
+struct FragmentedInterruptingSpy {
+    bytes: Vec<u8>,
+    record_len: usize,
+    position: usize,
+    interrupt_next: bool,
+    overread_attempts: Rc<Cell<usize>>,
+}
+
+impl FragmentedInterruptingSpy {
+    fn new(bytes: Vec<u8>, record_len: usize, overread_attempts: Rc<Cell<usize>>) -> Self {
+        Self {
+            bytes,
+            record_len,
+            position: 0,
+            interrupt_next: true,
+            overread_attempts,
+        }
+    }
+}
+
+impl Read for FragmentedInterruptingSpy {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.interrupt_next {
+            self.interrupt_next = false;
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "spy interrupt"));
+        }
+        self.interrupt_next = true;
+        if self.position == self.bytes.len() || buf.is_empty() {
+            return Ok(0);
+        }
+        let read = buf.len().min(3).min(self.bytes.len() - self.position);
+        if self.position.saturating_add(read) > self.record_len {
+            self.overread_attempts
+                .set(self.overread_attempts.get().saturating_add(1));
+        }
+        buf[..read].copy_from_slice(&self.bytes[self.position..self.position + read]);
+        self.position += read;
+        Ok(read)
+    }
+}
+
+struct CountingReader {
+    inner: Cursor<Vec<u8>>,
+    calls: Rc<Cell<usize>>,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !buf.is_empty() {
+            self.calls.set(self.calls.get().saturating_add(1));
+        }
+        self.inner.read(buf)
+    }
 }
 
 #[test]
@@ -165,6 +222,140 @@ fn public_stream_persistence_roundtrips_core_formats() {
             idx.top_m_candidates(query, 32)
         );
     }
+}
+
+#[test]
+fn sized_forward_only_readers_handle_fragmentation_interrupts_and_never_overread() {
+    let corpus = make_corpus(90_051);
+
+    let mut rank_quant = RankQuant::new(D, 2);
+    rank_quant.add(&corpus);
+    let mut rank_quant_bytes = Vec::new();
+    rank_quant.write_to(&mut rank_quant_bytes).unwrap();
+    let rank_quant_len = rank_quant_bytes.len();
+    rank_quant_bytes.extend_from_slice(b"unrelated-next-record");
+    let rank_quant_overreads = Rc::new(Cell::new(0));
+    let decoded = RankQuant::read_from_sized(
+        FragmentedInterruptingSpy::new(
+            rank_quant_bytes,
+            rank_quant_len,
+            Rc::clone(&rank_quant_overreads),
+        ),
+        rank_quant_len as u64,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), rank_quant.len());
+    assert_eq!(rank_quant_overreads.get(), 0);
+
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    let mut sign_bytes = Vec::new();
+    sign.write_to(&mut sign_bytes).unwrap();
+    let sign_len = sign_bytes.len();
+    sign_bytes.extend_from_slice(b"unrelated-next-record");
+    let sign_overreads = Rc::new(Cell::new(0));
+    let decoded = SignBitmap::read_from_sized(
+        FragmentedInterruptingSpy::new(sign_bytes, sign_len, Rc::clone(&sign_overreads)),
+        sign_len as u64,
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), sign.len());
+    assert_eq!(sign_overreads.get(), 0);
+}
+
+#[test]
+fn sized_forward_only_readers_reject_inexact_lengths_before_payload_allocation() {
+    let corpus = make_corpus(90_052);
+
+    let mut rank_quant = RankQuant::new(D, 2);
+    rank_quant.add(&corpus);
+    let mut bytes = Vec::new();
+    rank_quant.write_to(&mut bytes).unwrap();
+    assert_load_err_contains(
+        RankQuant::read_from_sized(Cursor::new(&bytes), bytes.len() as u64 - 1),
+        "payload truncated",
+    );
+    assert_load_err_contains(
+        RankQuant::read_from_sized(Cursor::new(&bytes), u64::MAX),
+        "payload has trailing bytes",
+    );
+
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    let mut bytes = Vec::new();
+    sign.write_to(&mut bytes).unwrap();
+    assert_load_err_contains(
+        SignBitmap::read_from_sized(Cursor::new(&bytes), bytes.len() as u64 - 1),
+        "payload truncated",
+    );
+    assert_load_err_contains(
+        SignBitmap::read_from_sized(Cursor::new(&bytes), u64::MAX),
+        "payload has trailing bytes",
+    );
+}
+
+#[test]
+fn sized_forward_only_readers_never_cross_an_undersized_header_boundary() {
+    let corpus = make_corpus(90_053);
+
+    let mut rank_quant = RankQuant::new(D, 2);
+    rank_quant.add(&corpus);
+    let mut rank_quant_bytes = Vec::new();
+    rank_quant.write_to(&mut rank_quant_bytes).unwrap();
+    let rank_quant_declared = 13;
+    let rank_quant_overreads = Rc::new(Cell::new(0));
+    assert_load_err_contains(
+        RankQuant::read_from_sized(
+            FragmentedInterruptingSpy::new(
+                rank_quant_bytes,
+                rank_quant_declared,
+                Rc::clone(&rank_quant_overreads),
+            ),
+            rank_quant_declared as u64,
+        ),
+        "header truncated",
+    );
+    assert_eq!(rank_quant_overreads.get(), 0);
+
+    let mut sign = SignBitmap::new(D);
+    sign.add(&corpus);
+    let mut sign_bytes = Vec::new();
+    sign.write_to(&mut sign_bytes).unwrap();
+    let sign_declared = 12;
+    let sign_overreads = Rc::new(Cell::new(0));
+    assert_load_err_contains(
+        SignBitmap::read_from_sized(
+            FragmentedInterruptingSpy::new(sign_bytes, sign_declared, Rc::clone(&sign_overreads)),
+            sign_declared as u64,
+        ),
+        "header truncated",
+    );
+    assert_eq!(sign_overreads.get(), 0);
+}
+
+#[test]
+fn sized_sign_reader_batches_typed_payload_reads() {
+    let corpus = make_corpus(90_054);
+    let mut sign = SignBitmap::new(D);
+    for _ in 0..32 {
+        sign.add(&corpus);
+    }
+    let mut bytes = Vec::new();
+    sign.write_to(&mut bytes).unwrap();
+    assert!(bytes.len() > 64 * 1024);
+
+    let calls = Rc::new(Cell::new(0));
+    let reader = CountingReader {
+        inner: Cursor::new(bytes.clone()),
+        calls: Rc::clone(&calls),
+    };
+    let decoded = SignBitmap::read_from_sized(reader, bytes.len() as u64).unwrap();
+    assert_eq!(decoded.len(), sign.len());
+    assert!(
+        calls.get() < 32,
+        "fixed-chunk decoding regressed to {} underlying reads",
+        calls.get()
+    );
 }
 
 #[test]

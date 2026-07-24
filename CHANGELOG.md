@@ -13,6 +13,27 @@ _No unreleased changes._
 
 ### Added
 
+- **Forward-only, exactly-sized decoders.** `RankQuant::read_from_sized` and
+  `SignBitmap::read_from_sized` accept a `Read` plus the exact encoded bytes
+  remaining at its current position. Existing seek-capable readers delegate to
+  them; truncation and trailing data remain fail-closed without a seek or read
+  beyond the declared record.
+- **Plan-verified artifact decoding.** `ordvec-manifest` now exposes
+  `VerifiedLoadPlan::decode_primary_with` and
+  `VerifiedAuxiliaryArtifactPlan::decode_verified_with`. They open one
+  no-follow regular-file descriptor, cap and hash the decoder's reads, drain
+  unread bytes through a 64 KiB buffer, compare initial/final descriptor size,
+  and return typed access, type, stale, decoder, or incomplete-consumption
+  errors with documented precedence. Optional-absent auxiliaries are typed.
+- **Composable current-schema loading.** Public
+  `read_manifest_bytes_bounded` and `parse_current_manifest_bytes` let policy
+  layers dispatch over one bounded read while retaining strict v2 parsing.
+  Manifest reads now reject a final symlink/reparse point or nonregular file.
+- **Stable JSON-number feature profile.** The production manifest dependency
+  now enables `serde_json/float_roundtrip` rather than
+  `serde_json/arbitrary_precision`. Current-schema parsing, plus a public
+  validator for compatibility schemas, rejects lossy number tokens from the
+  original bounded bytes before nested `Value` fields can alias.
 - **`ordvec-manifest`: typed verification classification.** Every
   verification issue code is now a named `pub const` in a `codes` module
   (zero bare literals at emit sites), with a `#[non_exhaustive]`
@@ -146,12 +167,13 @@ _No unreleased changes._
 
 ### Fixed
 
-- **`ordvec-manifest`: canonical content addresses are independent of
-  `serde_json` feature unification.** Nested extension and attestation maps are
-  recursively key-sorted and JSON numbers are normalized before serialization,
-  so downstream `preserve_order` / `arbitrary_precision` features cannot change
-  the same logical manifest's bytes. Manifest creation now rejects non-UTF-8
-  artifact paths instead of embedding the lossy replacement character.
+- **`ordvec-manifest`: canonical content addresses normalize nested JSON.**
+  Nested extension and attestation maps are recursively key-sorted and supplied
+  JSON numeric values are normalized before serialization. Release consumers
+  enforce one reviewed serde_json feature profile; current parsing rejects
+  lossy original number tokens before they become `Value`s. Manifest creation
+  now rejects non-UTF-8 artifact paths instead of embedding the lossy
+  replacement character.
 - **`ordvec-manifest`: manifest writes are atomic and fail before replacement.**
   `write_manifest_file` writes and syncs a same-directory temporary file before
   atomically replacing the destination, and rejects non-finite distortion
@@ -164,6 +186,10 @@ _No unreleased changes._
 
 ### Security
 
+- Plan-verified decoding closes the verify/path-reopen gap for the bytes it
+  consumes on controlled local storage. It does not authenticate a producer,
+  confine hostile ancestor replacement, detect a mutation perfectly restored
+  between observations, or make a later file-backed mapping immutable.
 - The release CI gate now waits, with a 30-minute fail-closed deadline, for
   the latest exact-HEAD push runs instead of treating normal Actions
   visibility/in-progress delay as an immediate failure. It rejects terminal

@@ -622,6 +622,17 @@ impl SignBitmap {
         Self::from_persisted_parts(dim, n_vectors, bitmaps)
     }
 
+    /// Load one exactly-sized `.ovsb`/legacy `.tvsb` record from a forward-only reader.
+    ///
+    /// `encoded_len` is the exact number of encoded bytes remaining at the
+    /// reader's current position. The decoder never seeks and rejects both
+    /// truncation and bytes beyond the declared record.
+    pub fn read_from_sized<R: std::io::Read>(reader: R, encoded_len: u64) -> std::io::Result<Self> {
+        let (dim, n_vectors, bitmaps) =
+            crate::rank_io::load_sign_bitmap_from_sized(reader, encoded_len)?;
+        Self::from_persisted_parts(dim, n_vectors, bitmaps)
+    }
+
     /// Load a `.ovsb`/legacy `.tvsb` index from an in-memory byte slice.
     pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
         Self::read_from(std::io::Cursor::new(bytes))

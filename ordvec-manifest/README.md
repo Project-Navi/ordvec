@@ -94,20 +94,28 @@ The helper verifies the manifest with the supplied options, fails closed by
 returning `VerifiedLoadPlanError::VerificationFailed(report)` when report
 errors exist, and otherwise returns the canonical primary artifact path, probed
 metadata, row-identity summary, declared auxiliary artifact states, and the full
-report. Callers that already hold a `ManifestDocument` can use
+report. `decode_primary_with` and an auxiliary plan's `decode_verified_with`
+then consume one no-follow regular-file descriptor through a forward-only,
+size-capped hashing reader. Callers that already hold a `ManifestDocument` can use
 `verify_document_for_load(&document, VerifyOptions)` without re-reading the
-manifest file. These helpers do not call `Rank::load`, `RankQuant::load`,
-`Bitmap::load`, or `SignBitmap::load`, and they do not pin file descriptors or
-lock mutable storage. Callers should load from the returned paths immediately on
-storage they control, or re-verify if the backing files can change between
-verification and load.
+manifest file. The verification helpers do not choose a core index decoder.
+The plan-verified decode methods call the decoder supplied by the application,
+then return its value only after the descriptor's size and delivered-byte
+digest still match the plan. They trust caller-selected ancestor directories
+and do not lock mutable storage or authenticate the manifest producer.
 
 Controlled-storage load pattern:
 
 ```rust
 let plan = ordvec_manifest::verify_for_load(&manifest_path, options)?;
-let _app_ids = plan.require_auxiliary("app.ids")?;
-let index = ordvec::RankQuant::load(plan.artifact_path())?;
+let index = plan.decode_primary_with(
+    ordvec_manifest::ManifestIndexKind::RankQuant,
+    |reader, encoded_len| ordvec::RankQuant::read_from_sized(reader, encoded_len),
+)?;
+let app_ids = plan
+    .auxiliary_by_name("app.ids")
+    .ok_or("app.ids is not declared")?
+    .decode_verified_with(parse_caller_owned_ids_streaming)?;
 ```
 
 Concrete sidecar-backed bundle pattern:
@@ -167,10 +175,14 @@ let plan = ordvec_manifest::verify_for_load(
 let metadata = plan.metadata();
 assert_eq!(metadata.vector_count, expected_rows);
 
-let index = ordvec::RankQuant::load(plan.artifact_path())?;
-let ids_path = plan.require_auxiliary("app.ids")?;
-let ids_bytes = std::fs::read(ids_path)?;
-let doc_ids = parse_caller_owned_ids(&ids_bytes)?;
+let index = plan.decode_primary_with(
+    ordvec_manifest::ManifestIndexKind::RankQuant,
+    |reader, encoded_len| ordvec::RankQuant::read_from_sized(reader, encoded_len),
+)?;
+let doc_ids = plan
+    .auxiliary_by_name("app.ids")
+    .ok_or("app.ids is not declared")?
+    .decode_verified_with(parse_caller_owned_ids_streaming)?;
 ```
 
 `ordvec-manifest` owns the path, size, SHA-256, and index-metadata checks.
@@ -189,8 +201,12 @@ queue_for_later(plan);
 
 If a manifest or artifact lives on shared, writable, or otherwise mutable
 storage, re-run `verify_for_load` immediately before loading, load from
-immutable storage, or use a caller-owned loading path that pins bytes.
-`VerifiedLoadPlan` is not a byte pin.
+immutable storage, or use the plan-verified decode methods. Those methods
+detect mutations reflected in delivered bytes or descriptor sizes observed
+during the call. They cannot detect a transient mutation perfectly restored
+between those observations, and they do not make a long-lived file-backed mmap
+immutable after open. `VerifiedLoadPlan` itself remains a snapshot, not a byte
+pin.
 
 Verification uses bounded parser/report defaults on both CLI and library paths.
 Stable limit codes are part of the contract:
