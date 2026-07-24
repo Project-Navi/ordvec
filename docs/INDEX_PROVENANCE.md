@@ -65,19 +65,20 @@ required artifacts and `--optional-aux NAME=PATH` for optional artifacts.
 Rust callers can use `verify_for_load(manifest_path, VerifyOptions)` to get a
 `VerifiedLoadPlan` containing the canonical artifact path, probed metadata,
 row-identity summary, auxiliary artifact states, and the full verification
-report, then call `require_auxiliary(name)` for sidecars that must be present
-before loading. Callers that already hold a `ManifestDocument` can use
+report, then call `decode_primary_with` and an auxiliary plan's
+`decode_verified_with` to decode through one no-follow, bounded, hashing file
+descriptor. Callers that already hold a `ManifestDocument` can use
 `verify_document_for_load(&document, VerifyOptions)` without re-reading the
-manifest file. The plan helpers do not call an ordvec loader, pin file
-descriptors, or make mutable shared storage immutable; callers still own the
-final policy decision and should load from the returned paths only while the
-verified files remain under their control.
+manifest file. The caller supplies the concrete decoder. The plan methods
+establish that the bytes delivered during that call match the verified plan,
+but do not make mutable shared storage or a later file-backed mmap immutable;
+callers still own the final policy decision.
 `ordvec-manifest/README.md` shows the intended verify-then-immediate-load
 pattern, a concrete `manifest.json + index.ovrq + ids.bin` sidecar-backed
 bundle, and the stable report fields/codes for sidecar audit logs. If another
 process can mutate the manifest, index, row map, or sidecar between
-verification and load, re-run `verify_for_load` at the load boundary or load
-from immutable storage or a caller-owned loading path that pins bytes.
+verification and use, decode through the plan at the load boundary or load
+from immutable storage.
 
 The manifest verifier checks:
 

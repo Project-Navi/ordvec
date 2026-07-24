@@ -414,8 +414,14 @@ CAN still cause I/O and CPU proportional to the byte size it declares and
 actually supplies on disk. The flat `ResourceLimits` byte caps are opt-in
 ceilings (unbounded by default) for deployments that must bound worst-case
 verification time on attacker-supplied bundles. A `VerifiedLoadPlan` remains
-a verification snapshot, not a byte pin: bytes can change between
-verification and use by a local actor with write access (see scope).
+a verification snapshot, not a byte pin. Its plan-verified decode methods open
+the final component without following it, require a regular file (and, on
+Windows, a disk handle), and
+return decoded data only after delivered bytes and initial/final descriptor
+size match the plan. This closes the path-reopen race within the documented
+trusted-parent-directory boundary. It does not confine hostile ancestor
+replacement, authenticate the producer, detect a transient mutation perfectly
+restored between observations, or make a long-lived file-backed mmap immutable.
 
 **THREAT-QUERY-002 (P3): Panic on contract violation in Rust server contexts.**
 Rust APIs fail fast on invalid contract input (non-finite floats, dimension /

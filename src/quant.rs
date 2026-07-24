@@ -943,6 +943,17 @@ impl RankQuant {
         Self::from_persisted_parts(bits, dim, n_vectors, packed)
     }
 
+    /// Load one exactly-sized `.ovrq`/legacy `.tvrq` record from a forward-only reader.
+    ///
+    /// `encoded_len` is the exact number of encoded bytes remaining at the
+    /// reader's current position. The decoder never seeks and rejects both
+    /// truncation and bytes beyond the declared record.
+    pub fn read_from_sized<R: std::io::Read>(reader: R, encoded_len: u64) -> std::io::Result<Self> {
+        let (bits, dim, n_vectors, packed) =
+            crate::rank_io::load_rankquant_from_sized(reader, encoded_len)?;
+        Self::from_persisted_parts(bits, dim, n_vectors, packed)
+    }
+
     /// Load a `.ovrq`/legacy `.tvrq` index from an in-memory byte slice.
     pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
         Self::read_from(std::io::Cursor::new(bytes))

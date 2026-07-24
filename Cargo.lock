@@ -863,13 +863,16 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "libc",
  "ordvec",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

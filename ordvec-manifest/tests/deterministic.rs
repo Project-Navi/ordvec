@@ -1,11 +1,11 @@
 use ordvec::RankQuant;
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
-    sha256_file, verify_manifest_with_base, write_manifest_file, CreateAuxiliaryArtifact,
-    CreateManifestOptions, CreateRowIdentity, DistortionBounds, DistortionEvidence,
-    DistortionEvidenceKind, DistortionScope, EncoderDistortionProfileRef, EncoderSpec,
-    IndexManifest, ManifestError, MetricSpec, VerifyOptions, ENCODER_DISTORTION_SCHEMA_VERSION,
-    SCHEMA_VERSION,
+    parse_current_manifest_bytes, sha256_file, verify_manifest_with_base, write_manifest_file,
+    CreateAuxiliaryArtifact, CreateManifestOptions, CreateRowIdentity, DistortionBounds,
+    DistortionEvidence, DistortionEvidenceKind, DistortionScope, EncoderDistortionProfileRef,
+    EncoderSpec, IndexManifest, ManifestError, MetricSpec, VerifyOptions,
+    ENCODER_DISTORTION_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -58,6 +58,16 @@ fn manifest_bytes_with_extension_number(
     dir: &Path,
     number: &str,
 ) -> Result<Vec<u8>, ManifestError> {
+    let (manifest_path, raw) = raw_manifest_bytes_with_extension_number(dir, number)?;
+    let manifest = parse_current_manifest_bytes(&raw)?;
+    write_manifest_file(&manifest, &manifest_path)?;
+    fs::read(manifest_path).map_err(ManifestError::Io)
+}
+
+fn raw_manifest_bytes_with_extension_number(
+    dir: &Path,
+    number: &str,
+) -> Result<(PathBuf, Vec<u8>), ManifestError> {
     let index = write_index(dir);
     let manifest_path = dir.join("manifest.json");
     let mut manifest = create_manifest_for_index(
@@ -66,12 +76,22 @@ fn manifest_bytes_with_extension_number(
         "test-embedding",
         &manifest_path,
     )?;
+    const MARKER: &str = "__ordvec_raw_number_marker__";
     manifest.extensions.insert(
         "canonical_number".to_string(),
-        serde_json::from_str(number).map_err(ManifestError::Json)?,
+        Value::String(MARKER.to_string()),
     );
-    write_manifest_file(&manifest, &manifest_path)?;
-    fs::read(manifest_path).map_err(ManifestError::Io)
+    let encoded = serde_json::to_vec(&manifest).map_err(ManifestError::Json)?;
+    let quoted_marker = format!("\"{MARKER}\"");
+    let marker_offset = encoded
+        .windows(quoted_marker.len())
+        .position(|window| window == quoted_marker.as_bytes())
+        .expect("unique raw-number marker is present in the serialized fixture");
+    let mut raw = Vec::with_capacity(encoded.len() - quoted_marker.len() + number.len());
+    raw.extend_from_slice(&encoded[..marker_offset]);
+    raw.extend_from_slice(number.as_bytes());
+    raw.extend_from_slice(&encoded[marker_offset + quoted_marker.len()..]);
+    Ok((manifest_path, raw))
 }
 
 fn distortion_profile_with_zero(
@@ -269,33 +289,6 @@ fn equivalent_json_number_spellings_have_one_canonical_manifest_representation()
             "9007199254740992",
         ),
         (
-            "two to 53 plus one",
-            &[
-                "9007199254740993",
-                "9007199254740993.0",
-                "9007199254740993e0",
-            ],
-            "9007199254740993",
-        ),
-        (
-            "i64 min",
-            &[
-                "-9223372036854775808",
-                "-9223372036854775808.0",
-                "-9.223372036854775808e18",
-            ],
-            "-9223372036854775808",
-        ),
-        (
-            "u64 max",
-            &[
-                "18446744073709551615",
-                "18446744073709551615.0",
-                "1.8446744073709551615e19",
-            ],
-            "18446744073709551615",
-        ),
-        (
             "out of integer range canonical f64",
             &["100000000000000000000", "100000000000000000000.0", "1e20"],
             "1e+20",
@@ -384,9 +377,9 @@ fn typed_signed_zero_fields_have_one_canonical_manifest_representation() {
 #[test]
 fn adjacent_large_json_integers_keep_distinct_manifest_addresses() {
     for spellings in [
-        ["9007199254740991.0", "9007199254740992.0"],
-        ["9007199254740992.0", "9007199254740993.0"],
-        ["18446744073709551614.0", "18446744073709551615.0"],
+        ["9007199254740991", "9007199254740992"],
+        ["9007199254740992", "9007199254740993"],
+        ["18446744073709551614", "18446744073709551615"],
     ] {
         let temp_a = tempfile::tempdir().unwrap();
         let temp_b = tempfile::tempdir().unwrap();
@@ -398,8 +391,6 @@ fn adjacent_large_json_integers_keep_distinct_manifest_addresses() {
 
 #[test]
 fn arbitrary_precision_numbers_that_would_alias_are_rejected() {
-    let temp = tempfile::tempdir().unwrap();
-    let index = write_index(temp.path());
     for (case, number, expected_error) in [
         (
             "two_to_64_integer",
@@ -429,21 +420,76 @@ fn arbitrary_precision_numbers_that_would_alias_are_rejected() {
         ("f64_overflow", "1e400", "cannot be represented canonically"),
         ("f64_underflow", "1e-400", "outside the exact canonical"),
     ] {
-        let manifest_path = temp.path().join(format!("{case}.json"));
-        let mut manifest = create_manifest_for_index(
-            &index,
-            CreateRowIdentity::RowIdIdentity,
-            "test-embedding",
-            &manifest_path,
-        )
-        .unwrap();
-        manifest
-            .extensions
-            .insert("precise".to_string(), serde_json::from_str(number).unwrap());
-        let err = write_manifest_file(&manifest, &manifest_path).unwrap_err();
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("manifest.json");
+        let err = manifest_bytes_with_extension_number(temp.path(), number).unwrap_err();
         assert!(err.to_string().contains(expected_error), "{number}: {err}");
-        assert!(!manifest_path.exists());
+        assert!(!manifest_path.exists(), "{case}");
     }
+}
+
+#[test]
+fn lossy_number_tokens_fail_before_current_file_or_attestation_parsing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (manifest_path, raw) =
+        raw_manifest_bytes_with_extension_number(temp.path(), "9007199254740993.0").unwrap();
+    let parse_error = parse_current_manifest_bytes(&raw).unwrap_err();
+    assert!(parse_error
+        .to_string()
+        .contains("outside the exact canonical"));
+
+    fs::write(&manifest_path, &raw).unwrap();
+    let load_error = load_manifest_file(&manifest_path).unwrap_err();
+    assert!(load_error
+        .to_string()
+        .contains("outside the exact canonical"));
+
+    let index = write_index(temp.path());
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    const MARKER: &str = "__ordvec_attestation_number_marker__";
+    manifest
+        .attestations
+        .push(json!({"predicate": {"measurement": MARKER}}));
+    let encoded = serde_json::to_vec(&manifest).unwrap();
+    let quoted_marker = format!("\"{MARKER}\"");
+    let marker_offset = encoded
+        .windows(quoted_marker.len())
+        .position(|window| window == quoted_marker.as_bytes())
+        .unwrap();
+    let mut attestation_raw = Vec::new();
+    attestation_raw.extend_from_slice(&encoded[..marker_offset]);
+    attestation_raw.extend_from_slice(b"0.100000000000000005");
+    attestation_raw.extend_from_slice(&encoded[marker_offset + quoted_marker.len()..]);
+    assert!(parse_current_manifest_bytes(&attestation_raw).is_err());
+}
+
+#[test]
+fn lossless_number_scan_ignores_numeric_text_and_escapes_inside_strings() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    manifest.extensions.insert(
+        "number_text".to_string(),
+        Value::String(
+            "9007199254740993.0 and \\\"18446744073709551617\\\" after \\\\ escape".to_string(),
+        ),
+    );
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let parsed = parse_current_manifest_bytes(&bytes).unwrap();
+    assert_eq!(parsed.extensions, manifest.extensions);
 }
 
 #[test]
