@@ -1,0 +1,25 @@
+{
+  "mode": "free",
+  "project": "ordvec",
+  "executionSurface": "github_pr",
+  "language": "rust",
+  "policy": {
+    "failClosed": false,
+    "commentOnPr": false,
+    "generateReceipts": true,
+    "detect": [
+      "github_actions_change",
+      "release_pipeline_change",
+      "dependency_change",
+      "unsafe_rust_change",
+      "ffi_boundary_change",
+      "serialized_index_parser_change",
+      "fuzz_surface_change",
+      "security_policy_change"
+    ]
+  },
+  "receipts": {
+    "localOnly": true,
+    "path": ".cortextrace/reports"
+  }
+}
