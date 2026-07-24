@@ -180,7 +180,14 @@ fn read_le_vec<R: Read, T, const W: usize>(
     v.try_reserve_exact(n)
         .map_err(|_| invalid("payload allocation too large"))?;
     let elements_per_chunk = READ_CHUNK_BYTES / W;
-    let mut scratch = [0u8; READ_CHUNK_BYTES];
+    // Keep the batching buffer off the caller's stack. Loaders are valid on
+    // deliberately small-stack worker threads, and allocation failure must
+    // remain a recoverable I/O error rather than a stack-overflow abort.
+    let mut scratch = Vec::new();
+    scratch
+        .try_reserve_exact(READ_CHUNK_BYTES)
+        .map_err(|_| invalid("read scratch allocation too large"))?;
+    scratch.resize(READ_CHUNK_BYTES, 0);
     let mut remaining = n;
     while remaining != 0 {
         let count = remaining.min(elements_per_chunk);
