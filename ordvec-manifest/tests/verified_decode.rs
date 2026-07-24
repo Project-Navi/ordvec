@@ -89,7 +89,10 @@ fn primary_and_auxiliary_decode_from_plan_verified_forward_only_readers() {
     );
 
     let auxiliary = fixture.plan.require_auxiliary("ids").unwrap();
-    assert_eq!(auxiliary, fixture.auxiliary_path);
+    assert_eq!(
+        auxiliary,
+        fs::canonicalize(&fixture.auxiliary_path).unwrap()
+    );
     let decoded = fixture
         .plan
         .auxiliary_by_name("ids")
