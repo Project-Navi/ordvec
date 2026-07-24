@@ -161,6 +161,7 @@ jobs:
     needs: guard
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     permissions:
       contents: read
       actions: read
@@ -174,26 +175,105 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          POLL_INTERVAL_SECONDS: 30
+          POLL_TIMEOUT_SECONDS: 1800
         run: |
           set -euo pipefail
-          MAIN_SHA="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"
-          echo "current main sha: ${MAIN_SHA}"
-          if [ "$SHA" != "$MAIN_SHA" ]; then
-            echo "::error::release tag points at ${SHA}, but current main is ${MAIN_SHA}. Move the tag to the current protected main HEAD and re-run."
-            exit 1
-          fi
-          # Require a SUCCESSFUL push run for this SHA *on main* for each workflow.
-          # Filtering on branch as well as head_sha stops a green run for the same
-          # commit on an unrelated branch from satisfying the gate.
-          for wf in ci.yml python.yml fuzz.yml codeql.yml actionlint.yml zizmor.yml; do
-            ok="$(gh api \
-              "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&event=push&status=success&per_page=20" \
-              --jq '[.workflow_runs[] | select(.head_branch == "main" and .event == "push" and .conclusion == "success")] | length')"
-            echo "successful push ${wf} runs for ${SHA} on main: ${ok}"
-            if [ "${ok}" -lt 1 ]; then
-              echo "::error::no successful push ${wf} run for ${SHA} on main. Push to main, let CI pass, then re-tag."
+          deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
+          while :; do
+            MAIN_SHA="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"
+            echo "current main sha: ${MAIN_SHA}"
+            if [ "$SHA" != "$MAIN_SHA" ]; then
+              echo "::error::release tag points at ${SHA}, but current main is ${MAIN_SHA}. Move the tag to the current protected main HEAD and re-run."
               exit 1
             fi
+
+            all_green=true
+            for wf in ci.yml python.yml fuzz.yml codeql.yml actionlint.yml zizmor.yml; do
+              # Query every status, then inspect the latest exact-SHA push run.
+              # A success-only filter cannot distinguish normal run-visibility
+              # delay from terminal failure and was the source of issue #272.
+              api_error="$(mktemp)"
+              if runs_json="$(gh api \
+                "repos/${REPO}/actions/workflows/${wf}/runs?head_sha=${SHA}&branch=main&event=push&per_page=100" \
+                2>"$api_error")"; then
+                :
+              else
+                api_exit_status=$?
+                api_message="$(<"$api_error")"
+                api_status="$(sed -nE 's/.*HTTP ([0-9]{3}).*/\1/p' "$api_error" | tail -n 1)"
+                retryable_api_error=false
+                case "$api_status" in
+                  408|429|5??)
+                    retryable_api_error=true
+                    ;;
+                  "")
+                    if [ "$api_exit_status" -ne 4 ] && grep -Eiq \
+                      'timeout|timed out|connection (reset|refused|closed)|could not resolve|temporary failure in name resolution|network is unreachable|TLS handshake|unexpected EOF|error connecting to' \
+                      "$api_error"; then
+                      retryable_api_error=true
+                    fi
+                    ;;
+                  403)
+                    if grep -Eiq 'rate.?limit|secondary rate|abuse detection' "$api_error"; then
+                      retryable_api_error=true
+                    fi
+                    ;;
+                esac
+                rm -f "$api_error"
+                if "$retryable_api_error"; then
+                  echo "waiting for ${wf}: transient API query failure${api_status:+ (HTTP ${api_status})}: ${api_message}"
+                  all_green=false
+                  continue
+                fi
+                echo "::error::${wf}: API query failed permanently${api_status:+ (HTTP ${api_status})}: ${api_message}"
+                exit 1
+              fi
+              rm -f "$api_error"
+
+              latest="$(jq -r --arg sha "$SHA" '
+                [.workflow_runs[]
+                  | select(.head_sha == $sha and .head_branch == "main" and .event == "push")]
+                | sort_by([.run_number, .run_attempt, .id])
+                | last
+                | if . == null then ""
+                  else [.status, (.conclusion // ""), (.html_url // "")] | join("|")
+                  end
+              ' <<<"$runs_json")"
+              if [ -z "$latest" ]; then
+                echo "waiting for ${wf}: no exact-SHA main push run is visible yet"
+                all_green=false
+                continue
+              fi
+
+              IFS='|' read -r status conclusion run_url <<<"$latest"
+              if [ "$status" != "completed" ]; then
+                echo "waiting for ${wf}: latest run is ${status} (${run_url})"
+                all_green=false
+              elif [ "$conclusion" = "success" ]; then
+                echo "green ${wf}: ${run_url}"
+              else
+                echo "::error::${wf} completed with ${conclusion:-no conclusion} for ${SHA}: ${run_url}"
+                exit 1
+              fi
+            done
+
+            if "$all_green"; then
+              FINAL_MAIN_SHA="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"
+              echo "final current main sha: ${FINAL_MAIN_SHA}"
+              if [ "$SHA" != "$FINAL_MAIN_SHA" ]; then
+                echo "::error::main advanced from release tag ${SHA} to ${FINAL_MAIN_SHA} while CI was being checked. Tag only the new protected main HEAD after its own CI is green."
+                exit 1
+              fi
+              echo "all release-gated workflows are green for ${SHA} on main"
+              break
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "::error::timed out after ${POLL_TIMEOUT_SECONDS}s waiting for exact-SHA main push CI. No artifacts or draft release were created."
+              exit 1
+            fi
+            echo "CI is not settled; polling again in ${POLL_INTERVAL_SECONDS}s"
+            sleep "$POLL_INTERVAL_SECONDS"
           done
 
   release-avx512:
@@ -264,7 +344,7 @@ jobs:
 
   notes:
     name: release notes (git-cliff) + draft Release
-    needs: guard
+    needs: [guard, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -302,7 +382,7 @@ jobs:
 
   build-crate:
     name: build .crate + SBOM
-    needs: guard
+    needs: [guard, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -393,7 +473,7 @@ jobs:
 
   build-wheels:
     name: wheel ${{ matrix.platform.target }} (${{ matrix.platform.runner }})
-    needs: guard
+    needs: [guard, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -536,7 +616,7 @@ jobs:
 
   build-sdist:
     name: build sdist + SBOM
-    needs: guard
+    needs: [guard, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -609,7 +689,7 @@ jobs:
 
   build-manifest-wheels:
     name: manifest wheel ${{ matrix.platform.target }} (${{ matrix.platform.runner }})
-    needs: guard
+    needs: [guard, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -674,7 +754,7 @@ jobs:
 
   build-manifest-sdist:
     name: build manifest sdist + SBOM
-    needs: guard
+    needs: [guard, require-ci-green]
     if: needs.guard.outputs.ok == 'true'
     runs-on: ubuntu-latest
     steps:

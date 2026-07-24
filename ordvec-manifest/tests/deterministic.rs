@@ -2,9 +2,12 @@ use ordvec::RankQuant;
 use ordvec_manifest::{
     create_manifest_for_index, create_manifest_for_index_with_options, load_manifest_file,
     sha256_file, verify_manifest_with_base, write_manifest_file, CreateAuxiliaryArtifact,
-    CreateManifestOptions, CreateRowIdentity, VerifyOptions, SCHEMA_VERSION,
+    CreateManifestOptions, CreateRowIdentity, DistortionBounds, DistortionEvidence,
+    DistortionEvidenceKind, DistortionScope, EncoderDistortionProfileRef, EncoderSpec,
+    IndexManifest, ManifestError, MetricSpec, VerifyOptions, ENCODER_DISTORTION_SCHEMA_VERSION,
+    SCHEMA_VERSION,
 };
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +52,80 @@ fn build_manifest_bytes(dir: &Path, aux_names: &[&str]) -> Vec<u8> {
     .unwrap();
     write_manifest_file(&manifest, &manifest_path).unwrap();
     fs::read(&manifest_path).unwrap()
+}
+
+fn manifest_bytes_with_extension_number(
+    dir: &Path,
+    number: &str,
+) -> Result<Vec<u8>, ManifestError> {
+    let index = write_index(dir);
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )?;
+    manifest.extensions.insert(
+        "canonical_number".to_string(),
+        serde_json::from_str(number).map_err(ManifestError::Json)?,
+    );
+    write_manifest_file(&manifest, &manifest_path)?;
+    fs::read(manifest_path).map_err(ManifestError::Io)
+}
+
+fn distortion_profile_with_zero(
+    manifest: &IndexManifest,
+    zero: f64,
+) -> EncoderDistortionProfileRef {
+    EncoderDistortionProfileRef {
+        schema_version: ENCODER_DISTORTION_SCHEMA_VERSION.to_string(),
+        profile_id: "urn:uuid:a8c39375-ae65-4924-92f5-8088adfab9b5".to_string(),
+        created_at: None,
+        encoder: EncoderSpec {
+            model: manifest.embedding.model.clone(),
+            dim: manifest.embedding.dim,
+            model_revision: manifest.embedding.model_revision.clone(),
+            normalization: manifest.embedding.normalization.clone(),
+        },
+        tokenizer_revision: manifest.embedding.tokenizer_revision.clone(),
+        pooling: manifest.embedding.pooling.clone(),
+        source_metric: MetricSpec {
+            name: "qrel_distance".to_string(),
+            version: Some("v1".to_string()),
+            digest: None,
+        },
+        embedding_metric: MetricSpec {
+            name: "cosine".to_string(),
+            version: None,
+            digest: None,
+        },
+        bounds: DistortionBounds {
+            declared_lower_bound: Some(0.5),
+            declared_upper_bound: Some(2.0),
+            estimated_distortion: Some(4.0),
+            violation_rate: Some(zero),
+            max_observed_violation: Some(zero),
+            quantile_observed_violation: Some(zero),
+        },
+        scope: DistortionScope {
+            corpus_digest: None,
+            query_set_digest: None,
+            pair_sample_digest: None,
+            domain: Some("test-corpus".to_string()),
+            sample_size: Some(1),
+            confidence: Some(zero),
+            coverage: Some(zero),
+            estimator_version: Some("test-estimator/1".to_string()),
+        },
+        evidence: DistortionEvidence {
+            kind: DistortionEvidenceKind::CallerAsserted,
+            estimator_id: None,
+            estimator_hash: None,
+        },
+        profile: None,
+        calibration_profile_id: None,
+    }
 }
 
 #[test]
@@ -130,6 +207,357 @@ fn auxiliary_declaration_order_does_not_change_manifest_bytes() {
     let bytes_a = build_manifest_bytes(temp_a.path(), &["aux-a.bin", "aux-b.bin"]);
     let bytes_b = build_manifest_bytes(temp_b.path(), &["aux-b.bin", "aux-a.bin"]);
     assert_eq!(bytes_a, bytes_b);
+}
+
+#[test]
+fn nested_json_order_and_number_spelling_do_not_change_manifest_bytes() {
+    let temp_a = tempfile::tempdir().unwrap();
+    let temp_b = tempfile::tempdir().unwrap();
+    let index_a = write_index(temp_a.path());
+    let index_b = write_index(temp_b.path());
+    let path_a = temp_a.path().join("manifest.json");
+    let path_b = temp_b.path().join("manifest.json");
+    let mut manifest_a = create_manifest_for_index(
+        &index_a,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_a,
+    )
+    .unwrap();
+    let mut manifest_b = create_manifest_for_index(
+        &index_b,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_b,
+    )
+    .unwrap();
+
+    let mut descending = Map::new();
+    descending.insert("z".to_string(), serde_json::from_str("1e0").unwrap());
+    descending.insert("a".to_string(), json!({"y": true, "b": false}));
+    let mut ascending = Map::new();
+    ascending.insert("a".to_string(), json!({"b": false, "y": true}));
+    ascending.insert("z".to_string(), serde_json::from_str("1.0").unwrap());
+    manifest_a
+        .extensions
+        .insert("nested".to_string(), Value::Object(descending));
+    manifest_b
+        .extensions
+        .insert("nested".to_string(), Value::Object(ascending));
+
+    write_manifest_file(&manifest_a, &path_a).unwrap();
+    write_manifest_file(&manifest_b, &path_b).unwrap();
+    assert_eq!(fs::read(path_a).unwrap(), fs::read(path_b).unwrap());
+}
+
+#[test]
+fn equivalent_json_number_spellings_have_one_canonical_manifest_representation() {
+    let cases: &[(&str, &[&str], &str)] = &[
+        ("zero", &["0", "-0", "0.0", "-0.0", "0e9"], "0"),
+        ("one", &["1", "1.0", "1e0", "10e-1"], "1"),
+        ("negative one", &["-1", "-1.0", "-1e0"], "-1"),
+        ("thousand", &["1000", "1000.0", "1e3"], "1000"),
+        ("fraction", &["0.5", "0.50", "5e-1"], "0.5"),
+        (
+            "two to 53 minus one",
+            &["9007199254740991", "9007199254740991.0"],
+            "9007199254740991",
+        ),
+        (
+            "two to 53",
+            &["9007199254740992", "9007199254740992.0"],
+            "9007199254740992",
+        ),
+        (
+            "two to 53 plus one",
+            &[
+                "9007199254740993",
+                "9007199254740993.0",
+                "9007199254740993e0",
+            ],
+            "9007199254740993",
+        ),
+        (
+            "i64 min",
+            &[
+                "-9223372036854775808",
+                "-9223372036854775808.0",
+                "-9.223372036854775808e18",
+            ],
+            "-9223372036854775808",
+        ),
+        (
+            "u64 max",
+            &[
+                "18446744073709551615",
+                "18446744073709551615.0",
+                "1.8446744073709551615e19",
+            ],
+            "18446744073709551615",
+        ),
+        (
+            "out of integer range canonical f64",
+            &["100000000000000000000", "100000000000000000000.0", "1e20"],
+            "1e+20",
+        ),
+    ];
+
+    for (case, spellings, expected_number) in cases {
+        let mut canonical_bytes: Option<Vec<u8>> = None;
+        for spelling in *spellings {
+            let temp = tempfile::tempdir().unwrap();
+            let bytes = manifest_bytes_with_extension_number(temp.path(), spelling).unwrap();
+            let stored: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                stored["extensions"]["canonical_number"].to_string(),
+                *expected_number,
+                "{case}: {spelling}"
+            );
+            if let Some(expected_bytes) = &canonical_bytes {
+                assert_eq!(expected_bytes, &bytes, "{case}: {spelling}");
+            } else {
+                canonical_bytes = Some(bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_signed_zero_fields_have_one_canonical_manifest_representation() {
+    let temp_a = tempfile::tempdir().unwrap();
+    let temp_b = tempfile::tempdir().unwrap();
+    let index_a = write_index(temp_a.path());
+    let index_b = write_index(temp_b.path());
+    let path_a = temp_a.path().join("manifest.json");
+    let path_b = temp_b.path().join("manifest.json");
+    let mut manifest_a = create_manifest_for_index(
+        &index_a,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_a,
+    )
+    .unwrap();
+    let mut manifest_b = create_manifest_for_index(
+        &index_b,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &path_b,
+    )
+    .unwrap();
+    manifest_a.encoder_distortion = Some(distortion_profile_with_zero(&manifest_a, -0.0));
+    manifest_b.encoder_distortion = Some(distortion_profile_with_zero(&manifest_b, 0.0));
+
+    write_manifest_file(&manifest_a, &path_a).unwrap();
+    write_manifest_file(&manifest_b, &path_b).unwrap();
+    let bytes_a = fs::read(path_a).unwrap();
+    let bytes_b = fs::read(path_b).unwrap();
+    assert_eq!(bytes_a, bytes_b);
+
+    let caller_profile = manifest_a.encoder_distortion.as_ref().unwrap();
+    for value in [
+        caller_profile.bounds.violation_rate.unwrap(),
+        caller_profile.bounds.max_observed_violation.unwrap(),
+        caller_profile.bounds.quantile_observed_violation.unwrap(),
+        caller_profile.scope.confidence.unwrap(),
+        caller_profile.scope.coverage.unwrap(),
+    ] {
+        assert!(
+            value.is_sign_negative(),
+            "writer mutated its caller-owned manifest"
+        );
+    }
+
+    let stored: Value = serde_json::from_slice(&bytes_a).unwrap();
+    for pointer in [
+        "/encoder_distortion/bounds/violation_rate",
+        "/encoder_distortion/bounds/max_observed_violation",
+        "/encoder_distortion/bounds/quantile_observed_violation",
+        "/encoder_distortion/scope/confidence",
+        "/encoder_distortion/scope/coverage",
+    ] {
+        let value = stored.pointer(pointer).unwrap().as_f64().unwrap();
+        assert_eq!(value, 0.0, "{pointer}");
+        assert!(value.is_sign_positive(), "{pointer}");
+    }
+}
+
+#[test]
+fn adjacent_large_json_integers_keep_distinct_manifest_addresses() {
+    for spellings in [
+        ["9007199254740991.0", "9007199254740992.0"],
+        ["9007199254740992.0", "9007199254740993.0"],
+        ["18446744073709551614.0", "18446744073709551615.0"],
+    ] {
+        let temp_a = tempfile::tempdir().unwrap();
+        let temp_b = tempfile::tempdir().unwrap();
+        let bytes_a = manifest_bytes_with_extension_number(temp_a.path(), spellings[0]).unwrap();
+        let bytes_b = manifest_bytes_with_extension_number(temp_b.path(), spellings[1]).unwrap();
+        assert_ne!(bytes_a, bytes_b, "{spellings:?}");
+    }
+}
+
+#[test]
+fn arbitrary_precision_numbers_that_would_alias_are_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    for (case, number, expected_error) in [
+        (
+            "two_to_64_integer",
+            "18446744073709551616",
+            "outside the exact canonical",
+        ),
+        (
+            "two_to_64_decimal",
+            "18446744073709551616.0",
+            "outside the exact canonical",
+        ),
+        (
+            "two_to_64_exponent",
+            "1.8446744073709551616e19",
+            "outside the exact canonical",
+        ),
+        (
+            "two_to_64_plus_one",
+            "18446744073709551617",
+            "outside the exact canonical",
+        ),
+        (
+            "lossy_decimal",
+            "0.100000000000000005",
+            "outside the exact canonical",
+        ),
+        ("f64_overflow", "1e400", "cannot be represented canonically"),
+        ("f64_underflow", "1e-400", "outside the exact canonical"),
+    ] {
+        let manifest_path = temp.path().join(format!("{case}.json"));
+        let mut manifest = create_manifest_for_index(
+            &index,
+            CreateRowIdentity::RowIdIdentity,
+            "test-embedding",
+            &manifest_path,
+        )
+        .unwrap();
+        manifest
+            .extensions
+            .insert("precise".to_string(), serde_json::from_str(number).unwrap());
+        let err = write_manifest_file(&manifest, &manifest_path).unwrap_err();
+        assert!(err.to_string().contains(expected_error), "{number}: {err}");
+        assert!(!manifest_path.exists());
+    }
+}
+
+#[test]
+fn manifest_write_atomically_replaces_the_destination_inode() {
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let old_inode_link = temp.path().join("old-manifest-inode");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    fs::write(&manifest_path, b"old manifest bytes").unwrap();
+    fs::hard_link(&manifest_path, &old_inode_link).unwrap();
+    write_manifest_file(&manifest, &manifest_path).unwrap();
+
+    assert_eq!(fs::read(old_inode_link).unwrap(), b"old manifest bytes");
+    assert_eq!(
+        load_manifest_file(manifest_path)
+            .unwrap()
+            .manifest
+            .schema_version,
+        SCHEMA_VERSION
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_write_matches_create_mode_and_preserves_existing_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let control_path = temp.path().join("create-mode-control");
+    fs::File::create(&control_path).unwrap();
+    let create_mode = fs::metadata(&control_path).unwrap().permissions().mode() & 0o777;
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+
+    write_manifest_file(&manifest, &manifest_path).unwrap();
+    assert_eq!(
+        fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777,
+        create_mode
+    );
+
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o640)).unwrap();
+    write_manifest_file(&manifest, &manifest_path).unwrap();
+    assert_eq!(
+        fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_write_opens_parent_before_replacing_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    fs::write(&manifest_path, b"original manifest").unwrap();
+
+    let original_permissions = fs::metadata(temp.path()).unwrap().permissions();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o300)).unwrap();
+    let result = write_manifest_file(&manifest, &manifest_path);
+    fs::set_permissions(temp.path(), original_permissions).unwrap();
+
+    match result.unwrap_err() {
+        ManifestError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        error => panic!("expected parent-directory permission error, got {error}"),
+    }
+    assert_eq!(fs::read(manifest_path).unwrap(), b"original manifest");
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_write_does_not_replace_a_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = create_manifest_for_index(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+    )
+    .unwrap();
+    symlink("missing-manifest-target", &manifest_path).unwrap();
+
+    assert!(write_manifest_file(&manifest, &manifest_path).is_err());
+    assert!(fs::symlink_metadata(manifest_path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -348,4 +776,35 @@ fn create_rejects_paths_it_cannot_embed_canonically() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("cannot be embedded"), "{err}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn create_rejects_non_utf8_paths_instead_of_embedding_them_lossily() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let index = write_index(temp.path());
+    let manifest_path = temp.path().join("manifest.json");
+    let non_utf8 = temp
+        .path()
+        .join(OsString::from_vec(b"aux-\xff.bin".to_vec()));
+    fs::write(&non_utf8, b"aux").unwrap();
+    let err = create_manifest_for_index_with_options(
+        &index,
+        CreateRowIdentity::RowIdIdentity,
+        "test-embedding",
+        &manifest_path,
+        CreateManifestOptions {
+            auxiliary_artifacts: vec![CreateAuxiliaryArtifact {
+                name: "aux".to_string(),
+                path: non_utf8,
+                required: true,
+            }],
+            ..CreateManifestOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not valid UTF-8"), "{err}");
 }

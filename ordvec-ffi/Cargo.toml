@@ -1,6 +1,6 @@
 [package]
 name = "ordvec-ffi"
-version = "0.7.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -11,4 +11,4 @@ name = "ordvec_ffi"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-ordvec = { path = ".." }
+ordvec = { version = "0.6.0", path = ".." }

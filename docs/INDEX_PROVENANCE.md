@@ -4,8 +4,8 @@
 `.ovrq` / `.ovbm` / `.ovsb` files and reloads them through `Rank::load`,
 `RankQuant::load`, `Bitmap::load`, and `SignBitmap::load`.
 `RankQuantFastscan` also writes and loads `.ovfs` through its direct API, but in
-v0.5.0 `.ovfs` is not covered by `probe_index_metadata()` or
-`ordvec-manifest` v1. This note states exactly **what the loaders guarantee and
+v0.6.0 `.ovfs` is not covered by `probe_index_metadata()` or
+`ordvec-manifest` v2. This note states exactly **what the loaders guarantee and
 what they do not**, so you can decide whether an index file needs out-of-band
 verification before you load it. For the byte layout and versioning of the
 persisted formats themselves, see [`PERSISTED_FORMAT.md`](PERSISTED_FORMAT.md).
@@ -105,12 +105,12 @@ The manifest verifier checks:
   least one subject SHA-256 matching the artifact when attestations are
   supplied.
 
-The v1 verifier intentionally does not create or verify `.ovfs` FastScan
+The v2 verifier intentionally does not create or verify `.ovfs` FastScan
 artifacts yet. If a `RankQuantFastscan` artifact crosses a trust boundary in
-v0.5.0, bind the bytes with a caller-owned checksum, artifact-store control, or
+v0.6.0, bind the bytes with a caller-owned checksum, artifact-store control, or
 attestation and load it directly only after that policy check succeeds. The
 direct `.ovfs` loader still rejects invalid nibbles, non-canonical block-tail
-padding, and rows that violate b=2 constant composition; manifest v1 simply
+padding, and rows that violate b=2 constant composition; manifest v2 simply
 does not bind or probe those bytes yet.
 
 Auxiliary artifacts are for application-owned sidecars such as metadata,

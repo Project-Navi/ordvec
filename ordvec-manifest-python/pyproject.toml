@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ordvec-manifest"
-version = "0.7.0"
+version = "0.6.0"
 description = "Python bindings for ordvec index manifest verification"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,6 +42,8 @@ classifiers = [
 Homepage = "https://github.com/Project-Navi/ordvec"
 Repository = "https://github.com/Project-Navi/ordvec"
 Issues = "https://github.com/Project-Navi/ordvec/issues"
+Documentation = "https://github.com/Project-Navi/ordvec/blob/v0.6.0/ordvec-manifest-python/README.md"
+Changelog = "https://github.com/Project-Navi/ordvec/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"

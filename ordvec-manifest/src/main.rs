@@ -14,66 +14,93 @@ const EXIT_USAGE_OR_CONFIG: i32 = 2;
 
 #[derive(Parser)]
 #[command(name = "ordvec-manifest")]
-#[command(about = "Verify ordvec index manifests", version)]
+#[command(about = "Create and verify ordvec index manifests", version)]
+#[command(after_help = "Run `ordvec-manifest <COMMAND> --help` for command options.")]
 struct Cli {
+    /// Manifest operation to run.
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Compute a file's SHA-256 digest and byte length.
     Hash {
+        /// File to hash.
         path: PathBuf,
+        /// Emit a machine-readable JSON object.
         #[arg(long)]
         json: bool,
     },
+    /// Print a manifest summary without verifying its artifacts.
     Inspect {
+        /// Manifest JSON to inspect.
         manifest: PathBuf,
         #[command(flatten)]
         limits: LimitArgs,
+        /// Emit the parsed manifest as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Verify a manifest and every declared artifact.
     Verify {
+        /// Manifest JSON to verify.
         #[arg(long)]
         manifest: PathBuf,
+        /// Override the primary index path declared by the manifest.
         #[arg(long)]
         index: Option<PathBuf>,
+        /// Permit absolute artifact paths (disabled by default).
         #[arg(long)]
         allow_absolute_paths: bool,
+        /// Permit relative paths that escape the manifest directory.
         #[arg(long)]
         allow_path_escape: bool,
+        /// Permit duplicate db_id values in a JSONL row map.
         #[arg(long)]
         allow_duplicate_db_ids: bool,
         #[command(flatten)]
         limits: LimitArgs,
+        /// Emit the verification report as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Create a deterministic manifest for an existing ordvec index.
     Create {
+        /// Existing ordvec index to bind.
         #[arg(long)]
         index: PathBuf,
+        /// JSONL row-identity map to bind.
         #[arg(long)]
         row_map: Option<PathBuf>,
+        /// Declare row IDs as the zero-based index row numbers.
         #[arg(long)]
         row_id_is_identity: bool,
+        /// Bind a required caller-owned sidecar as NAME=PATH (repeatable).
         #[arg(long = "aux", value_name = "NAME=PATH", value_parser = parse_auxiliary_artifact_arg)]
         auxiliary_artifacts: Vec<AuxiliaryArtifactArg>,
+        /// Bind an optional caller-owned sidecar as NAME=PATH (repeatable).
         #[arg(long = "optional-aux", value_name = "NAME=PATH", value_parser = parse_auxiliary_artifact_arg)]
         optional_auxiliary_artifacts: Vec<AuxiliaryArtifactArg>,
+        /// Identifier of the embedding model that produced the index.
         #[arg(long)]
         embedding_model: String,
+        /// Destination manifest JSON path.
         #[arg(long)]
         out: PathBuf,
+        /// Permit absolute artifact paths in the emitted manifest.
         #[arg(long)]
         allow_absolute_paths: bool,
+        /// Permit emitted relative paths to escape the manifest directory.
         #[arg(long)]
         allow_path_escape: bool,
         #[command(flatten)]
         limits: LimitArgs,
     },
     #[cfg(feature = "sqlite")]
+    /// Verify or activate manifests with a SQLite report cache.
     Sqlite {
+        /// SQLite-backed operation to run.
         #[command(subcommand)]
         command: SqliteCommands,
     },
@@ -104,7 +131,7 @@ fn parse_auxiliary_artifact_arg(value: &str) -> Result<AuxiliaryArtifactArg, Str
 #[cfg(test)]
 mod tests {
     use super::{parse_auxiliary_artifact_arg, Cli, Commands, LimitArgs};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
 
     #[test]
@@ -149,48 +176,100 @@ mod tests {
             _ => panic!("expected verify command"),
         }
     }
+
+    #[test]
+    fn help_describes_commands_and_safety_relevant_options() {
+        let mut root = Cli::command();
+        let root_help = root.render_long_help().to_string();
+        for expected in [
+            "Compute a file's SHA-256 digest",
+            "Print a manifest summary",
+            "Verify a manifest and every declared artifact",
+            "Create a deterministic manifest",
+        ] {
+            assert!(
+                root_help.contains(expected),
+                "missing help text: {expected}"
+            );
+        }
+
+        let mut verify = Cli::command()
+            .find_subcommand("verify")
+            .expect("verify subcommand")
+            .clone();
+        let verify_help = verify.render_long_help().to_string();
+        for expected in [
+            "Manifest JSON to verify",
+            "Permit absolute artifact paths",
+            "Permit relative paths that escape",
+            "Emit the verification report as JSON",
+        ] {
+            assert!(
+                verify_help.contains(expected),
+                "missing verify help text: {expected}"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
 #[derive(Subcommand)]
 enum SqliteCommands {
+    /// Verify a manifest, optionally reusing a valid cached report.
     Verify {
+        /// SQLite cache database path.
         #[arg(long)]
         db: PathBuf,
+        /// Manifest JSON to verify.
         #[arg(long)]
         manifest: PathBuf,
+        /// Reuse a matching cached report when available.
         #[arg(long)]
         use_cache: bool,
+        /// Override the primary index path declared by the manifest.
         #[arg(long)]
         index: Option<PathBuf>,
+        /// Permit absolute artifact paths (disabled by default).
         #[arg(long)]
         allow_absolute_paths: bool,
+        /// Permit relative paths that escape the manifest directory.
         #[arg(long)]
         allow_path_escape: bool,
+        /// Permit duplicate db_id values in a JSONL row map.
         #[arg(long)]
         allow_duplicate_db_ids: bool,
         #[command(flatten)]
         limits: LimitArgs,
+        /// Emit the verification report as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Verify and mark a manifest active in the SQLite cache.
     Activate {
+        /// SQLite cache database path.
         #[arg(long)]
         db: PathBuf,
+        /// Manifest JSON to verify and activate.
         #[arg(long)]
         manifest: PathBuf,
+        /// Activate even when verification reports errors.
         #[arg(long)]
         force: bool,
+        /// Override the primary index path declared by the manifest.
         #[arg(long)]
         index: Option<PathBuf>,
+        /// Permit absolute artifact paths (disabled by default).
         #[arg(long)]
         allow_absolute_paths: bool,
+        /// Permit relative paths that escape the manifest directory.
         #[arg(long)]
         allow_path_escape: bool,
+        /// Permit duplicate db_id values in a JSONL row map.
         #[arg(long)]
         allow_duplicate_db_ids: bool,
         #[command(flatten)]
         limits: LimitArgs,
+        /// Emit the verification report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -198,26 +277,37 @@ enum SqliteCommands {
 
 #[derive(Args, Clone, Debug, Default)]
 struct LimitArgs {
+    /// Maximum manifest JSON bytes to read.
     #[arg(long)]
     max_manifest_bytes: Option<u64>,
+    /// Maximum bytes in one JSONL row-map line.
     #[arg(long)]
     max_row_map_line_bytes: Option<usize>,
+    /// Maximum JSONL row-map rows to inspect.
     #[arg(long)]
     max_row_map_rows: Option<usize>,
+    /// Maximum bytes retained while checking duplicate db_id values.
     #[arg(long)]
     max_row_map_tracked_id_bytes: Option<usize>,
+    /// Maximum number of declared auxiliary artifacts.
     #[arg(long)]
     max_auxiliary_artifacts: Option<usize>,
+    /// Maximum bytes permitted for each auxiliary artifact.
     #[arg(long)]
     max_auxiliary_artifact_bytes: Option<u64>,
+    /// Maximum bytes permitted for the primary index artifact.
     #[arg(long)]
     max_index_artifact_bytes: Option<u64>,
+    /// Maximum bytes permitted for a calibration profile.
     #[arg(long)]
     max_calibration_profile_bytes: Option<u64>,
+    /// Maximum bytes permitted for an encoder-distortion profile.
     #[arg(long)]
     max_encoder_distortion_profile_bytes: Option<u64>,
+    /// Maximum detail issues retained in a verification report.
     #[arg(long)]
     max_report_issues: Option<usize>,
+    /// Maximum bytes accepted for a cached SQLite report.
     #[arg(long)]
     max_cached_report_bytes: Option<u64>,
 }

@@ -16,7 +16,7 @@ import time
 import numpy as np
 import pytest
 
-from ordvec import RankQuant, rankquant_eval_search
+from ordvec import Bitmap, RankQuant, rankquant_eval_search
 
 
 def unit_vectors(n: int, dim: int, seed: int = 0) -> np.ndarray:
@@ -115,6 +115,41 @@ def test_search_asymmetric_shape(bits):
     )
     assert scores.shape == (3, 10)
     assert indices.shape == (3, 10)
+
+
+def test_readme_quickstart_has_visible_deterministic_result(tmp_path):
+    documents = np.array(
+        [
+            [8, 7, 6, 5, 4, 3, 2, 1],
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            [8, 1, 7, 2, 6, 3, 5, 4],
+        ],
+        dtype=np.float32,
+    )
+    query = np.array([[8, 7, 6, 5, 4, 3, 2, 1]], dtype=np.float32)
+
+    index = RankQuant(dim=8, bits=1)
+    index.add(documents)
+    scores, ids = index.search_asymmetric(query, k=1)
+
+    assert int(ids[0, 0]) == 0
+    assert round(float(scores[0, 0]), 3) == 0.396
+
+    path = str(tmp_path / "quickstart.ovrq")
+    index.write(path)
+    reopened = RankQuant.load(path)
+    _, reopened_ids = reopened.search_asymmetric(query, k=1)
+    assert int(reopened_ids[0, 0]) == 0
+
+    documents64 = np.tile(documents, (1, 8))
+    query64 = np.tile(query, (1, 8))
+    reranker = RankQuant(dim=64, bits=1)
+    reranker.add(documents64)
+    probe = Bitmap(dim=64, n_top=16)
+    probe.add(documents64)
+    candidates = probe.top_m_candidates(query64[0], m=2)
+    _, subset_ids = reranker.search_asymmetric_subset(query64[0], candidates, k=1)
+    assert int(subset_ids[0]) == 0
 
 
 def test_search_asymmetric_read_concurrent_results_match_baseline():
